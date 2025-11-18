@@ -342,7 +342,7 @@ process_queue_batch(int worker_id)
 
 	/* Fetch pending items using FOR UPDATE SKIP LOCKED */
 	ret = SPI_execute(psprintf(
-		"SELECT id, chunk_id, chunk_table, content, attempts "
+		"SELECT id, chunk_id, chunk_table, content, attempts, max_attempts "
 		"FROM pgedge_vectorizer.queue "
 		"WHERE status = 'pending' "
 		"AND (next_retry_at IS NULL OR next_retry_at <= NOW()) "
@@ -360,6 +360,7 @@ process_queue_batch(int worker_id)
 		char **chunk_tables = palloc(n_items * sizeof(char *));
 		const char **contents = palloc(n_items * sizeof(char *));
 		int *attempts = palloc(n_items * sizeof(int));
+		int *max_attempts = palloc(n_items * sizeof(int));
 		float **embeddings = NULL;
 		int dim = 0;
 		bool has_retries = false;
@@ -387,6 +388,9 @@ process_queue_batch(int worker_id)
 
 			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull);
 			attempts[i] = DatumGetInt32(val);
+
+			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6, &isnull);
+			max_attempts[i] = DatumGetInt32(val);
 
 			if (attempts[i] > 0)
 				has_retries = true;
@@ -460,16 +464,33 @@ process_queue_batch(int worker_id)
 					}
 					PG_CATCH();
 					{
-						/* Mark as failed */
-						SPI_execute(psprintf(
-							"UPDATE pgedge_vectorizer.queue "
-							"SET status = 'failed', "
-							"    attempts = attempts + 1, "
-							"    error_message = 'Failed to update embedding', "
-							"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
-							"WHERE id = %ld",
-							queue_ids[idx]),
-							false, 0);
+						/* Check if retries remain */
+						if (attempts[idx] + 1 >= max_attempts[idx])
+						{
+							/* No retries left - mark as permanently failed */
+							SPI_execute(psprintf(
+								"UPDATE pgedge_vectorizer.queue "
+								"SET status = 'failed', "
+								"    attempts = attempts + 1, "
+								"    error_message = 'Failed to update embedding', "
+								"    next_retry_at = NULL "
+								"WHERE id = %ld",
+								queue_ids[idx]),
+								false, 0);
+						}
+						else
+						{
+							/* Retries remain - set back to pending with delay */
+							SPI_execute(psprintf(
+								"UPDATE pgedge_vectorizer.queue "
+								"SET status = 'pending', "
+								"    attempts = attempts + 1, "
+								"    error_message = 'Failed to update embedding', "
+								"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
+								"WHERE id = %ld",
+								queue_ids[idx]),
+								false, 0);
+						}
 
 						/* Re-throw */
 						PG_RE_THROW();
@@ -487,20 +508,40 @@ process_queue_batch(int worker_id)
 			}
 			else
 			{
-				/* Failed to generate embeddings - mark all in this batch as failed */
+				/* Failed to generate embeddings - update status based on remaining retries */
 				for (int i = 0; i < batch_count; i++)
 				{
 					int idx = batch_start + i;
-					SPI_execute(psprintf(
-						"UPDATE pgedge_vectorizer.queue "
-						"SET status = 'failed', "
-						"    attempts = attempts + 1, "
-						"    error_message = %s, "
-						"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
-						"WHERE id = %ld",
-						error_msg ? psprintf("'%s'", error_msg) : "NULL",
-						queue_ids[idx]),
-						false, 0);
+
+					/* Check if retries remain */
+					if (attempts[idx] + 1 >= max_attempts[idx])
+					{
+						/* No retries left - mark as permanently failed */
+						SPI_execute(psprintf(
+							"UPDATE pgedge_vectorizer.queue "
+							"SET status = 'failed', "
+							"    attempts = attempts + 1, "
+							"    error_message = %s, "
+							"    next_retry_at = NULL "
+							"WHERE id = %ld",
+							error_msg ? psprintf("'%s'", error_msg) : "NULL",
+							queue_ids[idx]),
+							false, 0);
+					}
+					else
+					{
+						/* Retries remain - set back to pending with exponential backoff */
+						SPI_execute(psprintf(
+							"UPDATE pgedge_vectorizer.queue "
+							"SET status = 'pending', "
+							"    attempts = attempts + 1, "
+							"    error_message = %s, "
+							"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
+							"WHERE id = %ld",
+							error_msg ? psprintf("'%s'", error_msg) : "NULL",
+							queue_ids[idx]),
+							false, 0);
+					}
 				}
 
 				elog(WARNING, "Failed to generate embeddings for batch starting at %d: %s",
@@ -514,6 +555,7 @@ process_queue_batch(int worker_id)
 		pfree(chunk_tables);
 		pfree(contents);
 		pfree(attempts);
+		pfree(max_attempts);
 	}
 
 	SPI_finish();

@@ -16,10 +16,8 @@
  */
 static EmbeddingProvider *providers[] = {
 	&OpenAIProvider,
-	/* Add more providers here as they are implemented:
-	 * &AnthropicProvider,
-	 * &OllamaProvider,
-	 */
+	&VoyageProvider,
+	&OllamaProvider,
 	NULL  /* Sentinel */
 };
 

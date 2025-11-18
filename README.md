@@ -8,7 +8,7 @@ A PostgreSQL extension for asynchronous text chunking and vector embedding gener
 
 ## Overview
 
-pgEdge Vectorizer automatically chunks text content and generates vector embeddings using background workers. It supports multiple embedding providers (OpenAI, with Anthropic and Ollama planned) and provides a simple SQL interface for enabling vectorization on any table.
+pgEdge Vectorizer automatically chunks text content and generates vector embeddings using background workers. It supports multiple embedding providers (OpenAI, Voyage AI, and Ollama) and provides a simple SQL interface for enabling vectorization on any table.
 
 ### Key Features
 
@@ -158,7 +158,7 @@ All configuration parameters can be set in `postgresql.conf` or via `ALTER SYSTE
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `pgedge_vectorizer.provider` | string | `'openai'` | Embedding provider (openai, anthropic, ollama) |
+| `pgedge_vectorizer.provider` | string | `'openai'` | Embedding provider (openai, voyage, ollama) |
 | `pgedge_vectorizer.api_key_file` | string | `'~/.pgedge-vectorizer-llm-api-key'` | Path to API key file |
 | `pgedge_vectorizer.api_url` | string | `'https://api.openai.com/v1'` | API endpoint URL |
 | `pgedge_vectorizer.model` | string | `'text-embedding-3-small'` | Embedding model name |
@@ -417,8 +417,8 @@ SET client_min_messages = DEBUG1;
 
 ## Roadmap
 
-- [ ] Support for Anthropic embedding models
-- [ ] Support for Ollama (local models)
+- [x] Support for Voyage AI embedding models
+- [x] Support for Ollama (local models)
 - [ ] Semantic chunking strategy
 - [ ] Markdown-aware chunking
 - [ ] Sentence-based chunking

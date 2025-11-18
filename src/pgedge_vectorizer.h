@@ -102,6 +102,12 @@ void register_embedding_providers(void);
 /* provider_openai.c */
 extern EmbeddingProvider OpenAIProvider;
 
+/* provider_voyage.c */
+extern EmbeddingProvider VoyageProvider;
+
+/* provider_ollama.c */
+extern EmbeddingProvider OllamaProvider;
+
 /* tokenizer.c */
 int count_tokens(const char *text, const char *model);
 int *tokenize_text(const char *text, const char *model, int *token_count);

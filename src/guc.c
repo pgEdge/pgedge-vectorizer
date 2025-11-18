@@ -67,7 +67,8 @@ pgedge_vectorizer_init_guc(void)
 
 	DefineCustomStringVariable("pgedge_vectorizer.api_url",
 								"API endpoint URL",
-								"Custom API endpoint URL. Used for Ollama or custom OpenAI-compatible endpoints.",
+								"API endpoint URL. Defaults: OpenAI=https://api.openai.com/v1, "
+								"Voyage=https://api.voyageai.com/v1, Ollama=http://localhost:11434",
 								&pgedge_vectorizer_api_url,
 								"https://api.openai.com/v1",
 								PGC_SIGHUP,
@@ -76,8 +77,10 @@ pgedge_vectorizer_init_guc(void)
 
 	DefineCustomStringVariable("pgedge_vectorizer.model",
 								"Embedding model name",
-								"Model to use for generating embeddings. "
-								"Examples: text-embedding-3-small, text-embedding-3-large",
+								"Model to use for embeddings. Examples: "
+								"OpenAI: text-embedding-3-small, text-embedding-3-large; "
+								"Voyage: voyage-2, voyage-large-2, voyage-code-2; "
+								"Ollama: nomic-embed-text, mxbai-embed-large",
 								&pgedge_vectorizer_model,
 								"text-embedding-3-small",
 								PGC_SIGHUP,

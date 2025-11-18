@@ -6,7 +6,10 @@
       "Bash(psql:*)",
       "Bash(sudo make install:*)",
       "Bash(brew services:*)",
-      "Bash(git check-ignore:*)"
+      "Bash(git check-ignore:*)",
+      "Bash(curl:*)",
+      "Bash(test:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

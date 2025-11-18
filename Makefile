@@ -12,13 +12,15 @@ OBJS = src/pgedge_vectorizer.o \
        src/tokenizer.o \
        src/provider.o \
        src/provider_openai.o \
+       src/provider_voyage.o \
+       src/provider_ollama.o \
        src/worker.o \
        src/queue.o
 
 DATA = sql/$(EXTENSION)--$(EXTVERSION).sql
 
 # Test configuration for pg_regress
-REGRESS = setup chunking queue vectorization multi_column maintenance edge_cases worker cleanup
+REGRESS = setup chunking queue vectorization multi_column maintenance edge_cases providers worker cleanup
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # Documentation files (if any)
