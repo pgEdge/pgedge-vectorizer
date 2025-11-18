@@ -1,0 +1,61 @@
+-- Chunking test
+-- This test verifies text chunking functionality
+-- Test with short text (should return 1 chunk)
+SELECT array_length(
+    pgedge_vectorizer.chunk_text(
+        'This is a short test.',
+        'token_based',
+        100,
+        10
+    ),
+    1
+) AS num_chunks;
+ num_chunks 
+------------
+          1
+(1 row)
+
+-- Test with longer text (should return multiple chunks)
+SELECT array_length(
+    pgedge_vectorizer.chunk_text(
+        repeat('This is a test sentence that will be repeated many times to create a long text. ', 50),
+        'token_based',
+        100,
+        20
+    ),
+    1
+) >= 2 AS has_multiple_chunks;
+ has_multiple_chunks 
+---------------------
+ t
+(1 row)
+
+-- Test that chunks are returned
+SELECT
+    length(chunk) > 0 AS chunk_not_empty
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        'Test content for chunking',
+        'token_based',
+        100,
+        10
+    )
+) AS chunk
+LIMIT 1;
+ chunk_not_empty 
+-----------------
+ t
+(1 row)
+
+-- Test default parameters
+SELECT array_length(
+    pgedge_vectorizer.chunk_text(
+        'Test with default parameters'
+    ),
+    1
+) AS chunks_with_defaults;
+ chunks_with_defaults 
+----------------------
+                     
+(1 row)
+

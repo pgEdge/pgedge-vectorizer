@@ -1,0 +1,24 @@
+-- Cleanup test
+-- This test cleans up after other tests
+-- Clear any remaining queue entries
+DELETE FROM pgedge_vectorizer.queue;
+-- Verify queue is empty
+SELECT COUNT(*) AS final_queue_count FROM pgedge_vectorizer.queue;
+ final_queue_count 
+-------------------
+                 0
+(1 row)
+
+-- Test cleanup functions one more time
+SELECT pgedge_vectorizer.clear_completed(0) >= 0 AS clear_completed;
+ clear_completed 
+-----------------
+ t
+(1 row)
+
+SELECT pgedge_vectorizer.retry_failed(0) >= 0 AS retry_failed;
+ retry_failed 
+--------------
+ t
+(1 row)
+

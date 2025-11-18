@@ -1,0 +1,92 @@
+-- Edge cases test
+-- This test verifies handling of edge cases
+-- Create a test table
+CREATE TABLE edge_test (
+    id BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+-- Enable vectorization
+SELECT pgedge_vectorizer.enable_vectorization(
+    'edge_test'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Vectorization enabled: edge_test -> edge_test_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Test 1: Empty string (should not create chunks)
+INSERT INTO edge_test (content) VALUES ('');
+SELECT COUNT(*) AS chunks_for_empty FROM edge_test_content_chunks WHERE source_id = 1;
+ chunks_for_empty 
+------------------
+                0
+(1 row)
+
+-- Test 2: NULL value (should not create chunks)
+INSERT INTO edge_test (content) VALUES (NULL);
+SELECT COUNT(*) AS chunks_for_null FROM edge_test_content_chunks WHERE source_id = 2;
+ chunks_for_null 
+-----------------
+               0
+(1 row)
+
+-- Test 3: Whitespace only (should not create chunks)
+INSERT INTO edge_test (content) VALUES ('   ');
+SELECT COUNT(*) AS chunks_for_whitespace FROM edge_test_content_chunks WHERE source_id = 3;
+ chunks_for_whitespace 
+-----------------------
+                     0
+(1 row)
+
+-- Test 4: Single word (should create 1 chunk)
+INSERT INTO edge_test (content) VALUES ('Word');
+SELECT COUNT(*) AS chunks_for_word FROM edge_test_content_chunks WHERE source_id = 4;
+ chunks_for_word 
+-----------------
+               1
+(1 row)
+
+-- Test 5: Very long text (should create multiple chunks)
+INSERT INTO edge_test (content)
+VALUES (repeat('This is a test sentence that will be repeated to create a very long document. ', 100));
+SELECT COUNT(*) > 1 AS multiple_chunks FROM edge_test_content_chunks WHERE source_id = 5;
+ multiple_chunks 
+-----------------
+ t
+(1 row)
+
+-- Test 6: Update to empty (should delete chunks)
+UPDATE edge_test SET content = '' WHERE id = 4;
+SELECT COUNT(*) AS chunks_after_empty_update FROM edge_test_content_chunks WHERE source_id = 4;
+ chunks_after_empty_update 
+---------------------------
+                         0
+(1 row)
+
+-- Test 7: Update NULL to content (should create chunks)
+UPDATE edge_test SET content = 'New content' WHERE id = 2;
+SELECT COUNT(*) > 0 AS chunks_after_null_update FROM edge_test_content_chunks WHERE source_id = 2;
+ chunks_after_null_update 
+--------------------------
+ t
+(1 row)
+
+-- Clean up
+DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'edge_test_content_chunks';
+SELECT pgedge_vectorizer.disable_vectorization('edge_test'::regclass, 'content', true);
+NOTICE:  Vectorization disabled and chunk table dropped: edge_test_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE edge_test;

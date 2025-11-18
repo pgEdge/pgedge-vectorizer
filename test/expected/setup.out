@@ -1,0 +1,36 @@
+-- Setup test
+-- This test verifies basic extension installation
+-- Load extensions
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION pgedge_vectorizer;
+-- Verify schema created
+SELECT nspname FROM pg_namespace WHERE nspname = 'pgedge_vectorizer';
+      nspname      
+-------------------
+ pgedge_vectorizer
+(1 row)
+
+-- Verify queue table created
+SELECT tablename FROM pg_tables
+WHERE schemaname = 'pgedge_vectorizer' AND tablename = 'queue';
+ tablename 
+-----------
+ queue
+(1 row)
+
+-- Check configuration
+SELECT setting, value
+FROM pgedge_vectorizer.show_config()
+WHERE setting IN (
+    'pgedge_vectorizer.provider',
+    'pgedge_vectorizer.default_chunk_size',
+    'pgedge_vectorizer.default_chunk_overlap'
+)
+ORDER BY setting;
+                 setting                 | value  
+-----------------------------------------+--------
+ pgedge_vectorizer.default_chunk_overlap | 50
+ pgedge_vectorizer.default_chunk_size    | 400
+ pgedge_vectorizer.provider              | openai
+(3 rows)
+

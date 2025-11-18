@@ -1,0 +1,28 @@
+-- Worker test
+-- This test verifies worker-related views and functions
+-- Check that background workers are configured
+SHOW pgedge_vectorizer.num_workers;
+ pgedge_vectorizer.num_workers 
+-------------------------------
+ 2
+(1 row)
+
+-- Verify worker settings
+SHOW pgedge_vectorizer.batch_size;
+ pgedge_vectorizer.batch_size 
+------------------------------
+ 10
+(1 row)
+
+SHOW pgedge_vectorizer.max_retries;
+ pgedge_vectorizer.max_retries 
+-------------------------------
+ 3
+(1 row)
+
+SHOW pgedge_vectorizer.worker_poll_interval;
+ pgedge_vectorizer.worker_poll_interval 
+----------------------------------------
+ 1000
+(1 row)
+

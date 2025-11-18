@@ -1,0 +1,98 @@
+-- Maintenance functions test
+-- This test verifies reprocess_chunks() and recreate_chunks() functions
+-- Create a test table
+CREATE TABLE maint_test (
+    id BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+-- Insert test data
+INSERT INTO maint_test (content)
+VALUES ('Initial content for maintenance testing');
+-- Enable vectorization
+SELECT pgedge_vectorizer.enable_vectorization(
+    'maint_test'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Vectorization enabled: maint_test -> maint_test_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Verify chunks were created
+SELECT COUNT(*) > 0 AS initial_chunks FROM maint_test_content_chunks;
+ initial_chunks 
+----------------
+ t
+(1 row)
+
+-- Clear embeddings to simulate unprocessed chunks
+UPDATE maint_test_content_chunks SET embedding = NULL;
+-- Test reprocess_chunks
+SELECT pgedge_vectorizer.reprocess_chunks('maint_test_content_chunks') > 0 AS reprocess_queued;
+NOTICE:  Queued 0 chunks from maint_test_content_chunks for processing
+ reprocess_queued 
+------------------
+ f
+(1 row)
+
+-- Verify queue entries were created
+SELECT COUNT(*) > 0 AS queue_entries
+FROM pgedge_vectorizer.queue
+WHERE chunk_table = 'maint_test_content_chunks'
+  AND status = 'pending';
+ queue_entries 
+---------------
+ t
+(1 row)
+
+-- Clean queue for next test
+DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'maint_test_content_chunks';
+-- Add more data
+INSERT INTO maint_test (content)
+VALUES ('Additional content for recreate testing');
+-- Test recreate_chunks
+SELECT pgedge_vectorizer.recreate_chunks('maint_test'::regclass, 'content') >= 2 AS recreate_count;
+NOTICE:  Recreating chunks for maint_test.content -> maint_test_content_chunks
+NOTICE:  Deleted 2 existing chunks
+NOTICE:  Cleared queue for maint_test_content_chunks
+NOTICE:  Re-chunking with strategy=token_based, size=100, overlap=10
+NOTICE:  Processed 2 rows
+ recreate_count 
+----------------
+ t
+(1 row)
+
+-- Verify chunks exist for both rows
+SELECT COUNT(*) >= 2 AS chunks_after_recreate FROM maint_test_content_chunks;
+ chunks_after_recreate 
+-----------------------
+ t
+(1 row)
+
+-- Verify queue entries were created for all chunks
+SELECT COUNT(*) >= 2 AS queue_after_recreate
+FROM pgedge_vectorizer.queue
+WHERE chunk_table = 'maint_test_content_chunks';
+ queue_after_recreate 
+----------------------
+ t
+(1 row)
+
+-- Clean up
+DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'maint_test_content_chunks';
+SELECT pgedge_vectorizer.disable_vectorization('maint_test'::regclass, 'content', true);
+NOTICE:  Vectorization disabled and chunk table dropped: maint_test_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE maint_test;

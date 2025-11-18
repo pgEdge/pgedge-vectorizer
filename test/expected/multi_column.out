@@ -1,0 +1,126 @@
+-- Multi-column vectorization test
+-- This test verifies that multiple columns can be vectorized on the same table
+-- Create a test table with multiple text columns
+CREATE TABLE multi_test (
+    id BIGSERIAL PRIMARY KEY,
+    title TEXT,
+    description TEXT,
+    body TEXT
+);
+-- Enable vectorization on first column
+SELECT pgedge_vectorizer.enable_vectorization(
+    'multi_test'::regclass,
+    'title',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Vectorization enabled: multi_test -> multi_test_title_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Verify first chunk table was created
+SELECT tablename FROM pg_tables
+WHERE tablename = 'multi_test_title_chunks';
+        tablename        
+-------------------------
+ multi_test_title_chunks
+(1 row)
+
+-- Verify first trigger was created
+SELECT tgname FROM pg_trigger
+WHERE tgname = 'multi_test_title_vectorization_trigger';
+                 tgname                 
+----------------------------------------
+ multi_test_title_vectorization_trigger
+(1 row)
+
+-- Enable vectorization on second column
+SELECT pgedge_vectorizer.enable_vectorization(
+    'multi_test'::regclass,
+    'description',
+    'token_based',
+    200,
+    20,
+    1536
+);
+NOTICE:  Vectorization enabled: multi_test -> multi_test_description_chunks
+NOTICE:  Strategy: token_based, chunk_size: 200, overlap: 20
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Verify second chunk table was created
+SELECT tablename FROM pg_tables
+WHERE tablename = 'multi_test_description_chunks';
+           tablename           
+-------------------------------
+ multi_test_description_chunks
+(1 row)
+
+-- Verify second trigger was created
+SELECT tgname FROM pg_trigger
+WHERE tgname = 'multi_test_description_vectorization_trigger';
+                    tgname                    
+----------------------------------------------
+ multi_test_description_vectorization_trigger
+(1 row)
+
+-- Verify both triggers exist
+SELECT COUNT(*) AS trigger_count FROM pg_trigger
+WHERE tgname LIKE 'multi_test%vectorization%';
+ trigger_count 
+---------------
+             2
+(1 row)
+
+-- Insert test data
+INSERT INTO multi_test (title, description, body)
+VALUES ('Test Title', 'Test Description', 'Test Body');
+-- Verify chunks were created for both columns
+SELECT COUNT(*) > 0 AS title_chunks_exist FROM multi_test_title_chunks;
+ title_chunks_exist 
+--------------------
+ t
+(1 row)
+
+SELECT COUNT(*) > 0 AS description_chunks_exist FROM multi_test_description_chunks;
+ description_chunks_exist 
+--------------------------
+ t
+(1 row)
+
+-- Disable one column
+SELECT pgedge_vectorizer.disable_vectorization('multi_test'::regclass, 'title', true);
+NOTICE:  Vectorization disabled and chunk table dropped: multi_test_title_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+-- Verify only one trigger remains
+SELECT COUNT(*) AS remaining_triggers FROM pg_trigger
+WHERE tgname LIKE 'multi_test%vectorization%';
+ remaining_triggers 
+--------------------
+                  1
+(1 row)
+
+-- Clean up
+SELECT pgedge_vectorizer.disable_vectorization('multi_test'::regclass, 'description', true);
+NOTICE:  Vectorization disabled and chunk table dropped: multi_test_description_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE multi_test;

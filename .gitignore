@@ -1,0 +1,65 @@
+# Build artifacts
+*.o
+*.so
+*.bc
+*.a
+*.dylib
+*.dll
+
+# Extension files
+pgedge_vectorizer.so
+pgedge_vectorizer.dylib
+*.sql.in
+
+# Object files
+src/*.o
+src/*.bc
+
+# Test outputs
+test/regression.diffs
+test/regression.out
+test/results/*.out
+test/results/*.diff
+test/tmp_check/
+test/isolationcheck_tmp_check/
+
+# PostgreSQL extension build files
+*.control.in
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor files
+*~
+*.swp
+*.swo
+*.bak
+.vscode/
+.idea/
+*.sublime-*
+
+# Compiled documentation
+docs/site/
+
+# Dependency directories
+node_modules/
+venv/
+__pycache__/
+
+# Local configuration
+*.local
+.env
+
+# Core dumps
+core
+core.*
+
+# Development files
+*.log
+*.tmp
