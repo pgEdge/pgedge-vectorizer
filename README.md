@@ -1,5 +1,9 @@
 # pgEdge Vectorizer
 
+[![CI](https://github.com/pgEdge/pgedge-vectorizer/actions/workflows/ci.yml/badge.svg)](https://github.com/pgEdge/pgedge-vectorizer/actions/workflows/ci.yml)
+[![PostgreSQL 14+](https://img.shields.io/badge/PostgreSQL-14%2B-blue.svg)](https://www.postgresql.org/)
+[![License](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](LICENSE.md)
+
 A PostgreSQL extension for asynchronous text chunking and vector embedding generation.
 
 ## Overview
@@ -385,9 +389,24 @@ make install
 
 ### Running Tests
 
+The extension includes a comprehensive test suite with 9 test files covering all functionality:
+
 ```bash
 make installcheck
 ```
+
+Tests cover:
+
+- Extension installation and configuration
+- Text chunking with various strategies
+- Queue management and monitoring views
+- Vectorization enable/disable
+- Multi-column vectorization
+- Maintenance functions (reprocess, recreate)
+- Edge cases (empty, NULL, whitespace handling)
+- Worker configuration
+
+All tests must pass on PostgreSQL 14-17 before merging changes.
 
 ### Debugging
 
@@ -415,13 +434,23 @@ PostgreSQL License (see LICENSE.md)
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Quick checklist:
+
+- All tests must pass (`make installcheck`)
+- Code follows PostgreSQL conventions
+- New features include tests
+- Documentation is updated
 
 ## Support
 
 For issues and questions:
-- GitHub Issues: https://github.com/pgEdge/pgedge-vectorizer/issues
-- Documentation: https://pgedge.github.io/pgedge-vectorizer/
+
+- **GitHub**: https://github.com/pgEdge/pgedge-vectorizer
+- **Issues**: https://github.com/pgEdge/pgedge-vectorizer/issues
+- **Documentation**: https://github.com/pgEdge/pgedge-vectorizer/blob/main/docs/index.md
+
 
 ## Credits
 

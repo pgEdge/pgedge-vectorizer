@@ -587,4 +587,4 @@ Copyright (c) 2025, pgEdge, Inc.
 
 - **GitHub**: https://github.com/pgEdge/pgedge-vectorizer
 - **Issues**: https://github.com/pgEdge/pgedge-vectorizer/issues
-- **Documentation**: https://pgedge.github.io/pgedge-vectorizer
+- **Documentation**: https://github.com/pgEdge/pgedge-vectorizer/blob/main/docs/index.md
