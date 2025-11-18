@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test:
+    name: PostgreSQL ${{ matrix.pg }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        pg: [14, 15, 16, 17]
+        include:
+          - os: macos-latest
+            pg: 17
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }} \
+            libcurl4-openssl-dev \
+            build-essential
+
+      - name: Install PostgreSQL (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install postgresql@${{ matrix.pg }} curl
+          brew services start postgresql@${{ matrix.pg }}
+          echo "/opt/homebrew/opt/postgresql@${{ matrix.pg }}/bin" >> $GITHUB_PATH
+          echo "PG_CONFIG=/opt/homebrew/opt/postgresql@${{ matrix.pg }}/bin/pg_config" >> $GITHUB_ENV
+
+      - name: Start PostgreSQL (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo systemctl start postgresql
+          sudo -u postgres createuser -s $USER
+          createdb $USER
+          echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config" >> $GITHUB_ENV
+
+      - name: Install pgvector
+        run: |
+          git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git /tmp/pgvector
+          cd /tmp/pgvector
+          make PG_CONFIG=$PG_CONFIG
+          sudo make install PG_CONFIG=$PG_CONFIG
+
+      - name: Build extension
+        run: |
+          make PG_CONFIG=$PG_CONFIG
+          sudo make install PG_CONFIG=$PG_CONFIG
+
+      - name: Run tests
+        run: |
+          make installcheck PG_CONFIG=$PG_CONFIG
+
+      - name: Show regression diffs on failure
+        if: failure()
+        run: |
+          if [ -f test/regression.diffs ]; then
+            cat test/regression.diffs
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-pg${{ matrix.pg }}-${{ matrix.os }}
+          path: |
+            test/regression.diffs
+            test/regression.out
+            test/results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for trailing whitespace
+        run: |
+          ! git grep -I --line-number --perl-regexp '\s+$' -- '*.c' '*.h' '*.sql' || \
+          (echo "Found trailing whitespace in the lines above" && false)
+
+      - name: Check for tabs in SQL files
+        run: |
+          ! git grep -I --line-number $'\t' -- '*.sql' || \
+          (echo "Found tabs in SQL files (use spaces)" && false)
+
+      - name: Validate Makefile
+        run: |
+          make --dry-run help || (echo "Makefile validation failed" && false)
