@@ -2,7 +2,7 @@
 # Supports PostgreSQL 14-17
 
 EXTENSION = pgedge_vectorizer
-EXTVERSION = 1.0
+EXTVERSION = 1.0-alpha1
 
 # Extension module and data files
 MODULE_big = $(EXTENSION)
