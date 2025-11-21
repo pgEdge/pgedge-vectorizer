@@ -13,6 +13,7 @@ plugins:
 theme:
   name: material
   custom_dir: docs/overrides
+  favicon: img/favicon.ico
 
   logo_dark_mode: 'img/logo-dark.png'
   logo_light_mode: 'img/logo-light.png'
