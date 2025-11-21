@@ -6,7 +6,7 @@
  * Voyage AI provides high-quality embeddings. The API is compatible
  * with OpenAI's API format.
  *
- * Copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */
@@ -80,12 +80,12 @@ voyage_init(char **error_msg)
 	}
 
 	provider_initialized = true;
-	elog(DEBUG1, "Anthropic (Voyage AI) provider initialized successfully");
+	elog(DEBUG1, "Voyage AI provider initialized successfully");
 	return true;
 }
 
 /*
- * Cleanup Anthropic provider
+ * Cleanup Voyage AI provider
  */
 static void
 voyage_cleanup(void)
@@ -102,7 +102,7 @@ voyage_cleanup(void)
 
 	curl_global_cleanup();
 	provider_initialized = false;
-	elog(DEBUG1, "Anthropic provider cleaned up");
+	elog(DEBUG1, "Voyage AI provider cleaned up");
 }
 
 /*

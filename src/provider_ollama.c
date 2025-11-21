@@ -6,7 +6,7 @@
  * Ollama allows running local embedding models. This provider connects to
  * a local Ollama instance (default: http://localhost:11434).
  *
- * Copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

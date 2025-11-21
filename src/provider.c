@@ -5,7 +5,7 @@
  *
  * This file implements the provider registry and selection logic.
  *
- * Copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

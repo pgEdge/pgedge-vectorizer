@@ -12,17 +12,17 @@ representing the text. A trigger will also be created on the source table to
 record the details of the update or insert in a queue table, and send a NOTIFY 
 message to inform a background worker that there is work to do.
 
-The background worker will run under PostgreSQL's normal infrastructure, 
+The background worker will run under PostgreSQL's normal infrastructure,
 restarting if needed after a crash. It will connect to one or more of the
-databases on the server, and listen for the NOTIFY messages sent by the 
-trigger. On receipt of a notification it will query the queue table for 
-information on what table, row, and column(s) have changed, and read the 
-required data. It will chunk the data and generate vector embeddings using 
-a configured model via Ollama, OpenAI, or Anthropic, with API keys stored
+databases on the server, and listen for the NOTIFY messages sent by the
+trigger. On receipt of a notification it will query the queue table for
+information on what table, row, and column(s) have changed, and read the
+required data. It will chunk the data and generate vector embeddings using
+a configured model via Ollama, OpenAI, or Voyage AI, with API keys stored
 in a dedicated file outside of the data directory on the PostgreSQL server,
 pointed to by a GUC variable. All other LLM configuration will be stored
-directly in GUCs. Once the data is chuncked and embeddings generated, they 
-will be inserted or updated in the appropriate chunk table for use by the 
+directly in GUCs. Once the data is chuncked and embeddings generated, they
+will be inserted or updated in the appropriate chunk table for use by the
 user.
 
 For more information see BRAINSTORMING.md in the root of the project,

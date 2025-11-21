@@ -6,7 +6,7 @@
  * This file defines all configuration parameters for the pgedge_vectorizer
  * extension.
  *
- * Copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */
@@ -47,7 +47,7 @@ pgedge_vectorizer_init_guc(void)
 {
 	/* Provider configuration */
 	DefineCustomStringVariable("pgedge_vectorizer.provider",
-								"Embedding provider to use (openai, anthropic, ollama)",
+								"Embedding provider to use (openai, voyage, ollama)",
 								"Determines which API provider is used for generating embeddings.",
 								&pgedge_vectorizer_provider,
 								"openai",

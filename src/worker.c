@@ -6,7 +6,7 @@
  * This file implements the background worker that processes the embedding
  * queue and generates embeddings using configured providers.
  *
- * Copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

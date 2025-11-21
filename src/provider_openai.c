@@ -5,7 +5,7 @@
  *
  * This file implements the OpenAI embedding API integration using libcurl.
  *
- * Copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

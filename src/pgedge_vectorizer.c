@@ -7,7 +7,7 @@
  * It coordinates GUC setup, provider registration, and background worker
  * registration.
  *
- * Copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

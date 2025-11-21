@@ -14,7 +14,7 @@ pgEdge Vectorizer automatically chunks text content and generates vector embeddi
 
 - **Automatic Chunking**: Intelligently splits text into chunks with configurable strategies
 - **Async Processing**: Background workers process embeddings without blocking your application
-- **Multiple Providers**: Support for OpenAI (with more providers coming soon)
+- **Multiple Providers**: Support for OpenAI, Voyage AI, and Ollama (local embeddings)
 - **Configurable**: Extensive GUC parameters for fine-tuning behavior
 - **Batching**: Efficient batch processing of embeddings
 - **Retry Logic**: Automatic retry with exponential backoff for failed embeddings
@@ -25,7 +25,7 @@ pgEdge Vectorizer automatically chunks text content and generates vector embeddi
 - PostgreSQL 14 or later
 - [pgvector](https://github.com/pgvector/pgvector) extension
 - libcurl development files
-- OpenAI API key (for OpenAI provider)
+- API key (for OpenAI or Voyage AI providers; not needed for Ollama)
 
 ## Installation
 
@@ -456,4 +456,4 @@ For issues and questions:
 
 Developed by pgEdge, Inc.
 
-Copyright (c) 2025, pgEdge, Inc.
+Portions copyright (c) 2025, pgEdge, Inc.

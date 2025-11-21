@@ -5,7 +5,7 @@
  *
  * This file implements various text chunking strategies for vectorization.
  *
- * Copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

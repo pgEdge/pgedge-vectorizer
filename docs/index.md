@@ -10,7 +10,7 @@ pgEdge Vectorizer is a PostgreSQL extension that automatically chunks text conte
 
 - **Automatic Chunking**: Intelligently splits text into optimal-sized chunks
 - **Async Processing**: Background workers handle embedding generation without blocking
-- **Provider Abstraction**: Easy switching between OpenAI, Anthropic, and Ollama
+- **Provider Abstraction**: Easy switching between OpenAI, Voyage AI, and Ollama
 - **Batching**: Efficient batch processing for better API usage
 - **Retry Logic**: Automatic retry with exponential backoff
 - **Monitoring**: Built-in views for queue and worker monitoring
@@ -645,7 +645,7 @@ The test suite includes 9 test files covering all functionality:
 
 PostgreSQL License
 
-Copyright (c) 2025, pgEdge, Inc.
+Portions copyright (c) 2025, pgEdge, Inc.
 
 ## Support
 
