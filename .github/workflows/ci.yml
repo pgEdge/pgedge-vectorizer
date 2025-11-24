@@ -90,7 +90,9 @@ jobs:
           done
           # If we get here, PostgreSQL didn't start
           echo "PostgreSQL failed to start or accept connections!"
-          cat /tmp/pg_restart.log || true
+          echo "=== PostgreSQL startup log ==="
+          sudo cat /tmp/pg_restart.log || true
+          echo "=== Running PostgreSQL processes ==="
           ps aux | grep postgres || true
           exit 1
 
