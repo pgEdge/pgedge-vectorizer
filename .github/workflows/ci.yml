@@ -80,10 +80,17 @@ jobs:
           if ! sudo systemctl is-active --quiet postgresql; then
             echo "PostgreSQL failed to start!"
             sudo systemctl status postgresql
-            sudo tail -50 /var/log/postgresql/postgresql-${{ matrix.pg }}-main.log || true
+            sudo tail -100 /var/log/postgresql/postgresql-${{ matrix.pg }}-main.log || true
             exit 1
           fi
-          echo "PostgreSQL is running successfully"
+          # Test that we can connect and the extension loads
+          if ! psql postgres -c "SELECT 1" > /dev/null 2>&1; then
+            echo "Cannot connect to PostgreSQL!"
+            sudo systemctl status postgresql
+            sudo tail -100 /var/log/postgresql/postgresql-${{ matrix.pg }}-main.log || true
+            exit 1
+          fi
+          echo "PostgreSQL is running and accepting connections"
 
       - name: Configure PostgreSQL (macOS)
         if: runner.os == 'macOS'
