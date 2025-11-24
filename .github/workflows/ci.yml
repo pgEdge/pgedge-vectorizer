@@ -70,27 +70,29 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           # Get PostgreSQL config file location
-          PGCONF=$(createdb --version > /dev/null && psql -t -c "SHOW config_file" postgres | xargs)
+          PGCONF=$(psql -t -c "SHOW config_file" postgres | xargs)
           # Add shared_preload_libraries
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
-          # Restart PostgreSQL cluster (not the wrapper service)
-          sudo systemctl restart postgresql@${{ matrix.pg }}-main
-          sleep 3
-          # Check if PostgreSQL is running
-          if ! sudo systemctl is-active --quiet postgresql@${{ matrix.pg }}-main; then
-            echo "PostgreSQL failed to start!"
-            sudo systemctl status postgresql@${{ matrix.pg }}-main
-            sudo journalctl -u postgresql@${{ matrix.pg }}-main -n 100 --no-pager
-            exit 1
-          fi
+          # Get data directory and bindir
+          PGDATA=$(psql -t -c "SHOW data_directory" postgres | xargs)
+          PGBIN=$($PG_CONFIG --bindir)
+          # Restart PostgreSQL using pg_ctl
+          sudo -u postgres $PGBIN/pg_ctl restart -D $PGDATA -l /tmp/pg_restart.log
+          sleep 5
           # Test that we can connect and the extension loads
-          if ! psql postgres -c "SELECT 1" > /dev/null 2>&1; then
-            echo "Cannot connect to PostgreSQL!"
-            sudo systemctl status postgresql@${{ matrix.pg }}-main
-            sudo journalctl -u postgresql@${{ matrix.pg }}-main -n 100 --no-pager
-            exit 1
-          fi
-          echo "PostgreSQL is running and accepting connections"
+          for i in {1..10}; do
+            if psql postgres -c "SELECT 1" > /dev/null 2>&1; then
+              echo "PostgreSQL is running and accepting connections"
+              exit 0
+            fi
+            echo "Waiting for PostgreSQL to start (attempt $i/10)..."
+            sleep 2
+          done
+          # If we get here, PostgreSQL didn't start
+          echo "PostgreSQL failed to start or accept connections!"
+          cat /tmp/pg_restart.log || true
+          ps aux | grep postgres || true
+          exit 1
 
       - name: Configure PostgreSQL (macOS)
         if: runner.os == 'macOS'
