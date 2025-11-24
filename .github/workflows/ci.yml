@@ -73,21 +73,21 @@ jobs:
           PGCONF=$(createdb --version > /dev/null && psql -t -c "SHOW config_file" postgres | xargs)
           # Add shared_preload_libraries
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
-          # Restart PostgreSQL
-          sudo systemctl restart postgresql
+          # Restart PostgreSQL cluster (not the wrapper service)
+          sudo systemctl restart postgresql@${{ matrix.pg }}-main
           sleep 3
           # Check if PostgreSQL is running
-          if ! sudo systemctl is-active --quiet postgresql; then
+          if ! sudo systemctl is-active --quiet postgresql@${{ matrix.pg }}-main; then
             echo "PostgreSQL failed to start!"
-            sudo systemctl status postgresql
-            sudo tail -100 /var/log/postgresql/postgresql-${{ matrix.pg }}-main.log || true
+            sudo systemctl status postgresql@${{ matrix.pg }}-main
+            sudo journalctl -u postgresql@${{ matrix.pg }}-main -n 100 --no-pager
             exit 1
           fi
           # Test that we can connect and the extension loads
           if ! psql postgres -c "SELECT 1" > /dev/null 2>&1; then
             echo "Cannot connect to PostgreSQL!"
-            sudo systemctl status postgresql
-            sudo tail -100 /var/log/postgresql/postgresql-${{ matrix.pg }}-main.log || true
+            sudo systemctl status postgresql@${{ matrix.pg }}-main
+            sudo journalctl -u postgresql@${{ matrix.pg }}-main -n 100 --no-pager
             exit 1
           fi
           echo "PostgreSQL is running and accepting connections"
