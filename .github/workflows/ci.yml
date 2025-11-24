@@ -49,8 +49,8 @@ jobs:
       - name: Start PostgreSQL (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          # Start the version-specific PostgreSQL cluster
-          sudo pg_ctlcluster ${{ matrix.pg }} main start
+          # Start the version-specific PostgreSQL service
+          sudo systemctl start postgresql@${{ matrix.pg }}-main
           sudo -u postgres createuser -s $USER
           createdb $USER
           echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config" >> $GITHUB_ENV
@@ -74,8 +74,8 @@ jobs:
           PGCONF=$(psql -t -c "SHOW config_file" postgres | xargs)
           # Add shared_preload_libraries
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
-          # Restart PostgreSQL using version-specific pg_ctlcluster
-          sudo pg_ctlcluster ${{ matrix.pg }} main restart
+          # Restart PostgreSQL using version-specific systemd service
+          sudo systemctl restart postgresql@${{ matrix.pg }}-main
           sleep 2
           # Verify PostgreSQL is running and extension loaded
           if psql postgres -c "SELECT 1" > /dev/null 2>&1; then
