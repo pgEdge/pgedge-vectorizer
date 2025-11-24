@@ -66,6 +66,21 @@ jobs:
           make PG_CONFIG=$PG_CONFIG
           sudo make install PG_CONFIG=$PG_CONFIG
 
+      - name: Configure PostgreSQL (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo sed -i "s/^#shared_preload_libraries = .*/shared_preload_libraries = 'pgedge_vectorizer'/" /etc/postgresql/${{ matrix.pg}}/main/postgresql.conf
+          sudo systemctl restart postgresql
+          sleep 2
+
+      - name: Configure PostgreSQL (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          PGDATA=$(psql -t -c "SHOW data_directory" | xargs)
+          echo "shared_preload_libraries = 'pgedge_vectorizer'" >> $PGDATA/postgresql.conf
+          brew services restart postgresql@${{ matrix.pg }}
+          sleep 5
+
       - name: Run tests
         run: |
           make installcheck PG_CONFIG=$PG_CONFIG
