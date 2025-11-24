@@ -69,15 +69,16 @@ jobs:
       - name: Configure PostgreSQL (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          sudo sed -i "s/^#shared_preload_libraries = .*/shared_preload_libraries = 'pgedge_vectorizer'/" /etc/postgresql/${{ matrix.pg}}/main/postgresql.conf
+          PGCONF=$(psql -U postgres -t -c "SHOW config_file" | xargs)
+          echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
           sudo systemctl restart postgresql
           sleep 2
 
       - name: Configure PostgreSQL (macOS)
         if: runner.os == 'macOS'
         run: |
-          PGDATA=$(psql -t -c "SHOW data_directory" | xargs)
-          echo "shared_preload_libraries = 'pgedge_vectorizer'" >> $PGDATA/postgresql.conf
+          PGCONF=$(psql postgres -t -c "SHOW config_file" | xargs)
+          echo "shared_preload_libraries = 'pgedge_vectorizer'" >> $PGCONF
           brew services restart postgresql@${{ matrix.pg }}
           sleep 5
 
