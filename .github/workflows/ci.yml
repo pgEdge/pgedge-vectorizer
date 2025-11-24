@@ -70,9 +70,10 @@ jobs:
           if ! pg_lsclusters | grep -q "^${{ matrix.pg }} *main"; then
             sudo pg_createcluster ${{ matrix.pg }} main --start
           fi
-          # Get the cluster port
+          # Get the cluster port and export it for tests
           PGPORT=$(pg_lsclusters -h | awk '$1==${{ matrix.pg }} && $2=="main" {print $3}')
           echo "PostgreSQL cluster running on port: $PGPORT"
+          echo "PGPORT=$PGPORT" >> $GITHUB_ENV
           # Configure PostgreSQL
           PGCONF=/etc/postgresql/${{ matrix.pg }}/main/postgresql.conf
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
