@@ -66,11 +66,13 @@ jobs:
       - name: Configure and start PostgreSQL (Ubuntu)
         if: runner.os == 'Linux'
         run: |
+          # Create PostgreSQL cluster
+          sudo pg_createcluster ${{ matrix.pg }} main
           # Configure PostgreSQL before starting it
           PGCONF=/etc/postgresql/${{ matrix.pg }}/main/postgresql.conf
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
           # Start PostgreSQL
-          sudo systemctl start postgresql
+          sudo pg_ctlcluster ${{ matrix.pg }} main start
           # Create user and database
           sudo -u postgres createuser -s $USER
           createdb $USER
@@ -79,7 +81,7 @@ jobs:
             echo "PostgreSQL started successfully with extension loaded"
           else
             echo "Failed to connect to PostgreSQL"
-            sudo journalctl -u postgresql -n 50 --no-pager || true
+            sudo journalctl -u postgresql@${{ matrix.pg }}-main -n 50 --no-pager || true
             exit 1
           fi
 
