@@ -46,13 +46,9 @@ jobs:
           echo "/opt/homebrew/opt/postgresql@${{ matrix.pg }}/bin" >> $GITHUB_PATH
           echo "PG_CONFIG=/opt/homebrew/opt/postgresql@${{ matrix.pg }}/bin/pg_config" >> $GITHUB_ENV
 
-      - name: Start PostgreSQL (Ubuntu)
+      - name: Set PostgreSQL environment (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          # Start the version-specific PostgreSQL service
-          sudo systemctl start postgresql@${{ matrix.pg }}-main
-          sudo -u postgres createuser -s $USER
-          createdb $USER
           echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config" >> $GITHUB_ENV
 
       - name: Install pgvector
@@ -67,22 +63,23 @@ jobs:
           make PG_CONFIG=$PG_CONFIG
           sudo make install PG_CONFIG=$PG_CONFIG
 
-      - name: Configure PostgreSQL (Ubuntu)
+      - name: Configure and start PostgreSQL (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          # Get PostgreSQL config file location
-          PGCONF=$(psql -t -c "SHOW config_file" postgres | xargs)
-          # Add shared_preload_libraries
+          # Configure PostgreSQL before starting it
+          PGCONF=/etc/postgresql/${{ matrix.pg }}/main/postgresql.conf
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
-          # Restart PostgreSQL using version-specific systemd service
-          sudo systemctl restart postgresql@${{ matrix.pg }}-main
-          sleep 2
-          # Verify PostgreSQL is running and extension loaded
+          # Start PostgreSQL
+          sudo systemctl start postgresql
+          # Create user and database
+          sudo -u postgres createuser -s $USER
+          createdb $USER
+          # Verify extension loaded
           if psql postgres -c "SELECT 1" > /dev/null 2>&1; then
-            echo "PostgreSQL restarted successfully with extension loaded"
+            echo "PostgreSQL started successfully with extension loaded"
           else
-            echo "Failed to connect to PostgreSQL after restart"
-            sudo journalctl -u postgresql@${{ matrix.pg }}-main -n 50 --no-pager || true
+            echo "Failed to connect to PostgreSQL"
+            sudo journalctl -u postgresql -n 50 --no-pager || true
             exit 1
           fi
 
