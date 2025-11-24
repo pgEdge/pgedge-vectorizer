@@ -73,6 +73,12 @@ jobs:
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
           sudo systemctl restart postgresql
           sleep 2
+          # Debug: Check extension locations
+          echo "Extension directory:"
+          $PG_CONFIG --sharedir
+          ls -la $($PG_CONFIG --sharedir)/extension/ | grep -E "vector|pgedge"
+          echo "PostgreSQL is looking in:"
+          psql -U postgres -t -c "SHOW shared_preload_libraries"
 
       - name: Configure PostgreSQL (macOS)
         if: runner.os == 'macOS'
