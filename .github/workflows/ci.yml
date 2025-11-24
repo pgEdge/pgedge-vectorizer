@@ -49,7 +49,8 @@ jobs:
       - name: Start PostgreSQL (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          sudo systemctl start postgresql
+          # Start the version-specific PostgreSQL cluster
+          sudo pg_ctlcluster ${{ matrix.pg }} main start
           sudo -u postgres createuser -s $USER
           createdb $USER
           echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config" >> $GITHUB_ENV
@@ -73,28 +74,17 @@ jobs:
           PGCONF=$(psql -t -c "SHOW config_file" postgres | xargs)
           # Add shared_preload_libraries
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
-          # Get data directory and bindir
-          PGDATA=$(psql -t -c "SHOW data_directory" postgres | xargs)
-          PGBIN=$($PG_CONFIG --bindir)
-          # Restart PostgreSQL using pg_ctl (allow failure so we can read log)
-          sudo -u postgres $PGBIN/pg_ctl restart -D $PGDATA -l /tmp/pg_restart.log || true
-          sleep 5
-          # Test that we can connect and the extension loads
-          for i in {1..10}; do
-            if psql postgres -c "SELECT 1" > /dev/null 2>&1; then
-              echo "PostgreSQL is running and accepting connections"
-              exit 0
-            fi
-            echo "Waiting for PostgreSQL to start (attempt $i/10)..."
-            sleep 2
-          done
-          # If we get here, PostgreSQL didn't start
-          echo "PostgreSQL failed to start or accept connections!"
-          echo "=== PostgreSQL startup log ==="
-          sudo cat /tmp/pg_restart.log || true
-          echo "=== Running PostgreSQL processes ==="
-          ps aux | grep postgres || true
-          exit 1
+          # Restart PostgreSQL using version-specific pg_ctlcluster
+          sudo pg_ctlcluster ${{ matrix.pg }} main restart
+          sleep 2
+          # Verify PostgreSQL is running and extension loaded
+          if psql postgres -c "SELECT 1" > /dev/null 2>&1; then
+            echo "PostgreSQL restarted successfully with extension loaded"
+          else
+            echo "Failed to connect to PostgreSQL after restart"
+            sudo journalctl -u postgresql@${{ matrix.pg }}-main -n 50 --no-pager || true
+            exit 1
+          fi
 
       - name: Configure PostgreSQL (macOS)
         if: runner.os == 'macOS'
