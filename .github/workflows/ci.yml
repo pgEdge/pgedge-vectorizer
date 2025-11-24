@@ -76,8 +76,8 @@ jobs:
           # Get data directory and bindir
           PGDATA=$(psql -t -c "SHOW data_directory" postgres | xargs)
           PGBIN=$($PG_CONFIG --bindir)
-          # Restart PostgreSQL using pg_ctl
-          sudo -u postgres $PGBIN/pg_ctl restart -D $PGDATA -l /tmp/pg_restart.log
+          # Restart PostgreSQL using pg_ctl (allow failure so we can read log)
+          sudo -u postgres $PGBIN/pg_ctl restart -D $PGDATA -l /tmp/pg_restart.log || true
           sleep 5
           # Test that we can connect and the extension loads
           for i in {1..10}; do
