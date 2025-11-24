@@ -66,22 +66,27 @@ jobs:
       - name: Configure and start PostgreSQL (Ubuntu)
         if: runner.os == 'Linux'
         run: |
-          # Create PostgreSQL cluster
-          sudo pg_createcluster ${{ matrix.pg }} main
-          # Configure PostgreSQL before starting it
+          # Create PostgreSQL cluster if it doesn't exist
+          if ! pg_lsclusters | grep -q "^${{ matrix.pg }} *main"; then
+            sudo pg_createcluster ${{ matrix.pg }} main --start
+          fi
+          # Get the cluster port
+          PGPORT=$(pg_lsclusters -h | awk '$1==${{ matrix.pg }} && $2=="main" {print $3}')
+          echo "PostgreSQL cluster running on port: $PGPORT"
+          # Configure PostgreSQL
           PGCONF=/etc/postgresql/${{ matrix.pg }}/main/postgresql.conf
           echo "shared_preload_libraries = 'pgedge_vectorizer'" | sudo tee -a $PGCONF
-          # Start PostgreSQL
-          sudo pg_ctlcluster ${{ matrix.pg }} main start
+          # Restart PostgreSQL to load the extension
+          sudo pg_ctlcluster ${{ matrix.pg }} main restart
           # Create user and database
-          sudo -u postgres createuser -s $USER
-          createdb $USER
+          sudo -u postgres psql -p $PGPORT -c "CREATE ROLE $USER WITH SUPERUSER LOGIN" || true
+          createdb -p $PGPORT $USER
           # Verify extension loaded
-          if psql postgres -c "SELECT 1" > /dev/null 2>&1; then
+          if psql -p $PGPORT postgres -c "SELECT 1" > /dev/null 2>&1; then
             echo "PostgreSQL started successfully with extension loaded"
           else
             echo "Failed to connect to PostgreSQL"
-            sudo journalctl -u postgresql@${{ matrix.pg }}-main -n 50 --no-pager || true
+            sudo cat /var/log/postgresql/postgresql-${{ matrix.pg }}-main.log || true
             exit 1
           fi
 
