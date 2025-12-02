@@ -60,6 +60,7 @@ extern char *pgedge_vectorizer_default_chunk_strategy;
 extern int pgedge_vectorizer_default_chunk_size;
 extern int pgedge_vectorizer_default_chunk_overlap;
 extern bool pgedge_vectorizer_strip_non_ascii;
+extern int pgedge_vectorizer_auto_cleanup_hours;
 
 /*
  * Chunking strategy enumeration

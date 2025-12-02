@@ -181,6 +181,12 @@ All configuration parameters can be set in `postgresql.conf` or via `ALTER SYSTE
 | `pgedge_vectorizer.default_chunk_size` | integer | `400` | Default chunk size in tokens |
 | `pgedge_vectorizer.default_chunk_overlap` | integer | `50` | Default chunk overlap in tokens |
 
+### Queue Management
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pgedge_vectorizer.auto_cleanup_hours` | integer | `24` | Automatically delete completed queue items older than this many hours. Set to 0 to disable automatic cleanup. |
+
 ## SQL API Reference
 
 ### Functions
@@ -244,6 +250,8 @@ SELECT pgedge_vectorizer.clear_completed(
     older_than_hours INT DEFAULT 24
 );
 ```
+
+**Note:** Workers automatically clean up completed items based on `pgedge_vectorizer.auto_cleanup_hours` (default 24 hours). Manual cleanup is only needed if you want to clean up more frequently or if automatic cleanup is disabled (set to 0).
 
 #### `show_config()`
 

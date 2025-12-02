@@ -40,6 +40,11 @@ int pgedge_vectorizer_default_chunk_overlap = 50;
 bool pgedge_vectorizer_strip_non_ascii = true;
 
 /*
+ * GUC Variables - Queue Management
+ */
+int pgedge_vectorizer_auto_cleanup_hours = 24;
+
+/*
  * Initialize all GUC variables
  */
 void
@@ -194,6 +199,19 @@ pgedge_vectorizer_init_guc(void)
 							 PGC_SIGHUP,
 							 0,
 							 NULL, NULL, NULL);
+
+	/* Queue management */
+	DefineCustomIntVariable("pgedge_vectorizer.auto_cleanup_hours",
+							"Automatically clean up completed queue items older than this many hours",
+							"Workers will periodically delete completed items older than this value. "
+							"Set to 0 to disable automatic cleanup.",
+							&pgedge_vectorizer_auto_cleanup_hours,
+							24,     /* default: 24 hours */
+							0,      /* min: 0 = disabled */
+							8760,   /* max: 1 year */
+							PGC_SIGHUP,
+							0,
+							NULL, NULL, NULL);
 
 	elog(DEBUG1, "pgedge_vectorizer GUC variables initialized");
 }

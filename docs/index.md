@@ -184,6 +184,12 @@ ollama pull nomic-embed-text
 | `pgedge_vectorizer.default_chunk_overlap` | `50` | Overlap in tokens |
 | `pgedge_vectorizer.strip_non_ascii` | `true` | Strip non-ASCII characters (emoji, box-drawing, etc.) |
 
+### Queue Management
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `pgedge_vectorizer.auto_cleanup_hours` | `24` | Automatically delete completed queue items older than this many hours. Set to 0 to disable. Workers clean up once per hour. |
+
 ## API Reference
 
 ### Functions
@@ -285,6 +291,8 @@ SELECT pgedge_vectorizer.clear_completed(
 ```
 
 Returns: Number of items deleted
+
+**Note:** Workers automatically clean up completed items based on `pgedge_vectorizer.auto_cleanup_hours`. Manual cleanup is only needed if you want to clean up more frequently or if automatic cleanup is disabled.
 
 #### reprocess_chunks()
 

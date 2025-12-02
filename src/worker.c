@@ -26,10 +26,14 @@
 static volatile sig_atomic_t got_sigterm = false;
 static volatile sig_atomic_t got_sighup = false;
 
+/* Last cleanup timestamp */
+static time_t last_cleanup_time = 0;
+
 /* Forward declarations */
 static void worker_sigterm(SIGNAL_ARGS);
 static void worker_sighup(SIGNAL_ARGS);
 static void process_queue_batch(int worker_id);
+static void cleanup_completed_items(int worker_id);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
 							 const float *embedding, int dim);
 
@@ -299,6 +303,9 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		PG_TRY();
 		{
 			process_queue_batch(worker_id);
+
+			/* Perform automatic cleanup if enabled */
+			cleanup_completed_items(worker_id);
 		}
 		PG_CATCH();
 		{
@@ -596,4 +603,51 @@ update_embedding(int64 chunk_id, const char *chunk_table, const float *embedding
 	}
 
 	pfree(vector_str.data);
+}
+
+/*
+ * Clean up completed queue items older than auto_cleanup_hours
+ */
+static void
+cleanup_completed_items(int worker_id)
+{
+	int ret;
+	int rows_deleted = 0;
+	time_t now;
+
+	/* Skip if auto cleanup is disabled (set to 0) */
+	if (pgedge_vectorizer_auto_cleanup_hours <= 0)
+		return;
+
+	/* Only perform cleanup once per hour (3600 seconds) */
+	now = time(NULL);
+	if (last_cleanup_time > 0 && (now - last_cleanup_time) < 3600)
+		return;
+
+	last_cleanup_time = now;
+
+	StartTransactionCommand();
+
+	SPI_connect();
+
+	/* Delete completed items older than configured hours */
+	ret = SPI_execute(psprintf(
+		"DELETE FROM pgedge_vectorizer.queue "
+		"WHERE status = 'completed' "
+		"AND processed_at < NOW() - INTERVAL '%d hours'",
+		pgedge_vectorizer_auto_cleanup_hours),
+		false, 0);
+
+	if (ret == SPI_OK_DELETE)
+	{
+		rows_deleted = SPI_processed;
+		if (rows_deleted > 0)
+		{
+			elog(LOG, "pgedge_vectorizer worker %d: cleaned up %d completed queue items older than %d hours",
+				 worker_id + 1, rows_deleted, pgedge_vectorizer_auto_cleanup_hours);
+		}
+	}
+
+	SPI_finish();
+	CommitTransactionCommand();
 }
