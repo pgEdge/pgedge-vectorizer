@@ -34,6 +34,15 @@
 #error "pgedge_vectorizer requires PostgreSQL 14 or later"
 #endif
 
+/* pg_noreturn compatibility for PostgreSQL 18+ */
+#if PG_VERSION_NUM < 180000
+#define PGEDGE_NORETURN
+#define PGEDGE_NORETURN_SUFFIX pg_attribute_noreturn()
+#else
+#define PGEDGE_NORETURN pg_noreturn
+#define PGEDGE_NORETURN_SUFFIX
+#endif
+
 /*
  * GUC Variables (declared extern, defined in guc.c)
  */
@@ -120,7 +129,7 @@ ArrayType *chunk_text(const char *content, ChunkConfig *config);
 ChunkStrategy parse_chunk_strategy(const char *strategy_str);
 
 /* worker.c */
-extern PGDLLEXPORT void pgedge_vectorizer_worker_main(Datum main_arg) pg_attribute_noreturn();
+extern PGDLLEXPORT PGEDGE_NORETURN void pgedge_vectorizer_worker_main(Datum main_arg) PGEDGE_NORETURN_SUFFIX;
 void register_background_workers(void);
 
 /* queue.c */

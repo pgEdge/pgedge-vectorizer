@@ -406,7 +406,7 @@ Tests cover:
 - Edge cases (empty, NULL, whitespace handling)
 - Worker configuration
 
-All tests must pass on PostgreSQL 14-17 before merging changes.
+All tests must pass on PostgreSQL 14-18 before merging changes.
 
 ### Debugging
 

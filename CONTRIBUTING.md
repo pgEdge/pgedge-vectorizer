@@ -6,7 +6,7 @@ Thank you for your interest in contributing to pgEdge Vectorizer! This document 
 
 ### Prerequisites
 
-- PostgreSQL 14 or later (14, 15, 16, or 17)
+- PostgreSQL 14 or later (14, 15, 16, 17, or 18)
 - pgvector extension
 - libcurl development files
 - Git
@@ -109,7 +109,7 @@ Tests should cover:
 ### Continuous Integration
 
 All pull requests must pass CI checks on:
-- PostgreSQL 14, 15, 16, and 17 (Ubuntu)
+- PostgreSQL 14, 15, 16, 17, and 18 (Ubuntu)
 - PostgreSQL 17 (macOS)
 - Code quality checks (no trailing whitespace, etc.)
 
