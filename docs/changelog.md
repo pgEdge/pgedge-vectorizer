@@ -4,6 +4,16 @@ All notable changes to pgEdge Vectorizer will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0-alpha2] - 2025-11-02
+
+### Added
+
+- PostgreSQL 18 support
+
+### Changed
+
+- Updated pgvector dependency to v0.8.1 for PostgreSQL 18 compatibility
+
 ## [1.0-alpha1] - 2025-11-21
 
 ### Added
