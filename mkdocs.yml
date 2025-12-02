@@ -50,4 +50,5 @@ repo_url: https://github.com/pgEdge/pgedge-vectorizer
 
 nav:
   - Home: index.md
+  - Changelog: changelog.md
 
