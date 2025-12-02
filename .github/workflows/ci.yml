@@ -53,7 +53,7 @@ jobs:
 
       - name: Install pgvector
         run: |
-          git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git /tmp/pgvector
+          git clone --branch v0.8.1 https://github.com/pgvector/pgvector.git /tmp/pgvector
           cd /tmp/pgvector
           make PG_CONFIG=$PG_CONFIG
           sudo make install PG_CONFIG=$PG_CONFIG
