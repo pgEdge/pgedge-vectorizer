@@ -16,6 +16,9 @@ src/*.o
 src/*.bc
 
 # Test outputs
+regression.diffs
+regression.out
+results/
 test/regression.diffs
 test/regression.out
 test/results/*.out
@@ -63,3 +66,6 @@ core.*
 # Development files
 *.log
 *.tmp
+
+# AI
+.claude/settings.local.json
