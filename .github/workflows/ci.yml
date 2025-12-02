@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        pg: [14, 15, 16, 17]
+        pg: [14, 15, 16, 17, 18]
         include:
           - os: macos-latest
             pg: 17
