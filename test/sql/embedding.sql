@@ -25,15 +25,16 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Test 2: OpenAI provider tests (if key available)
+-- Configure OpenAI settings first (outside transaction)
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.model = 'text-embedding-3-small';
+
 DO $$
 DECLARE
     has_key boolean;
     test_embedding vector;
     dims integer;
 BEGIN
-    SET pgedge_vectorizer.provider = 'openai';
-    SET pgedge_vectorizer.model = 'text-embedding-3-small';
-
     -- Check if API key is available
     has_key := test_api_key_available();
 
@@ -75,16 +76,17 @@ END;
 $$;
 
 -- Test 3: Voyage provider tests (if key available)
+-- Configure Voyage settings first
+SET pgedge_vectorizer.provider = 'voyage';
+SET pgedge_vectorizer.api_key_file = '/tmp/voyage-api-key';
+SET pgedge_vectorizer.model = 'voyage-3-lite';
+
 DO $$
 DECLARE
     has_key boolean;
     test_embedding vector;
     dims integer;
 BEGIN
-    SET pgedge_vectorizer.provider = 'voyage';
-    SET pgedge_vectorizer.api_key_file = '/tmp/voyage-api-key';
-    SET pgedge_vectorizer.model = 'voyage-3-lite';
-
     -- Check if API key is available
     has_key := test_api_key_available();
 
@@ -115,16 +117,17 @@ END;
 $$;
 
 -- Test 4: Semantic search example (if OpenAI key available)
+-- Configure OpenAI settings again for semantic search test
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
+SET pgedge_vectorizer.model = 'text-embedding-3-small';
+
 DO $$
 DECLARE
     has_key boolean;
     result_content TEXT;
     result_distance FLOAT;
 BEGIN
-    SET pgedge_vectorizer.provider = 'openai';
-    SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
-    SET pgedge_vectorizer.model = 'text-embedding-3-small';
-
     has_key := test_api_key_available();
 
     IF NOT has_key THEN
@@ -170,7 +173,11 @@ END;
 $$;
 
 -- Test 5: Error cases
-RAISE NOTICE 'Testing error cases...';
+DO $$
+BEGIN
+    RAISE NOTICE 'Testing error cases...';
+END;
+$$;
 
 -- Test NULL input (should error)
 DO $$
@@ -183,14 +190,15 @@ END;
 $$;
 
 -- Test empty string (should work if API key available)
+-- Configure for empty string test
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
+
 DO $$
 DECLARE
     has_key boolean;
     result vector;
 BEGIN
-    SET pgedge_vectorizer.provider = 'openai';
-    SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
-
     has_key := test_api_key_available();
 
     IF has_key THEN

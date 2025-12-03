@@ -3,7 +3,7 @@
 -- Gracefully skips tests if API keys are not available
 -- Test 1: Verify function exists
 SELECT pg_get_functiondef('pgedge_vectorizer.generate_embedding(text)'::regprocedure) IS NOT NULL AS function_exists;
- function_exists 
+ function_exists
 -----------------
  t
 (1 row)
@@ -27,15 +27,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 -- Test 2: OpenAI provider tests (if key available)
+-- Configure OpenAI settings first (outside transaction)
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.model = 'text-embedding-3-small';
 DO $$
 DECLARE
     has_key boolean;
     test_embedding vector;
     dims integer;
 BEGIN
-    SET pgedge_vectorizer.provider = 'openai';
-    SET pgedge_vectorizer.model = 'text-embedding-3-small';
-
     -- Check if API key is available
     has_key := test_api_key_available();
 
@@ -77,16 +77,16 @@ END;
 $$;
 NOTICE:  Skipping OpenAI tests - API key not available
 -- Test 3: Voyage provider tests (if key available)
+-- Configure Voyage settings first
+SET pgedge_vectorizer.provider = 'voyage';
+SET pgedge_vectorizer.api_key_file = '/tmp/voyage-api-key';
+SET pgedge_vectorizer.model = 'voyage-3-lite';
 DO $$
 DECLARE
     has_key boolean;
     test_embedding vector;
     dims integer;
 BEGIN
-    SET pgedge_vectorizer.provider = 'voyage';
-    SET pgedge_vectorizer.api_key_file = '/tmp/voyage-api-key';
-    SET pgedge_vectorizer.model = 'voyage-3-lite';
-
     -- Check if API key is available
     has_key := test_api_key_available();
 
@@ -117,16 +117,16 @@ END;
 $$;
 NOTICE:  Skipping Voyage tests - API key not available
 -- Test 4: Semantic search example (if OpenAI key available)
+-- Configure OpenAI settings again for semantic search test
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
+SET pgedge_vectorizer.model = 'text-embedding-3-small';
 DO $$
 DECLARE
     has_key boolean;
     result_content TEXT;
     result_distance FLOAT;
 BEGIN
-    SET pgedge_vectorizer.provider = 'openai';
-    SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
-    SET pgedge_vectorizer.model = 'text-embedding-3-small';
-
     has_key := test_api_key_available();
 
     IF NOT has_key THEN
@@ -172,7 +172,11 @@ END;
 $$;
 NOTICE:  Skipping semantic search test - API key not available
 -- Test 5: Error cases
-RAISE NOTICE 'Testing error cases...';
+DO $$
+BEGIN
+    RAISE NOTICE 'Testing error cases...';
+END;
+$$;
 NOTICE:  Testing error cases...
 -- Test NULL input (should error)
 DO $$
@@ -185,14 +189,14 @@ END;
 $$;
 NOTICE:  NULL input correctly raises error: query text cannot be NULL
 -- Test empty string (should work if API key available)
+-- Configure for empty string test
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
 DO $$
 DECLARE
     has_key boolean;
     result vector;
 BEGIN
-    SET pgedge_vectorizer.provider = 'openai';
-    SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
-
     has_key := test_api_key_available();
 
     IF has_key THEN
@@ -213,8 +217,8 @@ RESET pgedge_vectorizer.provider;
 RESET pgedge_vectorizer.api_key_file;
 RESET pgedge_vectorizer.model;
 SELECT 'Embedding tests completed' AS status;
-         status
--------------------------
+          status
+---------------------------
  Embedding tests completed
 (1 row)
 
