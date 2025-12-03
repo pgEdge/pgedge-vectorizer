@@ -56,7 +56,7 @@ pgedge_vectorizer_init_guc(void)
 								"Determines which API provider is used for generating embeddings.",
 								&pgedge_vectorizer_provider,
 								"openai",
-								PGC_SIGHUP,
+								PGC_USERSET,
 								0,
 								NULL, NULL, NULL);
 
@@ -66,7 +66,7 @@ pgedge_vectorizer_init_guc(void)
 								"Tilde (~) expands to home directory.",
 								&pgedge_vectorizer_api_key_file,
 								"~/.pgedge-vectorizer-llm-api-key",
-								PGC_SIGHUP,
+								PGC_USERSET,
 								0,
 								NULL, NULL, NULL);
 
@@ -76,7 +76,7 @@ pgedge_vectorizer_init_guc(void)
 								"Voyage=https://api.voyageai.com/v1, Ollama=http://localhost:11434",
 								&pgedge_vectorizer_api_url,
 								"https://api.openai.com/v1",
-								PGC_SIGHUP,
+								PGC_USERSET,
 								0,
 								NULL, NULL, NULL);
 
@@ -88,7 +88,7 @@ pgedge_vectorizer_init_guc(void)
 								"Ollama: nomic-embed-text, mxbai-embed-large",
 								&pgedge_vectorizer_model,
 								"text-embedding-3-small",
-								PGC_SIGHUP,
+								PGC_USERSET,
 								0,
 								NULL, NULL, NULL);
 
