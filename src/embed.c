@@ -30,7 +30,7 @@ pgedge_vectorizer_generate_embedding(PG_FUNCTION_ARGS)
 	char *query;
 	EmbeddingProvider *provider;
 	float *embedding;
-	int dim;
+	int dim = 0;
 	char *error_msg = NULL;
 	StringInfoData vector_str;
 	int ret;
