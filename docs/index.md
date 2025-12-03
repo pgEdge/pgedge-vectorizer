@@ -78,11 +78,11 @@ SELECT pgedge_vectorizer.enable_vectorization(
 INSERT INTO documents (content)
 VALUES ('Your text content here...');
 
--- Query similar content
+-- Query similar content using generate_embedding()
 SELECT
     d.id,
     c.content,
-    c.embedding <=> '[...]'::vector AS distance
+    c.embedding <=> pgedge_vectorizer.generate_embedding('your search query') AS distance
 FROM documents d
 JOIN documents_content_chunks c ON d.id = c.source_id
 ORDER BY distance
@@ -267,6 +267,38 @@ SELECT pgedge_vectorizer.chunk_text(
 ```
 
 Returns: `TEXT[]` array of chunks
+
+#### generate_embedding()
+
+Generate an embedding vector from query text.
+
+```sql
+SELECT pgedge_vectorizer.generate_embedding(
+    query_text TEXT
+);
+```
+
+**Parameters:**
+
+- `query_text`: Text to generate an embedding for
+
+Returns: `vector` - The embedding vector using the configured provider
+
+**Example:**
+
+```sql
+-- Generate an embedding for a search query
+SELECT
+    d.id,
+    c.content,
+    c.embedding <=> pgedge_vectorizer.generate_embedding('machine learning tutorials') AS distance
+FROM documents d
+JOIN documents_content_chunks c ON d.id = c.source_id
+ORDER BY distance
+LIMIT 5;
+```
+
+**Note:** This function calls the embedding provider synchronously, so it will wait for the API response. For large-scale batch operations, use the automatic vectorization features instead.
 
 #### retry_failed()
 

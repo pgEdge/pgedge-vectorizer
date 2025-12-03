@@ -15,7 +15,8 @@ OBJS = src/pgedge_vectorizer.o \
        src/provider_voyage.o \
        src/provider_ollama.o \
        src/worker.o \
-       src/queue.o
+       src/queue.o \
+       src/embed.o
 
 DATA = sql/$(EXTENSION)--$(EXTVERSION).sql
 

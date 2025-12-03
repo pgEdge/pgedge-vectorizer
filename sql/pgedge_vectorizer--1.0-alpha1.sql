@@ -59,6 +59,16 @@ LANGUAGE C IMMUTABLE STRICT;
 COMMENT ON FUNCTION pgedge_vectorizer.chunk_text IS
 'Split text into chunks according to the specified strategy';
 
+-- Embedding generation function
+CREATE FUNCTION pgedge_vectorizer.generate_embedding(
+    query_text TEXT
+) RETURNS vector
+AS 'MODULE_PATHNAME', 'pgedge_vectorizer_generate_embedding'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION pgedge_vectorizer.generate_embedding IS
+'Generate an embedding vector from query text using the configured provider';
+
 ---------------------------------------------------------------------------
 -- SQL Functions
 ---------------------------------------------------------------------------
