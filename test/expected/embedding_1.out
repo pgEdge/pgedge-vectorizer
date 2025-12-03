@@ -1,9 +1,12 @@
 -- Embedding generation test
 -- Tests the generate_embedding() function with actual API calls
 -- Gracefully skips tests if API keys are not available
-
 -- Test 1: Verify function exists
 SELECT pg_get_functiondef('pgedge_vectorizer.generate_embedding(text)'::regprocedure) IS NOT NULL AS function_exists;
+ function_exists
+-----------------
+ t
+(1 row)
 
 -- Helper function to check if API key file exists and is readable
 CREATE OR REPLACE FUNCTION test_api_key_available() RETURNS boolean AS $$
@@ -23,13 +26,11 @@ BEGIN
     END;
 END;
 $$ LANGUAGE plpgsql;
-
 -- Test 2: OpenAI provider tests (if key available)
 -- Configure OpenAI settings first (outside transaction)
 SET pgedge_vectorizer.provider = 'openai';
 SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
 SET pgedge_vectorizer.model = 'text-embedding-3-small';
-
 DO $$
 DECLARE
     has_key boolean;
@@ -57,7 +58,7 @@ BEGIN
                 RAISE EXCEPTION 'OpenAI embedding has wrong dimensions: % (expected 1536)', dims;
             END IF;
 
-            RAISE NOTICE 'OpenAI provider test passed - generated %d dimensional embedding', dims;
+            RAISE NOTICE 'OpenAI provider test passed - generated % dimensional embedding', dims;
         EXCEPTION WHEN OTHERS THEN
             RAISE NOTICE 'OpenAI test failed: %', SQLERRM;
         END;
@@ -75,13 +76,14 @@ BEGIN
     END IF;
 END;
 $$;
-
+NOTICE:  Testing OpenAI provider...
+NOTICE:  OpenAI provider test passed - generated 1536 dimensional embedding
+NOTICE:  OpenAI embeddings are consistent
 -- Test 3: Voyage provider tests (if key available)
 -- Configure Voyage settings first
 SET pgedge_vectorizer.provider = 'voyage';
 SET pgedge_vectorizer.api_key_file = '/tmp/voyage-api-key';
 SET pgedge_vectorizer.model = 'voyage-3-lite';
-
 DO $$
 DECLARE
     has_key boolean;
@@ -109,20 +111,20 @@ BEGIN
                 RAISE EXCEPTION 'Voyage embedding has wrong dimensions: % (expected 512)', dims;
             END IF;
 
-            RAISE NOTICE 'Voyage provider test passed - generated %d dimensional embedding', dims;
+            RAISE NOTICE 'Voyage provider test passed - generated % dimensional embedding', dims;
         EXCEPTION WHEN OTHERS THEN
             RAISE NOTICE 'Voyage test failed: %', SQLERRM;
         END;
     END IF;
 END;
 $$;
-
+NOTICE:  Testing Voyage provider...
+NOTICE:  Voyage provider test passed - generated 512 dimensional embedding
 -- Test 4: Semantic search example (if OpenAI key available)
 -- Configure OpenAI settings again for semantic search test
 SET pgedge_vectorizer.provider = 'openai';
 SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
 SET pgedge_vectorizer.model = 'text-embedding-3-small';
-
 DO $$
 DECLARE
     has_key boolean;
@@ -172,14 +174,15 @@ BEGIN
     END IF;
 END;
 $$;
-
+NOTICE:  Testing semantic search...
+NOTICE:  Semantic search test passed - found most relevant document
 -- Test 5: Error cases
 DO $$
 BEGIN
     RAISE NOTICE 'Testing error cases...';
 END;
 $$;
-
+NOTICE:  Testing error cases...
 -- Test NULL input (should error)
 DO $$
 BEGIN
@@ -189,12 +192,11 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'NULL input correctly raises error: %', SQLERRM;
 END;
 $$;
-
+NOTICE:  NULL input correctly raises error: query text cannot be NULL
 -- Test empty string (should work if API key available)
 -- Configure for empty string test
 SET pgedge_vectorizer.provider = 'openai';
 SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
-
 DO $$
 DECLARE
     has_key boolean;
@@ -216,13 +218,16 @@ BEGIN
     END IF;
 END;
 $$;
-
+NOTICE:  Empty string correctly raises error: query text cannot be empty
 -- Cleanup
 DROP FUNCTION IF EXISTS test_api_key_available();
-
 -- Reset configuration
 RESET pgedge_vectorizer.provider;
 RESET pgedge_vectorizer.api_key_file;
 RESET pgedge_vectorizer.model;
-
 SELECT 'Embedding tests completed' AS status;
+          status
+---------------------------
+ Embedding tests completed
+(1 row)
+
