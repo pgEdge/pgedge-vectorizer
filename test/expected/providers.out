@@ -49,7 +49,7 @@ SHOW pgedge_vectorizer.provider;
 (1 row)
 
 SHOW pgedge_vectorizer.api_url;
-  pgedge_vectorizer.api_url
+  pgedge_vectorizer.api_url  
 -----------------------------
  https://api.voyageai.com/v1
 (1 row)
