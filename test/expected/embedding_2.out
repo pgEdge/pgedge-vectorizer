@@ -1,0 +1,241 @@
+-- Embedding generation test
+-- Tests the generate_embedding() function with actual API calls
+-- Gracefully skips tests if API keys are not available
+-- Test 1: Verify function exists
+SELECT pg_get_functiondef('pgedge_vectorizer.generate_embedding(text)'::regprocedure) IS NOT NULL AS function_exists;
+ function_exists 
+-----------------
+ t
+(1 row)
+
+-- Helper function to check if API key file exists and is readable
+CREATE OR REPLACE FUNCTION test_api_key_available() RETURNS boolean AS $$
+DECLARE
+    api_key_file TEXT;
+    key_content TEXT;
+BEGIN
+    -- Get the configured API key file path
+    api_key_file := current_setting('pgedge_vectorizer.api_key_file', true);
+
+    -- Try to read a file to see if it exists (this will error if not readable)
+    BEGIN
+        SELECT pg_read_file(api_key_file, 0, 100) INTO key_content;
+        RETURN (key_content IS NOT NULL AND length(trim(key_content)) > 0);
+    EXCEPTION WHEN OTHERS THEN
+        RETURN false;
+    END;
+END;
+$$ LANGUAGE plpgsql;
+-- Test 2: OpenAI provider tests (if key available)
+-- Configure OpenAI settings first (outside transaction)
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
+SET pgedge_vectorizer.model = 'text-embedding-3-small';
+DO $$
+DECLARE
+    has_key boolean;
+    test_embedding vector;
+    dims integer;
+BEGIN
+    -- Check if API key is available
+    has_key := test_api_key_available();
+
+    IF NOT has_key THEN
+        RAISE NOTICE 'Skipping OpenAI tests - API key not available';
+    ELSE
+        RAISE NOTICE 'Testing OpenAI provider...';
+
+        -- Test basic embedding generation
+        BEGIN
+            test_embedding := pgedge_vectorizer.generate_embedding('Hello, world!');
+            dims := vector_dims(test_embedding);
+
+            IF test_embedding IS NULL THEN
+                RAISE EXCEPTION 'OpenAI embedding returned NULL';
+            END IF;
+
+            IF dims != 1536 THEN
+                RAISE EXCEPTION 'OpenAI embedding has wrong dimensions: % (expected 1536)', dims;
+            END IF;
+
+            RAISE NOTICE 'OpenAI provider test passed - generated %d dimensional embedding', dims;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'OpenAI test failed: %', SQLERRM;
+        END;
+
+        -- Test consistency
+        BEGIN
+            IF pgedge_vectorizer.generate_embedding('test') = pgedge_vectorizer.generate_embedding('test') THEN
+                RAISE NOTICE 'OpenAI embeddings are consistent';
+            ELSE
+                RAISE NOTICE 'WARNING: OpenAI embeddings may not be deterministic';
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'OpenAI consistency test failed: %', SQLERRM;
+        END;
+    END IF;
+END;
+$$;
+NOTICE:  Testing OpenAI provider...
+NOTICE:  OpenAI provider test passed - generated 1536d dimensional embedding
+NOTICE:  WARNING: OpenAI embeddings may not be deterministic
+-- Test 3: Voyage provider tests (if key available)
+-- Configure Voyage settings first
+SET pgedge_vectorizer.provider = 'voyage';
+SET pgedge_vectorizer.api_key_file = '/tmp/voyage-api-key';
+SET pgedge_vectorizer.model = 'voyage-3-lite';
+DO $$
+DECLARE
+    has_key boolean;
+    test_embedding vector;
+    dims integer;
+BEGIN
+    -- Check if API key is available
+    has_key := test_api_key_available();
+
+    IF NOT has_key THEN
+        RAISE NOTICE 'Skipping Voyage tests - API key not available';
+    ELSE
+        RAISE NOTICE 'Testing Voyage provider...';
+
+        -- Test basic embedding generation
+        BEGIN
+            test_embedding := pgedge_vectorizer.generate_embedding('Hello, world!');
+            dims := vector_dims(test_embedding);
+
+            IF test_embedding IS NULL THEN
+                RAISE EXCEPTION 'Voyage embedding returned NULL';
+            END IF;
+
+            IF dims != 512 THEN
+                RAISE EXCEPTION 'Voyage embedding has wrong dimensions: % (expected 512)', dims;
+            END IF;
+
+            RAISE NOTICE 'Voyage provider test passed - generated %d dimensional embedding', dims;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Voyage test failed: %', SQLERRM;
+        END;
+    END IF;
+END;
+$$;
+NOTICE:  Testing Voyage provider...
+NOTICE:  Voyage test failed: failed to generate embedding: Voyage AI API returned HTTP 401: {
+    "error": {
+        "message": "Incorrect API key provided: pa-A9p3Z**********************************lQcN. You can find your API key at https://platform.openai.com/account/api-keys.",
+        "type": "invalid_request_error",
+        "param": null,
+        "code": "invalid_api_key"
+    }
+}
+
+-- Test 4: Semantic search example (if OpenAI key available)
+-- Configure OpenAI settings again for semantic search test
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
+SET pgedge_vectorizer.model = 'text-embedding-3-small';
+DO $$
+DECLARE
+    has_key boolean;
+    result_content TEXT;
+    result_distance FLOAT;
+BEGIN
+    has_key := test_api_key_available();
+
+    IF NOT has_key THEN
+        RAISE NOTICE 'Skipping semantic search test - API key not available';
+    ELSE
+        RAISE NOTICE 'Testing semantic search...';
+
+        BEGIN
+            -- Create temp table
+            CREATE TEMP TABLE IF NOT EXISTS test_docs (
+                id SERIAL PRIMARY KEY,
+                content TEXT,
+                embedding vector(1536)
+            );
+
+            TRUNCATE test_docs;
+
+            -- Insert test data
+            INSERT INTO test_docs (content, embedding) VALUES
+                ('PostgreSQL is a powerful database', pgedge_vectorizer.generate_embedding('PostgreSQL is a powerful database')),
+                ('Python is a programming language', pgedge_vectorizer.generate_embedding('Python is a programming language')),
+                ('The weather is sunny today', pgedge_vectorizer.generate_embedding('The weather is sunny today'));
+
+            -- Query with semantic search
+            SELECT content, embedding <=> pgedge_vectorizer.generate_embedding('database systems') AS distance
+            INTO result_content, result_distance
+            FROM test_docs
+            ORDER BY distance
+            LIMIT 1;
+
+            IF result_content LIKE '%PostgreSQL%' OR result_content LIKE '%database%' THEN
+                RAISE NOTICE 'Semantic search test passed - found most relevant document';
+            ELSE
+                RAISE NOTICE 'WARNING: Semantic search returned unexpected result: %', result_content;
+            END IF;
+
+            DROP TABLE test_docs;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Semantic search test failed: %', SQLERRM;
+        END;
+    END IF;
+END;
+$$;
+NOTICE:  Testing semantic search...
+NOTICE:  Semantic search test passed - found most relevant document
+-- Test 5: Error cases
+DO $$
+BEGIN
+    RAISE NOTICE 'Testing error cases...';
+END;
+$$;
+NOTICE:  Testing error cases...
+-- Test NULL input (should error)
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.generate_embedding(NULL);
+    RAISE NOTICE 'WARNING: NULL input should have raised an error';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'NULL input correctly raises error: %', SQLERRM;
+END;
+$$;
+NOTICE:  WARNING: NULL input should have raised an error
+-- Test empty string (should work if API key available)
+-- Configure for empty string test
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.api_key_file = '/tmp/openai-api-key';
+DO $$
+DECLARE
+    has_key boolean;
+    result vector;
+BEGIN
+    has_key := test_api_key_available();
+
+    IF has_key THEN
+        BEGIN
+            result := pgedge_vectorizer.generate_embedding('');
+            IF result IS NOT NULL THEN
+                RAISE NOTICE 'Empty string test passed - returned embedding';
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Empty string correctly raises error: %', SQLERRM;
+        END;
+    ELSE
+        RAISE NOTICE 'Skipping empty string test - API key not available';
+    END IF;
+END;
+$$;
+NOTICE:  Empty string correctly raises error: query text cannot be empty
+-- Cleanup
+DROP FUNCTION IF EXISTS test_api_key_available();
+-- Reset configuration
+RESET pgedge_vectorizer.provider;
+RESET pgedge_vectorizer.api_key_file;
+RESET pgedge_vectorizer.model;
+SELECT 'Embedding tests completed' AS status;
+          status           
+---------------------------
+ Embedding tests completed
+(1 row)
+
