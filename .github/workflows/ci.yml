@@ -99,6 +99,25 @@ jobs:
           brew services restart postgresql@${{ matrix.pg }}
           sleep 5
 
+      - name: Setup API keys for embedding tests
+        run: |
+          # Create API key files if secrets are available
+          if [ -n "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "${{ secrets.OPENAI_API_KEY }}" > /tmp/openai-api-key
+            chmod 600 /tmp/openai-api-key
+            echo "OpenAI API key configured"
+          else
+            echo "OpenAI API key not available - embedding tests will be skipped"
+          fi
+
+          if [ -n "${{ secrets.VOYAGE_API_KEY }}" ]; then
+            echo "${{ secrets.VOYAGE_API_KEY }}" > /tmp/voyage-api-key
+            chmod 600 /tmp/voyage-api-key
+            echo "Voyage API key configured"
+          else
+            echo "Voyage API key not available - Voyage tests will be skipped"
+          fi
+
       - name: Run tests
         run: |
           make installcheck PG_CONFIG=$PG_CONFIG
