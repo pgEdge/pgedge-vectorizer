@@ -3,7 +3,7 @@
 -- Gracefully skips tests if API keys are not available
 -- Test 1: Verify function exists
 SELECT pg_get_functiondef('pgedge_vectorizer.generate_embedding(text)'::regprocedure) IS NOT NULL AS function_exists;
- function_exists
+ function_exists 
 -----------------
  t
 (1 row)
@@ -234,7 +234,7 @@ RESET pgedge_vectorizer.provider;
 RESET pgedge_vectorizer.api_key_file;
 RESET pgedge_vectorizer.model;
 SELECT 'Embedding tests completed' AS status;
-          status
+          status           
 ---------------------------
  Embedding tests completed
 (1 row)

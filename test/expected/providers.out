@@ -2,7 +2,7 @@
 -- This test verifies that all embedding providers can be configured
 -- Test provider configuration defaults
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider
+ pgedge_vectorizer.provider 
 ----------------------------
  openai
 (1 row)
@@ -21,19 +21,19 @@ SET pgedge_vectorizer.provider = 'openai';
 SET pgedge_vectorizer.api_url = 'https://api.openai.com/v1';
 SET pgedge_vectorizer.model = 'text-embedding-3-small';
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider
+ pgedge_vectorizer.provider 
 ----------------------------
  openai
 (1 row)
 
 SHOW pgedge_vectorizer.api_url;
- pgedge_vectorizer.api_url
+ pgedge_vectorizer.api_url 
 ---------------------------
  https://api.openai.com/v1
 (1 row)
 
 SHOW pgedge_vectorizer.model;
- pgedge_vectorizer.model
+ pgedge_vectorizer.model 
 -------------------------
  text-embedding-3-small
 (1 row)
@@ -43,7 +43,7 @@ SET pgedge_vectorizer.provider = 'voyage';
 SET pgedge_vectorizer.api_url = 'https://api.voyageai.com/v1';
 SET pgedge_vectorizer.model = 'voyage-2';
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider
+ pgedge_vectorizer.provider 
 ----------------------------
  voyage
 (1 row)
@@ -55,7 +55,7 @@ SHOW pgedge_vectorizer.api_url;
 (1 row)
 
 SHOW pgedge_vectorizer.model;
- pgedge_vectorizer.model
+ pgedge_vectorizer.model 
 -------------------------
  voyage-2
 (1 row)
@@ -65,19 +65,19 @@ SET pgedge_vectorizer.provider = 'ollama';
 SET pgedge_vectorizer.api_url = 'http://localhost:11434';
 SET pgedge_vectorizer.model = 'nomic-embed-text';
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider
+ pgedge_vectorizer.provider 
 ----------------------------
  ollama
 (1 row)
 
 SHOW pgedge_vectorizer.api_url;
- pgedge_vectorizer.api_url
+ pgedge_vectorizer.api_url 
 ---------------------------
  http://localhost:11434
 (1 row)
 
 SHOW pgedge_vectorizer.model;
- pgedge_vectorizer.model
+ pgedge_vectorizer.model 
 -------------------------
  nomic-embed-text
 (1 row)
@@ -87,7 +87,7 @@ RESET pgedge_vectorizer.provider;
 RESET pgedge_vectorizer.api_url;
 RESET pgedge_vectorizer.model;
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider
+ pgedge_vectorizer.provider 
 ----------------------------
  openai
 (1 row)
