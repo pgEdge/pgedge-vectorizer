@@ -2,7 +2,7 @@
 -- This test verifies that all embedding providers can be configured
 -- Test provider configuration defaults
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider 
+ pgedge_vectorizer.provider
 ----------------------------
  openai
 (1 row)
@@ -18,88 +18,76 @@ $$;
 NOTICE:  Provider configuration test completed
 -- Test OpenAI provider configuration
 SET pgedge_vectorizer.provider = 'openai';
-ERROR:  parameter "pgedge_vectorizer.provider" cannot be changed now
 SET pgedge_vectorizer.api_url = 'https://api.openai.com/v1';
-ERROR:  parameter "pgedge_vectorizer.api_url" cannot be changed now
 SET pgedge_vectorizer.model = 'text-embedding-3-small';
-ERROR:  parameter "pgedge_vectorizer.model" cannot be changed now
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider 
+ pgedge_vectorizer.provider
 ----------------------------
  openai
 (1 row)
 
 SHOW pgedge_vectorizer.api_url;
- pgedge_vectorizer.api_url 
+ pgedge_vectorizer.api_url
 ---------------------------
  https://api.openai.com/v1
 (1 row)
 
 SHOW pgedge_vectorizer.model;
- pgedge_vectorizer.model 
+ pgedge_vectorizer.model
 -------------------------
  text-embedding-3-small
 (1 row)
 
 -- Test Voyage AI provider configuration
 SET pgedge_vectorizer.provider = 'voyage';
-ERROR:  parameter "pgedge_vectorizer.provider" cannot be changed now
 SET pgedge_vectorizer.api_url = 'https://api.voyageai.com/v1';
-ERROR:  parameter "pgedge_vectorizer.api_url" cannot be changed now
 SET pgedge_vectorizer.model = 'voyage-2';
-ERROR:  parameter "pgedge_vectorizer.model" cannot be changed now
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider 
+ pgedge_vectorizer.provider
 ----------------------------
- openai
+ voyage
 (1 row)
 
 SHOW pgedge_vectorizer.api_url;
- pgedge_vectorizer.api_url 
----------------------------
- https://api.openai.com/v1
+  pgedge_vectorizer.api_url
+-----------------------------
+ https://api.voyageai.com/v1
 (1 row)
 
 SHOW pgedge_vectorizer.model;
- pgedge_vectorizer.model 
+ pgedge_vectorizer.model
 -------------------------
- text-embedding-3-small
+ voyage-2
 (1 row)
 
 -- Test Ollama provider configuration
 SET pgedge_vectorizer.provider = 'ollama';
-ERROR:  parameter "pgedge_vectorizer.provider" cannot be changed now
 SET pgedge_vectorizer.api_url = 'http://localhost:11434';
-ERROR:  parameter "pgedge_vectorizer.api_url" cannot be changed now
 SET pgedge_vectorizer.model = 'nomic-embed-text';
-ERROR:  parameter "pgedge_vectorizer.model" cannot be changed now
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider 
+ pgedge_vectorizer.provider
 ----------------------------
- openai
+ ollama
 (1 row)
 
 SHOW pgedge_vectorizer.api_url;
- pgedge_vectorizer.api_url 
+ pgedge_vectorizer.api_url
 ---------------------------
- https://api.openai.com/v1
+ http://localhost:11434
 (1 row)
 
 SHOW pgedge_vectorizer.model;
- pgedge_vectorizer.model 
+ pgedge_vectorizer.model
 -------------------------
- text-embedding-3-small
+ nomic-embed-text
 (1 row)
 
 -- Reset to defaults
 RESET pgedge_vectorizer.provider;
-ERROR:  parameter "pgedge_vectorizer.provider" cannot be changed now
 RESET pgedge_vectorizer.api_url;
-ERROR:  parameter "pgedge_vectorizer.api_url" cannot be changed now
 RESET pgedge_vectorizer.model;
-ERROR:  parameter "pgedge_vectorizer.model" cannot be changed now
 SHOW pgedge_vectorizer.provider;
- pgedge_vectorizer.provider 
+ pgedge_vectorizer.provider
 ----------------------------
  openai
 (1 row)
