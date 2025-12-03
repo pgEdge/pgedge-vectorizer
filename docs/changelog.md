@@ -4,7 +4,7 @@ All notable changes to pgEdge Vectorizer will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.0-alpha3] - 2025-11-03
+## [1.0-alpha3] - 2025-12-03
 
 ### Added
 
@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     age defined in the pgedge_vectorizer.auto_cleanup_hours GUC.
 - `generate_embedding()` function for generating embeddings from query text directly in SQL
 
-## [1.0-alpha2] - 2025-11-02
+## [1.0-alpha2] - 2025-12-02
 
 ### Added
 
