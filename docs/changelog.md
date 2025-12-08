@@ -4,6 +4,13 @@ All notable changes to pgEdge Vectorizer will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0-alpha4] - 2025-12-08
+
+### Fixed
+
+- Fixed uninitialized dimension variable in `generate_embedding()` that caused
+    spurious "Dimension mismatch" errors with random dimension values
+
 ## [1.0-alpha3] - 2025-12-03
 
 ### Added
