@@ -4,6 +4,14 @@ All notable changes to pgEdge Vectorizer will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0-alpha5] - 2025-12-12
+
+### Fixed
+
+- Fixed token-based chunking producing corrupted chunks when overlap > 0
+    (chunks would start mid-word like "ntence." instead of proper word boundaries)
+- Fixed potential negative index access in `find_good_break_point()` function
+
 ## [1.0-alpha4] - 2025-12-08
 
 ### Fixed
