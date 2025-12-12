@@ -145,7 +145,7 @@ SELECT
     c.content,
     c.embedding <=> '[0.1, 0.2, ...]'::vector AS distance
 FROM articles a
-JOIN articles_chunks c ON a.id = c.source_id
+JOIN articles_content_chunks c ON a.id = c.source_id
 ORDER BY distance
 LIMIT 5;
 ```
