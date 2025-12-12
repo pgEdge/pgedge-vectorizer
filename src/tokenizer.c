@@ -134,12 +134,18 @@ find_good_break_point(const char *text, int target_offset, int max_offset)
 {
 	int best_offset = target_offset;
 	int search_window = 50;  /* Look 50 chars before and after */
+	int search_start;
 
 	if (target_offset >= max_offset)
 		return max_offset;
 
+	/* Calculate search start, preventing negative index */
+	search_start = target_offset - search_window;
+	if (search_start < 0)
+		search_start = 0;
+
 	/* Look for paragraph break (double newline) */
-	for (int offset = target_offset - search_window;
+	for (int offset = search_start;
 		 offset < target_offset + search_window && offset < max_offset;
 		 offset++)
 	{
@@ -148,7 +154,7 @@ find_good_break_point(const char *text, int target_offset, int max_offset)
 	}
 
 	/* Look for sentence break (period, question mark, exclamation) */
-	for (int offset = target_offset - search_window;
+	for (int offset = search_start;
 		 offset < target_offset + search_window && offset < max_offset;
 		 offset++)
 	{
@@ -161,7 +167,7 @@ find_good_break_point(const char *text, int target_offset, int max_offset)
 	}
 
 	/* Look for word break (space) */
-	for (int offset = target_offset - search_window;
+	for (int offset = search_start;
 		 offset < target_offset + search_window && offset < max_offset;
 		 offset++)
 	{

@@ -214,23 +214,48 @@ chunk_by_tokens(const char *content, ChunkConfig *config)
 			chunk_text = cstring_to_text(chunk_str);
 			chunks = lappend(chunks, chunk_text);
 
-			pfree(chunk_str);
-			chunk_num++;
-
 			/* Move to next chunk, accounting for overlap */
+			/* Calculate overlap offset BEFORE freeing chunk_str */
 			if (config->overlap > 0 && config->overlap < chunk_tokens)
 			{
 				int overlap_offset = get_char_offset_for_tokens(
-					processed_content + start_offset,
+					chunk_str,  /* Use chunk text, not full remaining text */
 					chunk_tokens - config->overlap,
 					pgedge_vectorizer_model
 				);
+
+				/*
+				 * Adjust overlap_offset to a word boundary to avoid starting
+				 * the next chunk mid-word. Search forward for a space within
+				 * the chunk, as going backward could result in too much overlap
+				 * and tiny subsequent chunks.
+				 */
+				while (overlap_offset < end_offset &&
+					   chunk_str[overlap_offset] != ' ' &&
+					   chunk_str[overlap_offset] != '\n' &&
+					   chunk_str[overlap_offset] != '\t')
+				{
+					overlap_offset++;
+				}
+
+				/*
+				 * If we reached the end of chunk without finding a space,
+				 * use end_offset (no overlap for this chunk).
+				 */
+				if (overlap_offset >= end_offset)
+				{
+					overlap_offset = end_offset;
+				}
+
 				start_offset += overlap_offset;
 			}
 			else
 			{
 				start_offset += end_offset;
 			}
+
+			pfree(chunk_str);
+			chunk_num++;
 
 			/* Safety check to prevent infinite loop */
 			if (start_offset >= content_len)

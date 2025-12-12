@@ -43,3 +43,43 @@ SELECT array_length(
     ),
     1
 ) AS chunks_with_defaults;
+
+-- Test overlap chunking - verify chunks don't start mid-word
+-- This tests the bug fix for corrupted chunks when overlap > 0
+SELECT
+    chunk,
+    -- Verify chunk starts with a letter or quote (not mid-word)
+    substring(chunk, 1, 1) ~ '^[A-Za-z"'']' AS starts_properly
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        'This is the first sentence. This is the second sentence. This is the third sentence. This is the fourth sentence.',
+        'token_based',
+        10,
+        2
+    )
+) AS chunk;
+
+-- Test zero overlap (should work correctly)
+SELECT
+    chunk,
+    substring(chunk, 1, 1) ~ '^[A-Za-z"'']' AS starts_properly
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        'First sentence here. Second sentence here. Third sentence here.',
+        'token_based',
+        5,
+        0
+    )
+) AS chunk;
+
+-- Test large overlap (50%)
+SELECT
+    array_length(
+        pgedge_vectorizer.chunk_text(
+            'The quick brown fox jumps over the lazy dog. The quick brown fox jumps again.',
+            'token_based',
+            8,
+            4
+        ),
+        1
+    ) >= 1 AS large_overlap_works;
