@@ -1,6 +1,6 @@
 # pgedge_vectorizer extension
 comment = 'Asynchronous text chunking and vectorization for PostgreSQL'
-default_version = '1.0-alpha5'
+default_version = '1.0-beta1'
 module_pathname = '$libdir/pgedge_vectorizer'
 relocatable = false
 requires = 'vector'

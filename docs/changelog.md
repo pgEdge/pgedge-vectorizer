@@ -4,6 +4,16 @@ All notable changes to pgEdge Vectorizer will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0-beta1] - 2025-12-15
+
+### Changed
+
+- Promoted to beta status after extensive testing and bug fixes
+
+### Fixed
+
+- Fixed table name reference in vectorization code
+
 ## [1.0-alpha5] - 2025-12-12
 
 ### Fixed
