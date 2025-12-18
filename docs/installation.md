@@ -29,7 +29,7 @@ echo "your-api-key" > ~/.pgedge-vectorizer-llm-api-key
 chmod 600 ~/.pgedge-vectorizer-llm-api-key
 ```
 
-Then, modify the `postgresq.conf` file, adding the Vectorizer extension and API key file details:
+Then, modify the `postgresql.conf` file, adding the Vectorizer extension and API key file details:
 
 ```ini
 shared_preload_libraries = 'pgedge_vectorizer'
