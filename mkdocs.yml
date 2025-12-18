@@ -49,6 +49,21 @@ copyright: Copyright &copy; 2025 pgEdge, Inc
 repo_url: https://github.com/pgEdge/pgedge-vectorizer
 
 nav:
-  - Home: index.md
-  - Changelog: changelog.md
-
+  - pgEdge Vectorizer:
+      - Introduction: index.md
+      - Best Practices: best_practices.md
+  - Installing pgEdge Vectorizer:
+      - Installing pgEdge Vectorizer: installation.md
+      - pgEdge Vectorizer Quickstart: quickstart.md
+  - Configuring pgEdge Vectorizer:
+      - Vectorizer Configuration: configuration.md
+      - Configuring Provider Embeddings: embedding_providers.md
+  - Using Vectorizer:
+      - Using Vectorizer: using.md
+      - Using Vectorizer - Examples: examples.md
+      - Monitoring Activity: monitoring.md
+  - pgEdge Vectorizer API Reference: api_reference.md
+  - Running Vectorizer Tests: testing.md
+  - Troubleshooting: troubleshooting.md
+  - pgEdge Vectorizer Release Notes: changelog.md
+  - Licence: LICENCE.md
