@@ -7,7 +7,7 @@
  * from text queries, allowing users to query vectorized data entirely
  * through SQL without external embedding generation.
  *
- * Portions copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

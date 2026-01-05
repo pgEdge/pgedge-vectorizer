@@ -6,7 +6,7 @@
  * This file defines all configuration parameters for the pgedge_vectorizer
  * extension.
  *
- * Portions copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

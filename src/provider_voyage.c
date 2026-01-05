@@ -6,7 +6,7 @@
  * Voyage AI provides high-quality embeddings. The API is compatible
  * with OpenAI's API format.
  *
- * Portions copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

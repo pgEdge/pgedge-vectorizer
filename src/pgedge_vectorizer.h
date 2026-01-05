@@ -3,7 +3,7 @@
  * pgedge_vectorizer.h
  *		Main header file for pgEdge Vectorizer extension
  *
- * Portions copyright (c) 2025, pgEdge, Inc.
+ * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */
