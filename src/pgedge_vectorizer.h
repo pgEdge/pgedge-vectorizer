@@ -71,8 +71,46 @@ typedef enum
 	CHUNK_STRATEGY_SEMANTIC,   /* Semantic boundaries (future) */
 	CHUNK_STRATEGY_MARKDOWN,   /* Respect markdown structure (future) */
 	CHUNK_STRATEGY_SENTENCE,   /* Sentence-based (future) */
-	CHUNK_STRATEGY_RECURSIVE   /* Recursive character splitting (future) */
+	CHUNK_STRATEGY_RECURSIVE,  /* Recursive character splitting (future) */
+	CHUNK_STRATEGY_HYBRID      /* Hierarchical + tokenization-aware refinement */
 } ChunkStrategy;
+
+/*
+ * Markdown element types for hierarchical parsing
+ */
+typedef enum
+{
+	MD_ELEMENT_HEADING,        /* # Heading */
+	MD_ELEMENT_PARAGRAPH,      /* Regular text block */
+	MD_ELEMENT_CODE_BLOCK,     /* ``` code ``` */
+	MD_ELEMENT_LIST_ITEM,      /* - or * or 1. list item */
+	MD_ELEMENT_BLOCKQUOTE,     /* > quoted text */
+	MD_ELEMENT_TABLE,          /* | table | rows | */
+	MD_ELEMENT_HORIZONTAL_RULE /* --- or *** */
+} MarkdownElementType;
+
+/*
+ * Parsed markdown element
+ */
+typedef struct MarkdownElement
+{
+	MarkdownElementType type;
+	int heading_level;         /* 1-6 for headings, 0 otherwise */
+	char *content;             /* Text content of element */
+	int token_count;           /* Approximate token count */
+	char *heading_context;     /* Current heading hierarchy (e.g., "# H1 > ## H2") */
+} MarkdownElement;
+
+/*
+ * Chunk with metadata for hybrid chunking
+ */
+typedef struct HybridChunk
+{
+	char *content;             /* Chunk text */
+	int token_count;           /* Token count */
+	char *heading_context;     /* Heading hierarchy for this chunk */
+	int chunk_index;           /* Position in sequence */
+} HybridChunk;
 
 /*
  * Chunk configuration
@@ -127,7 +165,14 @@ int find_good_break_point(const char *text, int target_offset, int max_offset);
 
 /* chunking.c */
 ArrayType *chunk_text(const char *content, ChunkConfig *config);
+ArrayType *chunk_by_tokens(const char *content, ChunkConfig *config);
 ChunkStrategy parse_chunk_strategy(const char *strategy_str);
+
+/* hybrid_chunking.c */
+ArrayType *chunk_hybrid(const char *content, ChunkConfig *config);
+ArrayType *chunk_markdown(const char *content, ChunkConfig *config);
+List *parse_markdown_structure(const char *content);
+void free_markdown_elements(List *elements);
 
 /* worker.c */
 extern PGDLLEXPORT PGEDGE_NORETURN void pgedge_vectorizer_worker_main(Datum main_arg) PGEDGE_NORETURN_SUFFIX;
