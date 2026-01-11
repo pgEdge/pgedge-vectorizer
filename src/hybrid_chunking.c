@@ -88,9 +88,9 @@ is_likely_markdown(const char *content)
 			if (*pos == '#' && !has_heading)
 			{
 				int level = 0;
-				while (pos[level] == '#' && level < 6)
+				while (level < 6 && pos[level] == '#')
 					level++;
-				if (level > 0 && (pos[level] == ' ' || pos[level] == '\t' || pos[level] == '\n'))
+				if (level > 0 && (pos[level] == ' ' || pos[level] == '\t' || pos[level] == '\n' || pos[level] == '\0'))
 				{
 					has_heading = true;
 					indicators++;
@@ -100,7 +100,8 @@ is_likely_markdown(const char *content)
 			/* Code fence: ``` or ~~~ */
 			if ((*pos == '`' || *pos == '~') && !has_code_fence)
 			{
-				if (pos[0] == pos[1] && pos[1] == pos[2])
+				if (pos[1] != '\0' && pos[2] != '\0' &&
+					pos[0] == pos[1] && pos[1] == pos[2])
 				{
 					has_code_fence = true;
 					indicators++;
@@ -111,7 +112,7 @@ is_likely_markdown(const char *content)
 			if (!has_list)
 			{
 				if ((*pos == '-' || *pos == '*' || *pos == '+') &&
-					(pos[1] == ' ' || pos[1] == '\t'))
+					pos[1] != '\0' && (pos[1] == ' ' || pos[1] == '\t'))
 				{
 					has_list = true;
 					indicators++;
@@ -121,7 +122,7 @@ is_likely_markdown(const char *content)
 					const char *p = pos;
 					while (*p >= '0' && *p <= '9')
 						p++;
-					if ((*p == '.' || *p == ')') && (p[1] == ' ' || p[1] == '\t'))
+					if ((*p == '.' || *p == ')') && p[1] != '\0' && (p[1] == ' ' || p[1] == '\t'))
 					{
 						has_list = true;
 						indicators++;
@@ -660,19 +661,24 @@ is_list_item(const char *line, int len)
 	if (i >= len)
 		return false;
 
-	/* Check for unordered list markers: -, *, + */
-	if ((line[i] == '-' || line[i] == '*' || line[i] == '+') &&
-		i + 1 < len && (line[i+1] == ' ' || line[i+1] == '\t'))
-		return true;
+	/* Check for unordered list markers: -, *, + followed by space/tab */
+	if ((line[i] == '-' || line[i] == '*' || line[i] == '+'))
+	{
+		if (i + 1 < len && (line[i+1] == ' ' || line[i+1] == '\t'))
+			return true;
+		return false;
+	}
 
-	/* Check for ordered list: digit(s) followed by . or ) */
+	/* Check for ordered list: digit(s) followed by . or ) and space/tab */
 	if (line[i] >= '0' && line[i] <= '9')
 	{
 		while (i < len && line[i] >= '0' && line[i] <= '9')
 			i++;
-		if (i < len && (line[i] == '.' || line[i] == ')') &&
-			i + 1 < len && (line[i+1] == ' ' || line[i+1] == '\t'))
-			return true;
+		if (i < len && (line[i] == '.' || line[i] == ')'))
+		{
+			if (i + 1 < len && (line[i+1] == ' ' || line[i+1] == '\t'))
+				return true;
+		}
 	}
 
 	return false;
