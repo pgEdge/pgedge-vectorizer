@@ -20,7 +20,7 @@ This is section 2 content.',
     ),
     1
 ) >= 1 AS hybrid_basic_works;
- hybrid_basic_works
+ hybrid_basic_works 
 --------------------
  t
 (1 row)
@@ -41,7 +41,7 @@ Subsection content here.',
         0
     )
 ) AS chunk;
- has_context
+ has_context 
 -------------
  t
 (1 row)
@@ -65,7 +65,7 @@ That was the code.',
         0
     )
 ) AS chunk;
- code_blocks_preserved
+ code_blocks_preserved 
 -----------------------
  t
 (1 row)
@@ -92,7 +92,7 @@ SELECT
         ),
         1
     ) >= 1 AS lists_handled;
- lists_handled
+ lists_handled 
 ---------------
  t
 (1 row)
@@ -133,7 +133,7 @@ The analysis involved multiple steps including statistical tests and machine lea
         ),
         1
     ) >= 3 AS large_doc_chunked;
- large_doc_chunked
+ large_doc_chunked 
 -------------------
  t
 (1 row)
@@ -158,7 +158,7 @@ And another one:
         ),
         1
     ) >= 1 AS blockquotes_handled;
- blockquotes_handled
+ blockquotes_handled 
 ---------------------
  t
 (1 row)
@@ -180,7 +180,7 @@ The table above shows our data.',
         0
     )
 ) AS chunk;
- tables_preserved
+ tables_preserved 
 ------------------
  t
 (1 row)
@@ -195,7 +195,7 @@ SELECT array_length(
     ),
     1
 ) IS NULL AS empty_returns_null;
- empty_returns_null
+ empty_returns_null 
 --------------------
  t
 (1 row)
@@ -210,7 +210,7 @@ FROM unnest(
         5
     )
 ) AS chunk;
- plain_text_no_context
+ plain_text_no_context 
 -----------------------
  t
 (1 row)
@@ -235,7 +235,7 @@ Content at level 3 should have full heading hierarchy.',
         0
     )
 ) AS chunk;
- nested_context_preserved
+ nested_context_preserved 
 --------------------------
  t
 (1 row)
@@ -259,7 +259,7 @@ Content B.',
         ),
         1
     ) >= 1 AS hr_handled;
- hr_handled
+ hr_handled 
 ------------
  t
 (1 row)
@@ -309,7 +309,7 @@ Thanks for reading!',
         ),
         1
     ) >= 2 AS mixed_content_works;
- mixed_content_works
+ mixed_content_works 
 ---------------------
  t
 (1 row)
@@ -332,7 +332,7 @@ More content here that will also be split.',
         3
     )
 ) AS chunk;
- all_chunks_start_properly
+ all_chunks_start_properly 
 ---------------------------
  t
 (1 row)
@@ -351,7 +351,7 @@ FROM unnest(
         5
     )
 ) AS chunk;
- no_context_for_plain_text
+ no_context_for_plain_text 
 ---------------------------
  t
 (1 row)
@@ -377,7 +377,7 @@ Content for section two.',
         ),
         1
     ) >= 1 AS markdown_strategy_works;
- markdown_strategy_works
+ markdown_strategy_works 
 -------------------------
  t
 (1 row)
@@ -398,7 +398,7 @@ Subsection content.',
         0
     )
 ) AS chunk;
- markdown_has_context
+ markdown_has_context 
 ----------------------
  t
 (1 row)
@@ -413,7 +413,7 @@ FROM unnest(
         5
     )
 ) AS chunk;
- markdown_fallback_no_context
+ markdown_fallback_no_context 
 ------------------------------
  t
 (1 row)
@@ -430,7 +430,7 @@ But this document has a heading, so it should be treated as markdown and get con
         0
     )
 ) AS chunk;
- heading_triggers_markdown
+ heading_triggers_markdown 
 ---------------------------
  t
 (1 row)
@@ -451,7 +451,7 @@ That was the code.',
         0
     )
 ) AS chunk;
- code_fence_preserved
+ code_fence_preserved 
 ----------------------
  t
 (1 row)
@@ -468,7 +468,7 @@ Content here.',
         0
     )
 ) AS chunk;
- token_based_no_context
+ token_based_no_context 
 ------------------------
  t
 (1 row)
