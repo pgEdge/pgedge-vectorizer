@@ -38,6 +38,8 @@ parse_chunk_strategy(const char *strategy_str)
 		return CHUNK_STRATEGY_SENTENCE;
 	else if (pg_strcasecmp(strategy_str, "recursive") == 0)
 		return CHUNK_STRATEGY_RECURSIVE;
+	else if (pg_strcasecmp(strategy_str, "hybrid") == 0)
+		return CHUNK_STRATEGY_HYBRID;
 
 	elog(WARNING, "Unknown chunk strategy '%s', defaulting to token_based",
 		 strategy_str);
@@ -63,6 +65,9 @@ chunk_text(const char *content, ChunkConfig *config)
 	{
 		case CHUNK_STRATEGY_TOKEN:
 			return chunk_by_tokens(content, config);
+
+		case CHUNK_STRATEGY_HYBRID:
+			return chunk_hybrid(content, config);
 
 		case CHUNK_STRATEGY_SEMANTIC:
 		case CHUNK_STRATEGY_MARKDOWN:

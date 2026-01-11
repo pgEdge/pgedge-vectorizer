@@ -4,6 +4,16 @@ All notable changes to pgEdge Vectorizer will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Hybrid chunking strategy (`hybrid`) inspired by Docling's approach
+    - Parses markdown structure (headings, code blocks, lists, blockquotes, tables)
+    - Preserves heading context hierarchy in each chunk for better RAG retrieval
+    - Two-pass refinement: splits oversized chunks, merges undersized consecutive chunks with same context
+    - Significantly improves retrieval accuracy for structured documents
+
 ## [1.0-beta1] - 2025-12-15
 
 ### Changed

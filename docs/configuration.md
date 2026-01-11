@@ -37,6 +37,56 @@ These settings determine how text content is split into chunks before embedding 
 | `pgedge_vectorizer.default_chunk_overlap` | `50` | Overlap in tokens | Yes | No | No |
 | `pgedge_vectorizer.strip_non_ascii` | `true` | Strip non-ASCII characters (emoji, box-drawing, etc.) | Yes | No | No |
 
+### Chunking Strategies
+
+The `default_chunk_strategy` parameter accepts the following values:
+
+| Strategy | Description |
+|----------|-------------|
+| `token_based` | Fixed token count chunking with overlap. Simple and fast. Default strategy. |
+| `hybrid` | Structure-aware chunking inspired by Docling. Parses markdown structure, preserves heading context, and applies two-pass refinement (split oversized, merge undersized). Best for RAG with structured documents. |
+
+#### Hybrid Chunking Strategy
+
+The `hybrid` strategy provides superior chunking for structured documents by:
+
+1. **Parsing markdown structure**: Recognizes headings, code blocks, lists, blockquotes, tables, and paragraphs
+2. **Preserving heading context**: Each chunk includes its heading hierarchy (e.g., `[Context: # Chapter 1 > ## Section 1.1]`)
+3. **Two-pass refinement**:
+   - Pass 1: Splits chunks that exceed the token limit at natural boundaries
+   - Pass 2: Merges consecutive undersized chunks that share the same heading context
+
+This approach significantly improves RAG retrieval accuracy by maintaining semantic context that would be lost with naive text splitting.
+
+Example usage:
+
+```sql
+-- Enable vectorization with hybrid chunking
+SELECT pgedge_vectorizer.enable_vectorization(
+    'documents',
+    'content',
+    chunk_strategy := 'hybrid',
+    chunk_size := 400,
+    chunk_overlap := 50
+);
+
+-- Or chunk text directly
+SELECT * FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        '# Introduction
+
+This is the introduction.
+
+## Background
+
+More content here...',
+        'hybrid',
+        200,
+        20
+    )
+);
+```
+
 ## Queue Management
 
 These settings control automatic cleanup of completed queue items to prevent unbounded growth.
