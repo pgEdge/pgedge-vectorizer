@@ -16,7 +16,7 @@
 #include "utils/lsyscache.h"
 
 /* Forward declarations */
-static ArrayType *chunk_by_tokens(const char *content, ChunkConfig *config);
+/* chunk_by_tokens is declared in header for use by hybrid_chunking.c fallback */
 
 /*
  * Parse chunk strategy string
@@ -132,8 +132,11 @@ strip_non_ascii(const char *text)
  *
  * Splits text into chunks of approximately chunk_size tokens with
  * chunk_overlap tokens overlapping between consecutive chunks.
+ *
+ * This function is also called directly by hybrid_chunking.c when
+ * falling back from markdown/hybrid strategies for plain text.
  */
-static ArrayType *
+ArrayType *
 chunk_by_tokens(const char *content, ChunkConfig *config)
 {
 	int content_len;

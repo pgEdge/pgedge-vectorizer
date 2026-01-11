@@ -1062,7 +1062,7 @@ chunk_markdown(const char *content, ChunkConfig *config)
 	if (!is_likely_markdown(content))
 	{
 		elog(DEBUG1, "Content doesn't appear to be markdown, falling back to token-based chunking");
-		return chunk_text(content, config);
+		return chunk_by_tokens(content, config);
 	}
 
 	elog(DEBUG1, "Markdown chunking: chunk_size=%d", config->chunk_size);
@@ -1115,7 +1115,7 @@ chunk_hybrid(const char *content, ChunkConfig *config)
 	if (!is_likely_markdown(content))
 	{
 		elog(DEBUG1, "Content doesn't appear to be markdown, falling back to token-based chunking");
-		return chunk_text(content, config);
+		return chunk_by_tokens(content, config);
 	}
 
 	elog(DEBUG1, "Hybrid chunking: chunk_size=%d, overlap=%d",

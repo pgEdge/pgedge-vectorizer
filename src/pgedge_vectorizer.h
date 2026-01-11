@@ -165,6 +165,7 @@ int find_good_break_point(const char *text, int target_offset, int max_offset);
 
 /* chunking.c */
 ArrayType *chunk_text(const char *content, ChunkConfig *config);
+ArrayType *chunk_by_tokens(const char *content, ChunkConfig *config);
 ChunkStrategy parse_chunk_strategy(const char *strategy_str);
 
 /* hybrid_chunking.c */
