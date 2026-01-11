@@ -19,6 +19,9 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 
+/* Maximum heading levels in markdown (h1-h6) */
+#define MAX_HEADING_LEVELS 6
+
 /* Forward declarations */
 static List *split_oversized_chunks(List *chunks, int max_tokens);
 static List *merge_undersized_chunks(List *chunks, int min_tokens, int max_tokens);
@@ -88,7 +91,7 @@ is_likely_markdown(const char *content)
 			if (*pos == '#' && !has_heading)
 			{
 				int level = 0;
-				while (level < 6 && pos[level] == '#')
+				while (level < MAX_HEADING_LEVELS && pos[level] == '#')
 					level++;
 				if (level > 0 && (pos[level] == ' ' || pos[level] == '\t' || pos[level] == '\n' || pos[level] == '\0'))
 				{
@@ -223,7 +226,7 @@ parse_markdown_structure(const char *content)
 	bool in_code_block = false;
 	StringInfoData current_block;
 	MarkdownElementType current_type = MD_ELEMENT_PARAGRAPH;
-	char *heading_stack[6] = {NULL};  /* Max 6 heading levels */
+	char *heading_stack[MAX_HEADING_LEVELS] = {NULL};
 	int stack_depth = 0;
 	char *current_heading_context = NULL;
 
@@ -340,7 +343,7 @@ parse_markdown_structure(const char *content)
 
 			/* Update heading stack */
 			/* Clear deeper levels */
-			for (int i = heading_level; i < 6; i++)
+			for (int i = heading_level; i < MAX_HEADING_LEVELS; i++)
 			{
 				if (heading_stack[i] != NULL)
 				{
@@ -366,7 +369,7 @@ parse_markdown_structure(const char *content)
 			/* Update current heading context */
 			if (current_heading_context != NULL)
 				pfree(current_heading_context);
-			current_heading_context = build_heading_context(heading_stack, 6);
+			current_heading_context = build_heading_context(heading_stack, MAX_HEADING_LEVELS);
 
 			/* Create heading element */
 			MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
@@ -490,7 +493,7 @@ parse_markdown_structure(const char *content)
 
 	/* Cleanup */
 	pfree(current_block.data);
-	for (int i = 0; i < 6; i++)
+	for (int i = 0; i < MAX_HEADING_LEVELS; i++)
 	{
 		if (heading_stack[i] != NULL)
 			pfree(heading_stack[i]);
@@ -611,7 +614,7 @@ get_heading_level(const char *line, int len)
 		return 0;
 
 	/* Count # at start */
-	while (level < len && level < 6 && line[level] == '#')
+	while (level < len && level < MAX_HEADING_LEVELS && line[level] == '#')
 		level++;
 
 	/* Must have at least one # and be followed by space or end of line */
