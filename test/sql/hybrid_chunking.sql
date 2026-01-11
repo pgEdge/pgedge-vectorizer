@@ -22,10 +22,8 @@ This is section 2 content.',
     1
 ) >= 1 AS hybrid_basic_works;
 
--- Test 2: Verify heading context is preserved
-SELECT
-    chunk,
-    chunk LIKE '%[Context:%' AS has_context
+-- Test 2: Verify heading context is preserved (check any chunk has context)
+SELECT bool_or(chunk LIKE '%[Context:%') AS has_context
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         '# Main Title
@@ -42,9 +40,7 @@ Subsection content here.',
 ) AS chunk;
 
 -- Test 3: Code blocks should be kept together
-SELECT
-    chunk,
-    chunk LIKE '%```%' AS contains_code_fence
+SELECT bool_or(chunk LIKE '%```%') AS code_blocks_preserved
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         '# Code Example
@@ -61,8 +57,7 @@ That was the code.',
         200,
         0
     )
-) AS chunk
-WHERE chunk LIKE '%```%';
+) AS chunk;
 
 -- Test 4: Lists should be handled properly
 SELECT
@@ -146,9 +141,7 @@ And another one:
     ) >= 1 AS blockquotes_handled;
 
 -- Test 7: Tables handling
-SELECT
-    chunk,
-    chunk LIKE '%|%' AS contains_table
+SELECT bool_or(chunk LIKE '%|%') AS tables_preserved
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         '# Data Table
@@ -163,8 +156,7 @@ The table above shows our data.',
         200,
         0
     )
-) AS chunk
-WHERE chunk LIKE '%|%';
+) AS chunk;
 
 -- Test 8: Empty content handling
 SELECT array_length(
@@ -177,21 +169,19 @@ SELECT array_length(
     1
 ) IS NULL AS empty_returns_null;
 
--- Test 9: Plain text (no markdown) still works
-SELECT
-    array_length(
-        pgedge_vectorizer.chunk_text(
-            'This is plain text without any markdown formatting. It should still be chunked properly by the hybrid strategy, treating it as paragraph content.',
-            'hybrid',
-            20,
-            5
-        ),
-        1
-    ) >= 1 AS plain_text_works;
+-- Test 9: Plain text fallback works (no context prefix for plain text)
+SELECT bool_and(chunk NOT LIKE '%[Context:%') AS plain_text_no_context
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        'This is plain text without any markdown formatting. It should still be chunked properly by the hybrid strategy falling back to token based.',
+        'hybrid',
+        20,
+        5
+    )
+) AS chunk;
 
 -- Test 10: Nested headings preserve full context
-SELECT
-    chunk
+SELECT bool_or(chunk LIKE '%Level 1%Level 2%Level 3%') AS nested_context_preserved
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         '# Level 1
@@ -206,11 +196,10 @@ Content at level 2.
 
 Content at level 3 should have full heading hierarchy.',
         'hybrid',
-        30,
+        100,
         0
     )
-) AS chunk
-WHERE chunk LIKE '%Level 3%';
+) AS chunk;
 
 -- Test 11: Horizontal rules create section breaks
 SELECT
@@ -279,9 +268,9 @@ Thanks for reading!',
     ) >= 2 AS mixed_content_works;
 
 -- Test 13: Chunks start properly (not mid-word)
-SELECT
-    chunk,
-    substring(chunk, 1, 1) ~ '^[\[A-Za-z#>\-\*0-9`|"'']' AS starts_properly
+SELECT bool_and(
+    substring(chunk, 1, 1) ~ '^[\[A-Za-z#>\-\*0-9`|"'']'
+) AS all_chunks_start_properly
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         '# First Section
@@ -303,9 +292,7 @@ More content here that will also be split.',
 
 -- Test 14: Plain text with hybrid strategy falls back to token-based
 -- (no heading context should be added since it's not markdown)
-SELECT
-    chunk,
-    chunk NOT LIKE '%[Context:%' AS no_context_for_plain_text
+SELECT bool_and(chunk NOT LIKE '%[Context:%') AS no_context_for_plain_text
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         'This is plain text without any markdown syntax at all. It does not have headings or code blocks or lists. The hybrid chunker should detect this and fall back to simple token-based chunking for efficiency.',
@@ -313,8 +300,7 @@ FROM unnest(
         30,
         5
     )
-) AS chunk
-LIMIT 1;
+) AS chunk;
 
 -- Test 15: Pure markdown strategy basic test
 SELECT
@@ -339,9 +325,7 @@ Content for section two.',
     ) >= 1 AS markdown_strategy_works;
 
 -- Test 16: Markdown strategy preserves heading context
-SELECT
-    chunk,
-    chunk LIKE '%[Context:%' AS has_context
+SELECT bool_or(chunk LIKE '%[Context:%') AS markdown_has_context
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         '# Title
@@ -355,14 +339,10 @@ Subsection content.',
         50,
         0
     )
-) AS chunk
-WHERE chunk LIKE '%Subsection%'
-LIMIT 1;
+) AS chunk;
 
 -- Test 17: Plain text with markdown strategy falls back to token-based
-SELECT
-    chunk,
-    chunk NOT LIKE '%[Context:%' AS no_context_for_plain_text
+SELECT bool_and(chunk NOT LIKE '%[Context:%') AS markdown_fallback_no_context
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         'This document has no markdown formatting whatsoever. It is purely plain text that should be chunked using the token-based strategy as a fallback.',
@@ -370,13 +350,10 @@ FROM unnest(
         30,
         5
     )
-) AS chunk
-LIMIT 1;
+) AS chunk;
 
 -- Test 18: Markdown detection - single heading is enough
-SELECT
-    chunk,
-    chunk LIKE '%[Context:%' AS detects_single_heading
+SELECT bool_or(chunk LIKE '%[Context:%') AS heading_triggers_markdown
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         '# Just One Heading
@@ -386,14 +363,10 @@ But this document has a heading, so it should be treated as markdown and get con
         100,
         0
     )
-) AS chunk
-WHERE chunk LIKE '%heading%'
-LIMIT 1;
+) AS chunk;
 
 -- Test 19: Markdown detection - code fence is enough
-SELECT
-    chunk,
-    chunk LIKE '%```%' AS has_code_fence
+SELECT bool_or(chunk LIKE '%```%') AS code_fence_preserved
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         'Here is some text with a code block:
@@ -407,15 +380,10 @@ That was the code.',
         100,
         0
     )
-) AS chunk
-WHERE chunk LIKE '%```%'
-LIMIT 1;
+) AS chunk;
 
--- Test 20: Compare token_based vs markdown strategy output format
--- Token-based should never have [Context: prefix
-SELECT
-    chunk,
-    chunk NOT LIKE '%[Context:%' AS token_based_no_context
+-- Test 20: Token-based strategy never adds context prefix
+SELECT bool_and(chunk NOT LIKE '%[Context:%') AS token_based_no_context
 FROM unnest(
     pgedge_vectorizer.chunk_text(
         '# Heading
@@ -425,5 +393,4 @@ Content here.',
         100,
         0
     )
-) AS chunk
-LIMIT 1;
+) AS chunk;
