@@ -69,8 +69,10 @@ chunk_text(const char *content, ChunkConfig *config)
 		case CHUNK_STRATEGY_HYBRID:
 			return chunk_hybrid(content, config);
 
-		case CHUNK_STRATEGY_SEMANTIC:
 		case CHUNK_STRATEGY_MARKDOWN:
+			return chunk_markdown(content, config);
+
+		case CHUNK_STRATEGY_SEMANTIC:
 		case CHUNK_STRATEGY_SENTENCE:
 		case CHUNK_STRATEGY_RECURSIVE:
 			/* Not yet implemented - fall back to token-based */

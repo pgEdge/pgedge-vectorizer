@@ -296,3 +296,134 @@ More content here that will also be split.',
         3
     )
 ) AS chunk;
+
+-- ============================================================================
+-- FALLBACK BEHAVIOR TESTS
+-- ============================================================================
+
+-- Test 14: Plain text with hybrid strategy falls back to token-based
+-- (no heading context should be added since it's not markdown)
+SELECT
+    chunk,
+    chunk NOT LIKE '%[Context:%' AS no_context_for_plain_text
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        'This is plain text without any markdown syntax at all. It does not have headings or code blocks or lists. The hybrid chunker should detect this and fall back to simple token-based chunking for efficiency.',
+        'hybrid',
+        30,
+        5
+    )
+) AS chunk
+LIMIT 1;
+
+-- Test 15: Pure markdown strategy basic test
+SELECT
+    array_length(
+        pgedge_vectorizer.chunk_text(
+            '# Markdown Document
+
+This is a markdown document.
+
+## Section One
+
+Content for section one.
+
+## Section Two
+
+Content for section two.',
+            'markdown',
+            100,
+            0
+        ),
+        1
+    ) >= 1 AS markdown_strategy_works;
+
+-- Test 16: Markdown strategy preserves heading context
+SELECT
+    chunk,
+    chunk LIKE '%[Context:%' AS has_context
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        '# Title
+
+Intro paragraph.
+
+## Subsection
+
+Subsection content.',
+        'markdown',
+        50,
+        0
+    )
+) AS chunk
+WHERE chunk LIKE '%Subsection%'
+LIMIT 1;
+
+-- Test 17: Plain text with markdown strategy falls back to token-based
+SELECT
+    chunk,
+    chunk NOT LIKE '%[Context:%' AS no_context_for_plain_text
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        'This document has no markdown formatting whatsoever. It is purely plain text that should be chunked using the token-based strategy as a fallback.',
+        'markdown',
+        30,
+        5
+    )
+) AS chunk
+LIMIT 1;
+
+-- Test 18: Markdown detection - single heading is enough
+SELECT
+    chunk,
+    chunk LIKE '%[Context:%' AS detects_single_heading
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        '# Just One Heading
+
+But this document has a heading, so it should be treated as markdown and get context.',
+        'hybrid',
+        100,
+        0
+    )
+) AS chunk
+WHERE chunk LIKE '%heading%'
+LIMIT 1;
+
+-- Test 19: Markdown detection - code fence is enough
+SELECT
+    chunk,
+    chunk LIKE '%```%' AS has_code_fence
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        'Here is some text with a code block:
+
+```python
+print("hello")
+```
+
+That was the code.',
+        'hybrid',
+        100,
+        0
+    )
+) AS chunk
+WHERE chunk LIKE '%```%'
+LIMIT 1;
+
+-- Test 20: Compare token_based vs markdown strategy output format
+-- Token-based should never have [Context: prefix
+SELECT
+    chunk,
+    chunk NOT LIKE '%[Context:%' AS token_based_no_context
+FROM unnest(
+    pgedge_vectorizer.chunk_text(
+        '# Heading
+
+Content here.',
+        'token_based',
+        100,
+        0
+    )
+) AS chunk
+LIMIT 1;

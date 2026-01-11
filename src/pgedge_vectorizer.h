@@ -169,6 +169,7 @@ ChunkStrategy parse_chunk_strategy(const char *strategy_str);
 
 /* hybrid_chunking.c */
 ArrayType *chunk_hybrid(const char *content, ChunkConfig *config);
+ArrayType *chunk_markdown(const char *content, ChunkConfig *config);
 List *parse_markdown_structure(const char *content);
 void free_markdown_elements(List *elements);
 

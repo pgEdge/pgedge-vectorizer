@@ -32,6 +32,174 @@ static bool is_list_item(const char *line, int len);
 static bool is_blockquote(const char *line, int len);
 static bool is_horizontal_rule(const char *line, int len);
 static bool is_table_row(const char *line, int len);
+static bool is_likely_markdown(const char *content);
+static ArrayType *elements_to_chunks_simple(List *elements, ChunkConfig *config);
+
+/*
+ * Detect if content is likely to be markdown
+ *
+ * Returns true if the content contains markdown-specific syntax that
+ * would benefit from structure-aware chunking. Falls back to token-based
+ * chunking for plain text to avoid unnecessary overhead.
+ *
+ * Detection criteria (need at least 2 indicators for confidence):
+ * - Headings (# at start of line)
+ * - Code fences (``` or ~~~)
+ * - List items (-, *, +, or numbered)
+ * - Blockquotes (>)
+ * - Tables (| characters)
+ * - Links/images ([text](url) or ![alt](url))
+ */
+static bool
+is_likely_markdown(const char *content)
+{
+	int indicators = 0;
+	const char *pos = content;
+	bool at_line_start = true;
+	int content_len;
+	bool has_heading = false;
+	bool has_code_fence = false;
+	bool has_list = false;
+	bool has_blockquote = false;
+	bool has_table = false;
+	bool has_link = false;
+
+	if (content == NULL || content[0] == '\0')
+		return false;
+
+	content_len = strlen(content);
+
+	/* Quick scan for markdown indicators */
+	while (*pos != '\0')
+	{
+		/* Check line-start patterns */
+		if (at_line_start)
+		{
+			/* Skip leading whitespace (up to 3 spaces for markdown) */
+			const char *line_start = pos;
+			int spaces = 0;
+			while (*pos == ' ' && spaces < 4)
+			{
+				pos++;
+				spaces++;
+			}
+
+			/* Heading: # at start of line */
+			if (*pos == '#' && !has_heading)
+			{
+				int level = 0;
+				while (pos[level] == '#' && level < 6)
+					level++;
+				if (level > 0 && (pos[level] == ' ' || pos[level] == '\t' || pos[level] == '\n'))
+				{
+					has_heading = true;
+					indicators++;
+				}
+			}
+
+			/* Code fence: ``` or ~~~ */
+			if ((*pos == '`' || *pos == '~') && !has_code_fence)
+			{
+				if (pos[0] == pos[1] && pos[1] == pos[2])
+				{
+					has_code_fence = true;
+					indicators++;
+				}
+			}
+
+			/* List item: -, *, +, or digit followed by . or ) */
+			if (!has_list)
+			{
+				if ((*pos == '-' || *pos == '*' || *pos == '+') &&
+					(pos[1] == ' ' || pos[1] == '\t'))
+				{
+					has_list = true;
+					indicators++;
+				}
+				else if (*pos >= '0' && *pos <= '9')
+				{
+					const char *p = pos;
+					while (*p >= '0' && *p <= '9')
+						p++;
+					if ((*p == '.' || *p == ')') && (p[1] == ' ' || p[1] == '\t'))
+					{
+						has_list = true;
+						indicators++;
+					}
+				}
+			}
+
+			/* Blockquote: > at start */
+			if (*pos == '>' && !has_blockquote)
+			{
+				has_blockquote = true;
+				indicators++;
+			}
+
+			pos = line_start;  /* Reset to scan rest of line */
+		}
+
+		/* Check inline patterns */
+		/* Table: | character (simple heuristic) */
+		if (*pos == '|' && !has_table)
+		{
+			/* Look for another | on the same line to confirm table */
+			const char *p = pos + 1;
+			while (*p != '\0' && *p != '\n')
+			{
+				if (*p == '|')
+				{
+					has_table = true;
+					indicators++;
+					break;
+				}
+				p++;
+			}
+		}
+
+		/* Links: [text](url) or images: ![alt](url) */
+		if (*pos == '[' && !has_link)
+		{
+			const char *p = pos + 1;
+			int bracket_depth = 1;
+			while (*p != '\0' && bracket_depth > 0)
+			{
+				if (*p == '[')
+					bracket_depth++;
+				else if (*p == ']')
+					bracket_depth--;
+				p++;
+			}
+			if (bracket_depth == 0 && *p == '(')
+			{
+				has_link = true;
+				indicators++;
+			}
+		}
+
+		/* Track line boundaries */
+		if (*pos == '\n')
+		{
+			at_line_start = true;
+			pos++;
+		}
+		else
+		{
+			at_line_start = false;
+			pos++;
+		}
+
+		/* Early exit if we have enough indicators */
+		if (indicators >= 2)
+			return true;
+	}
+
+	/* Require at least 1 strong indicator (heading or code fence) or 2 weak indicators */
+	if (has_heading || has_code_fence)
+		return true;
+
+	return indicators >= 2;
+}
 
 /*
  * Parse markdown content into structured elements
@@ -750,14 +918,182 @@ merge_undersized_chunks(List *chunks, int min_tokens, int max_tokens)
 }
 
 /*
+ * Convert parsed markdown elements to simple chunks (no refinement)
+ *
+ * Used by the pure 'markdown' strategy - respects structure but doesn't
+ * do the split/merge refinement passes.
+ */
+static ArrayType *
+elements_to_chunks_simple(List *elements, ChunkConfig *config)
+{
+	ListCell *lc;
+	int chunk_count;
+	Datum *chunk_datums;
+	ArrayType *result;
+	int i;
+	List *chunks = NIL;
+
+	if (elements == NIL)
+		return construct_empty_array(TEXTOID);
+
+	/* Convert elements to chunks, respecting structure boundaries */
+	foreach(lc, elements)
+	{
+		MarkdownElement *elem = (MarkdownElement *) lfirst(lc);
+
+		/* Skip horizontal rules */
+		if (elem->type == MD_ELEMENT_HORIZONTAL_RULE)
+			continue;
+
+		/* If element exceeds chunk size, we need to split it */
+		if (elem->token_count > config->chunk_size)
+		{
+			/* Split large elements at natural boundaries */
+			const char *content = elem->content;
+			int content_len = strlen(content);
+			int start_offset = 0;
+
+			while (start_offset < content_len)
+			{
+				int target_offset;
+				int end_offset;
+				char *sub_content;
+				HybridChunk *chunk;
+
+				target_offset = get_char_offset_for_tokens(
+					content + start_offset,
+					config->chunk_size,
+					pgedge_vectorizer_model
+				);
+
+				end_offset = find_good_break_point(
+					content + start_offset,
+					target_offset,
+					content_len - start_offset
+				);
+
+				if (end_offset <= 0)
+					end_offset = target_offset > 0 ? target_offset : content_len - start_offset;
+
+				sub_content = pnstrdup(content + start_offset, end_offset);
+				chunk = create_hybrid_chunk(sub_content, elem->heading_context);
+				pfree(sub_content);
+
+				chunks = lappend(chunks, chunk);
+
+				start_offset += end_offset;
+				while (start_offset < content_len &&
+					   (content[start_offset] == ' ' ||
+						content[start_offset] == '\t' ||
+						content[start_offset] == '\n'))
+				{
+					start_offset++;
+				}
+			}
+		}
+		else
+		{
+			/* Element fits in one chunk */
+			HybridChunk *chunk = create_hybrid_chunk(elem->content, elem->heading_context);
+			chunks = lappend(chunks, chunk);
+		}
+	}
+
+	/* Convert to array */
+	chunk_count = list_length(chunks);
+	if (chunk_count == 0)
+		return construct_empty_array(TEXTOID);
+
+	chunk_datums = palloc(chunk_count * sizeof(Datum));
+
+	i = 0;
+	foreach(lc, chunks)
+	{
+		HybridChunk *chunk = (HybridChunk *) lfirst(lc);
+		StringInfoData chunk_text;
+
+		initStringInfo(&chunk_text);
+
+		if (chunk->heading_context != NULL && strlen(chunk->heading_context) > 0)
+		{
+			appendStringInfoString(&chunk_text, "[Context: ");
+			appendStringInfoString(&chunk_text, chunk->heading_context);
+			appendStringInfoString(&chunk_text, "]\n\n");
+		}
+
+		appendStringInfoString(&chunk_text, chunk->content);
+
+		chunk_datums[i++] = PointerGetDatum(cstring_to_text(chunk_text.data));
+		pfree(chunk_text.data);
+	}
+
+	result = construct_array(chunk_datums, chunk_count, TEXTOID, -1, false, TYPALIGN_INT);
+
+	/* Cleanup */
+	pfree(chunk_datums);
+	foreach(lc, chunks)
+	{
+		free_hybrid_chunk((HybridChunk *) lfirst(lc));
+	}
+	list_free(chunks);
+
+	return result;
+}
+
+/*
+ * Pure markdown chunking (structure-aware, no refinement)
+ *
+ * Respects markdown structure boundaries but doesn't apply the
+ * split/merge refinement passes. Simpler and faster than hybrid,
+ * but may produce less optimal chunk sizes for embeddings.
+ *
+ * Falls back to token-based chunking if content isn't markdown.
+ */
+ArrayType *
+chunk_markdown(const char *content, ChunkConfig *config)
+{
+	List *elements;
+	ArrayType *result;
+
+	if (content == NULL || content[0] == '\0')
+		return construct_empty_array(TEXTOID);
+
+	/* Check if content is actually markdown */
+	if (!is_likely_markdown(content))
+	{
+		elog(DEBUG1, "Content doesn't appear to be markdown, falling back to token-based chunking");
+		return chunk_text(content, config);
+	}
+
+	elog(DEBUG1, "Markdown chunking: chunk_size=%d", config->chunk_size);
+
+	/* Parse structure */
+	elements = parse_markdown_structure(content);
+
+	if (elements == NIL)
+		return construct_empty_array(TEXTOID);
+
+	elog(DEBUG2, "Parsed %d markdown elements", list_length(elements));
+
+	/* Convert to chunks (simple, no refinement) */
+	result = elements_to_chunks_simple(elements, config);
+
+	/* Cleanup */
+	free_markdown_elements(elements);
+
+	return result;
+}
+
+/*
  * Main hybrid chunking function
  *
  * Implements Docling-style hybrid chunking:
- * 1. Parse markdown structure into elements
- * 2. Convert elements to initial chunks with heading context
- * 3. Split oversized chunks (Pass 1)
- * 4. Merge undersized consecutive chunks with same context (Pass 2)
- * 5. Return as PostgreSQL text array
+ * 1. Detect if content is markdown (fall back to token-based if not)
+ * 2. Parse markdown structure into elements
+ * 3. Convert elements to initial chunks with heading context
+ * 4. Split oversized chunks (Pass 1)
+ * 5. Merge undersized consecutive chunks with same context (Pass 2)
+ * 6. Return as PostgreSQL text array
  */
 ArrayType *
 chunk_hybrid(const char *content, ChunkConfig *config)
@@ -774,6 +1110,13 @@ chunk_hybrid(const char *content, ChunkConfig *config)
 
 	if (content == NULL || content[0] == '\0')
 		return construct_empty_array(TEXTOID);
+
+	/* Step 0: Check if content is actually markdown */
+	if (!is_likely_markdown(content))
+	{
+		elog(DEBUG1, "Content doesn't appear to be markdown, falling back to token-based chunking");
+		return chunk_text(content, config);
+	}
 
 	elog(DEBUG1, "Hybrid chunking: chunk_size=%d, overlap=%d",
 		 config->chunk_size, config->overlap);
