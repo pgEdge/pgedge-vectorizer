@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0-beta2] - 2026-01-13
+
 ### Added
 
 - Hybrid chunking strategy (`hybrid`) inspired by Docling's approach
@@ -20,6 +22,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     - Detects if content is likely markdown based on syntax patterns
     - Falls back to `token_based` chunking for plain text to avoid overhead
     - Ensures optimal strategy is always used regardless of content type
+
+### Fixed
+
+- Fixed potential buffer over-read vulnerabilities in markdown detection
+- Fixed infinite recursion in markdown/hybrid fallback when content is plain text
 
 ## [1.0-beta1] - 2025-12-15
 
