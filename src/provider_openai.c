@@ -243,7 +243,7 @@ write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 
 	mem->data = ptr;
 	/* flawfinder: ignore - buffer was realloced to mem->size + realsize + 1 */
-	memcpy(&(mem->data[mem->size]), contents, realsize);
+	memcpy(&(mem->data[mem->size]), contents, realsize);  /* nosemgrep */
 	mem->size += realsize;
 	mem->data[mem->size] = 0;
 

@@ -962,6 +962,7 @@ elements_to_chunks_simple(List *elements, ChunkConfig *config)
 		{
 			/* Split large elements at natural boundaries */
 			const char *content = elem->content;
+			/* flawfinder: ignore - elem->content is palloc'd, null-terminated */
 			int content_len = strlen(content);
 			int start_offset = 0;
 
