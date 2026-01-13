@@ -9,6 +9,7 @@ MODULE_big = $(EXTENSION)
 OBJS = src/pgedge_vectorizer.o \
        src/guc.o \
        src/chunking.o \
+       src/hybrid_chunking.o \
        src/tokenizer.o \
        src/provider.o \
        src/provider_openai.o \
@@ -21,7 +22,7 @@ OBJS = src/pgedge_vectorizer.o \
 DATA = sql/$(EXTENSION)--$(EXTVERSION).sql
 
 # Test configuration for pg_regress
-REGRESS = setup chunking queue vectorization multi_column maintenance edge_cases providers worker cleanup embedding
+REGRESS = setup chunking hybrid_chunking queue vectorization multi_column maintenance edge_cases providers worker cleanup embedding
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # Documentation files (if any)

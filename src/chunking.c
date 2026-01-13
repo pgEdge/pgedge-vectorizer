@@ -16,7 +16,7 @@
 #include "utils/lsyscache.h"
 
 /* Forward declarations */
-static ArrayType *chunk_by_tokens(const char *content, ChunkConfig *config);
+/* chunk_by_tokens is declared in header for use by hybrid_chunking.c fallback */
 
 /*
  * Parse chunk strategy string
@@ -38,6 +38,8 @@ parse_chunk_strategy(const char *strategy_str)
 		return CHUNK_STRATEGY_SENTENCE;
 	else if (pg_strcasecmp(strategy_str, "recursive") == 0)
 		return CHUNK_STRATEGY_RECURSIVE;
+	else if (pg_strcasecmp(strategy_str, "hybrid") == 0)
+		return CHUNK_STRATEGY_HYBRID;
 
 	elog(WARNING, "Unknown chunk strategy '%s', defaulting to token_based",
 		 strategy_str);
@@ -64,8 +66,13 @@ chunk_text(const char *content, ChunkConfig *config)
 		case CHUNK_STRATEGY_TOKEN:
 			return chunk_by_tokens(content, config);
 
-		case CHUNK_STRATEGY_SEMANTIC:
+		case CHUNK_STRATEGY_HYBRID:
+			return chunk_hybrid(content, config);
+
 		case CHUNK_STRATEGY_MARKDOWN:
+			return chunk_markdown(content, config);
+
+		case CHUNK_STRATEGY_SEMANTIC:
 		case CHUNK_STRATEGY_SENTENCE:
 		case CHUNK_STRATEGY_RECURSIVE:
 			/* Not yet implemented - fall back to token-based */
@@ -125,8 +132,11 @@ strip_non_ascii(const char *text)
  *
  * Splits text into chunks of approximately chunk_size tokens with
  * chunk_overlap tokens overlapping between consecutive chunks.
+ *
+ * This function is also called directly by hybrid_chunking.c when
+ * falling back from markdown/hybrid strategies for plain text.
  */
-static ArrayType *
+ArrayType *
 chunk_by_tokens(const char *content, ChunkConfig *config)
 {
 	int content_len;
