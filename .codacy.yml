@@ -3,10 +3,9 @@ engines:
   # Disable TSQLLint - it's for T-SQL (SQL Server), not PostgreSQL
   tsqllint:
     enabled: false
+    exclude_paths:
+      - "**/*.sql"
   TSQLLint:
     enabled: false
-
-# Exclude SQL files from TSQLLint (they're PostgreSQL, not T-SQL)
-exclude_paths:
-  - "test/sql/**"
-  - "sql/**"
+    exclude_paths:
+      - "**/*.sql"
