@@ -96,6 +96,7 @@ openai_cleanup(void)
 
 	if (api_key != NULL)
 	{
+		/* flawfinder: ignore - api_key is palloc'd, always null-terminated */
 		memset(api_key, 0, strlen(api_key));  /* Zero out key */
 		pfree(api_key);
 		api_key = NULL;
@@ -191,6 +192,7 @@ openai_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_request);
+	/* flawfinder: ignore - json_request from cJSON is null-terminated */
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json_request));
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
@@ -240,6 +242,7 @@ write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 		return 0;  /* Out of memory */
 
 	mem->data = ptr;
+	/* flawfinder: ignore - buffer was realloced to mem->size + realsize + 1 */
 	memcpy(&(mem->data[mem->size]), contents, realsize);
 	mem->size += realsize;
 	mem->data[mem->size] = 0;

@@ -211,10 +211,12 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	while (*db_name == ' ' || *db_name == '\t')
 		db_name++;
 
+	/* flawfinder: ignore - explicitly null-terminated on next line */
 	strncpy(dbname, db_name, NAMEDATALEN - 1);
 	dbname[NAMEDATALEN - 1] = '\0';
 
 	/* Remove trailing whitespace */
+	/* flawfinder: ignore - dbname was just null-terminated above */
 	for (int i = strlen(dbname) - 1; i >= 0 && (dbname[i] == ' ' || dbname[i] == '\t'); i--)
 		dbname[i] = '\0';
 

@@ -786,6 +786,7 @@ split_oversized_chunks(List *chunks, int max_tokens)
 		{
 			/* Split oversized chunk */
 			const char *content = chunk->content;
+			/* flawfinder: ignore - chunk->content is palloc'd, null-terminated */
 			int content_len = strlen(content);
 			int start_offset = 0;
 
@@ -1025,6 +1026,7 @@ elements_to_chunks_simple(List *elements, ChunkConfig *config)
 
 		initStringInfo(&chunk_text);
 
+		/* flawfinder: ignore - heading_context is palloc'd, null-terminated */
 		if (chunk->heading_context != NULL && strlen(chunk->heading_context) > 0)
 		{
 			appendStringInfoString(&chunk_text, "[Context: ");
@@ -1195,6 +1197,7 @@ chunk_hybrid(const char *content, ChunkConfig *config)
 		initStringInfo(&chunk_text);
 
 		/* Optionally prepend heading context for better retrieval */
+		/* flawfinder: ignore - heading_context is palloc'd, null-terminated */
 		if (chunk->heading_context != NULL && strlen(chunk->heading_context) > 0)
 		{
 			appendStringInfoString(&chunk_text, "[Context: ");

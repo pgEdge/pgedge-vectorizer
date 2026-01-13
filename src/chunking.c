@@ -101,6 +101,7 @@ strip_non_ascii(const char *text)
 	if (text == NULL)
 		return NULL;
 
+	/* flawfinder: ignore - text from PostgreSQL text datum is null-terminated */
 	len = strlen(text);
 	result = palloc(len + 1);
 	j = 0;
@@ -166,6 +167,7 @@ chunk_by_tokens(const char *content, ChunkConfig *config)
 		processed_content = (char *) content;
 	}
 
+	/* flawfinder: ignore - processed_content is null-terminated (from PG or strip_non_ascii) */
 	content_len = strlen(processed_content);
 	if (content_len == 0)
 	{
