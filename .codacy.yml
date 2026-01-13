@@ -1,0 +1,5 @@
+---
+engines:
+  # Disable TSQLLint - it's for T-SQL (SQL Server), not PostgreSQL
+  tsqllint:
+    enabled: false
