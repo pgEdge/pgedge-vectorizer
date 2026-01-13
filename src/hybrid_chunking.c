@@ -38,6 +38,143 @@ static bool is_table_row(const char *line, int len);
 static bool is_likely_markdown(const char *content);
 static ArrayType *elements_to_chunks_simple(List *elements, ChunkConfig *config);
 
+/* Helper functions for markdown detection (reduces complexity of is_likely_markdown) */
+static bool check_heading_indicator(const char *pos);
+static bool check_code_fence_indicator(const char *pos);
+static bool check_list_indicator(const char *pos);
+static bool check_table_indicator(const char *pos, const char *line_end);
+static bool check_link_indicator(const char *pos);
+
+/* Helper for creating markdown elements (reduces duplication in parse_markdown_structure) */
+static MarkdownElement *create_markdown_element(MarkdownElementType type, int heading_level,
+												const char *content, int content_len,
+												const char *heading_context);
+
+/*
+ * Check for heading indicator at position (# followed by space)
+ */
+static bool
+check_heading_indicator(const char *pos)
+{
+	int level = 0;
+
+	while (level < MAX_HEADING_LEVELS && pos[level] == '#')
+		level++;
+
+	if (level > 0 && (pos[level] == ' ' || pos[level] == '\t' ||
+					  pos[level] == '\n' || pos[level] == '\0'))
+		return true;
+
+	return false;
+}
+
+/*
+ * Check for code fence indicator at position (``` or ~~~)
+ */
+static bool
+check_code_fence_indicator(const char *pos)
+{
+	if ((*pos == '`' || *pos == '~') &&
+		pos[1] != '\0' && pos[2] != '\0' &&
+		pos[0] == pos[1] && pos[1] == pos[2])
+		return true;
+
+	return false;
+}
+
+/*
+ * Check for list indicator at position (-, *, +, or numbered)
+ */
+static bool
+check_list_indicator(const char *pos)
+{
+	/* Unordered list: -, *, + followed by space */
+	if ((*pos == '-' || *pos == '*' || *pos == '+') &&
+		pos[1] != '\0' && (pos[1] == ' ' || pos[1] == '\t'))
+		return true;
+
+	/* Ordered list: digit(s) followed by . or ) and space */
+	if (*pos >= '0' && *pos <= '9')
+	{
+		const char *p = pos;
+
+		while (*p >= '0' && *p <= '9')
+			p++;
+
+		if ((*p == '.' || *p == ')') &&
+			p[1] != '\0' && (p[1] == ' ' || p[1] == '\t'))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Check for table indicator (| character with another | on same line)
+ */
+static bool
+check_table_indicator(const char *pos, const char *line_end)
+{
+	const char *p = pos + 1;
+
+	while (p < line_end && *p != '\0' && *p != '\n')
+	{
+		if (*p == '|')
+			return true;
+		p++;
+	}
+
+	return false;
+}
+
+/*
+ * Check for link indicator [text](url) or ![alt](url)
+ */
+static bool
+check_link_indicator(const char *pos)
+{
+	const char *p = pos + 1;
+	int bracket_depth = 1;
+
+	while (*p != '\0' && bracket_depth > 0)
+	{
+		if (*p == '[')
+			bracket_depth++;
+		else if (*p == ']')
+			bracket_depth--;
+		p++;
+	}
+
+	if (bracket_depth == 0 && *p == '(')
+		return true;
+
+	return false;
+}
+
+/*
+ * Create a markdown element with the given properties
+ */
+static MarkdownElement *
+create_markdown_element(MarkdownElementType type, int heading_level,
+						const char *content, int content_len,
+						const char *heading_context)
+{
+	MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
+
+	elem->type = type;
+	elem->heading_level = heading_level;
+
+	if (content_len > 0)
+		elem->content = pnstrdup(content, content_len);
+	else
+		elem->content = pstrdup(content);
+
+	elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
+	elem->heading_context = heading_context ? pstrdup(heading_context) : NULL;
+
+	return elem;
+}
+
 /*
  * Detect if content is likely to be markdown
  *
@@ -58,148 +195,70 @@ is_likely_markdown(const char *content)
 {
 	int indicators = 0;
 	const char *pos = content;
-	bool at_line_start = true;
+	const char *line_end;
 	bool has_heading = false;
 	bool has_code_fence = false;
-	bool has_list = false;
-	bool has_blockquote = false;
-	bool has_table = false;
-	bool has_link = false;
 
 	if (content == NULL || content[0] == '\0')
 		return false;
 
-	/* Quick scan for markdown indicators */
+	/* Scan content line by line */
 	while (*pos != '\0')
 	{
+		/* Find end of current line */
+		line_end = pos;
+		while (*line_end != '\0' && *line_end != '\n')
+			line_end++;
+
+		/* Skip leading whitespace (up to 3 spaces for markdown) */
+		while (*pos == ' ' && pos < line_end && (pos - content) < 4)
+			pos++;
+
 		/* Check line-start patterns */
-		if (at_line_start)
+		if (*pos == '#' && !has_heading && check_heading_indicator(pos))
 		{
-			/* Skip leading whitespace (up to 3 spaces for markdown) */
-			const char *line_start = pos;
-			int spaces = 0;
-			while (*pos == ' ' && spaces < 4)
-			{
-				pos++;
-				spaces++;
-			}
+			has_heading = true;
+			indicators++;
+		}
 
-			/* Heading: # at start of line */
-			if (*pos == '#' && !has_heading)
-			{
-				int level = 0;
-				while (level < MAX_HEADING_LEVELS && pos[level] == '#')
-					level++;
-				if (level > 0 && (pos[level] == ' ' || pos[level] == '\t' || pos[level] == '\n' || pos[level] == '\0'))
-				{
-					has_heading = true;
-					indicators++;
-				}
-			}
+		if ((*pos == '`' || *pos == '~') && !has_code_fence && check_code_fence_indicator(pos))
+		{
+			has_code_fence = true;
+			indicators++;
+		}
 
-			/* Code fence: ``` or ~~~ */
-			if ((*pos == '`' || *pos == '~') && !has_code_fence)
-			{
-				if (pos[1] != '\0' && pos[2] != '\0' &&
-					pos[0] == pos[1] && pos[1] == pos[2])
-				{
-					has_code_fence = true;
-					indicators++;
-				}
-			}
+		if (check_list_indicator(pos))
+			indicators++;
 
-			/* List item: -, *, +, or digit followed by . or ) */
-			if (!has_list)
-			{
-				if ((*pos == '-' || *pos == '*' || *pos == '+') &&
-					pos[1] != '\0' && (pos[1] == ' ' || pos[1] == '\t'))
-				{
-					has_list = true;
-					indicators++;
-				}
-				else if (*pos >= '0' && *pos <= '9')
-				{
-					const char *p = pos;
-					while (*p >= '0' && *p <= '9')
-						p++;
-					if ((*p == '.' || *p == ')') && p[1] != '\0' && (p[1] == ' ' || p[1] == '\t'))
-					{
-						has_list = true;
-						indicators++;
-					}
-				}
-			}
+		if (*pos == '>')
+			indicators++;
 
-			/* Blockquote: > at start */
-			if (*pos == '>' && !has_blockquote)
+		/* Check inline patterns within the line */
+		for (const char *p = pos; p < line_end; p++)
+		{
+			if (*p == '|' && check_table_indicator(p, line_end))
 			{
-				has_blockquote = true;
 				indicators++;
+				break;  /* Only count once per line */
 			}
 
-			pos = line_start;  /* Reset to scan rest of line */
-		}
-
-		/* Check inline patterns */
-		/* Table: | character (simple heuristic) */
-		if (*pos == '|' && !has_table)
-		{
-			/* Look for another | on the same line to confirm table */
-			const char *p = pos + 1;
-			while (*p != '\0' && *p != '\n')
+			if (*p == '[' && check_link_indicator(p))
 			{
-				if (*p == '|')
-				{
-					has_table = true;
-					indicators++;
-					break;
-				}
-				p++;
-			}
-		}
-
-		/* Links: [text](url) or images: ![alt](url) */
-		if (*pos == '[' && !has_link)
-		{
-			const char *p = pos + 1;
-			int bracket_depth = 1;
-			while (*p != '\0' && bracket_depth > 0)
-			{
-				if (*p == '[')
-					bracket_depth++;
-				else if (*p == ']')
-					bracket_depth--;
-				p++;
-			}
-			if (bracket_depth == 0 && *p == '(')
-			{
-				has_link = true;
 				indicators++;
+				break;  /* Only count once per line */
 			}
-		}
-
-		/* Track line boundaries */
-		if (*pos == '\n')
-		{
-			at_line_start = true;
-			pos++;
-		}
-		else
-		{
-			at_line_start = false;
-			pos++;
 		}
 
 		/* Early exit if we have enough indicators */
 		if (indicators >= 2)
 			return true;
+
+		/* Move to next line */
+		pos = (*line_end == '\n') ? line_end + 1 : line_end;
 	}
 
 	/* Require at least 1 strong indicator (heading or code fence) or 2 weak indicators */
-	if (has_heading || has_code_fence)
-		return true;
-
-	return indicators >= 2;
+	return (has_heading || has_code_fence || indicators >= 2);
 }
 
 /*
@@ -255,15 +314,9 @@ parse_markdown_structure(const char *content)
 				}
 
 				if (current_block.len > 0)
-				{
-					MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-					elem->type = MD_ELEMENT_CODE_BLOCK;
-					elem->heading_level = 0;
-					elem->content = pstrdup(current_block.data);
-					elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-					elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-					elements = lappend(elements, elem);
-				}
+				elements = lappend(elements,
+					create_markdown_element(MD_ELEMENT_CODE_BLOCK, 0,
+						current_block.data, 0, current_heading_context));
 
 				resetStringInfo(&current_block);
 				in_code_block = false;
@@ -275,13 +328,9 @@ parse_markdown_structure(const char *content)
 				/* Start code block - save any pending content first */
 				if (current_block.len > 0)
 				{
-					MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-					elem->type = current_type;
-					elem->heading_level = 0;
-					elem->content = pstrdup(current_block.data);
-					elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-					elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-					elements = lappend(elements, elem);
+					elements = lappend(elements,
+						create_markdown_element(current_type, 0,
+							current_block.data, 0, current_heading_context));
 					resetStringInfo(&current_block);
 				}
 
@@ -307,13 +356,9 @@ parse_markdown_structure(const char *content)
 		{
 			if (current_block.len > 0)
 			{
-				MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-				elem->type = current_type;
-				elem->heading_level = 0;
-				elem->content = pstrdup(current_block.data);
-				elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-				elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-				elements = lappend(elements, elem);
+				elements = lappend(elements,
+					create_markdown_element(current_type, 0,
+						current_block.data, 0, current_heading_context));
 				resetStringInfo(&current_block);
 			}
 			current_type = MD_ELEMENT_PARAGRAPH;
@@ -329,23 +374,17 @@ parse_markdown_structure(const char *content)
 			const char *heading_text;
 			int heading_text_len;
 			int i;
-			MarkdownElement *elem;
 
 			/* Save any pending content */
 			if (current_block.len > 0)
 			{
-				MarkdownElement *pending_elem = palloc0(sizeof(MarkdownElement));
-				pending_elem->type = current_type;
-				pending_elem->heading_level = 0;
-				pending_elem->content = pstrdup(current_block.data);
-				pending_elem->token_count = count_tokens(pending_elem->content, pgedge_vectorizer_model);
-				pending_elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-				elements = lappend(elements, pending_elem);
+				elements = lappend(elements,
+					create_markdown_element(current_type, 0,
+						current_block.data, 0, current_heading_context));
 				resetStringInfo(&current_block);
 			}
 
-			/* Update heading stack */
-			/* Clear deeper levels */
+			/* Update heading stack - clear deeper levels */
 			for (i = heading_level; i < MAX_HEADING_LEVELS; i++)
 			{
 				if (heading_stack[i] != NULL)
@@ -372,13 +411,9 @@ parse_markdown_structure(const char *content)
 			current_heading_context = build_heading_context(heading_stack, MAX_HEADING_LEVELS);
 
 			/* Create heading element */
-			elem = palloc0(sizeof(MarkdownElement));
-			elem->type = MD_ELEMENT_HEADING;
-			elem->heading_level = heading_level;
-			elem->content = pnstrdup(line_start, line_len);
-			elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-			elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-			elements = lappend(elements, elem);
+			elements = lappend(elements,
+				create_markdown_element(MD_ELEMENT_HEADING, heading_level,
+					line_start, line_len, current_heading_context));
 
 			current_type = MD_ELEMENT_PARAGRAPH;
 			if (*pos == '\n')
@@ -391,25 +426,15 @@ parse_markdown_structure(const char *content)
 		{
 			if (current_block.len > 0)
 			{
-				MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-				elem->type = current_type;
-				elem->heading_level = 0;
-				elem->content = pstrdup(current_block.data);
-				elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-				elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-				elements = lappend(elements, elem);
+				elements = lappend(elements,
+					create_markdown_element(current_type, 0,
+						current_block.data, 0, current_heading_context));
 				resetStringInfo(&current_block);
 			}
 
-			{
-				MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-				elem->type = MD_ELEMENT_HORIZONTAL_RULE;
-				elem->heading_level = 0;
-				elem->content = pnstrdup(line_start, line_len);
-				elem->token_count = 1;
-				elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-				elements = lappend(elements, elem);
-			}
+			elements = lappend(elements,
+				create_markdown_element(MD_ELEMENT_HORIZONTAL_RULE, 0,
+					line_start, line_len, current_heading_context));
 
 			current_type = MD_ELEMENT_PARAGRAPH;
 			if (*pos == '\n')
@@ -423,13 +448,9 @@ parse_markdown_structure(const char *content)
 			/* If switching from non-list, save pending content */
 			if (current_type != MD_ELEMENT_LIST_ITEM && current_block.len > 0)
 			{
-				MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-				elem->type = current_type;
-				elem->heading_level = 0;
-				elem->content = pstrdup(current_block.data);
-				elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-				elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-				elements = lappend(elements, elem);
+				elements = lappend(elements,
+					create_markdown_element(current_type, 0,
+						current_block.data, 0, current_heading_context));
 				resetStringInfo(&current_block);
 			}
 
@@ -441,13 +462,9 @@ parse_markdown_structure(const char *content)
 		{
 			if (current_type != MD_ELEMENT_BLOCKQUOTE && current_block.len > 0)
 			{
-				MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-				elem->type = current_type;
-				elem->heading_level = 0;
-				elem->content = pstrdup(current_block.data);
-				elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-				elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-				elements = lappend(elements, elem);
+				elements = lappend(elements,
+					create_markdown_element(current_type, 0,
+						current_block.data, 0, current_heading_context));
 				resetStringInfo(&current_block);
 			}
 
@@ -459,13 +476,9 @@ parse_markdown_structure(const char *content)
 		{
 			if (current_type != MD_ELEMENT_TABLE && current_block.len > 0)
 			{
-				MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-				elem->type = current_type;
-				elem->heading_level = 0;
-				elem->content = pstrdup(current_block.data);
-				elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-				elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-				elements = lappend(elements, elem);
+				elements = lappend(elements,
+					create_markdown_element(current_type, 0,
+						current_block.data, 0, current_heading_context));
 				resetStringInfo(&current_block);
 			}
 
@@ -483,15 +496,9 @@ parse_markdown_structure(const char *content)
 
 	/* Save final block */
 	if (current_block.len > 0)
-	{
-		MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-		elem->type = current_type;
-		elem->heading_level = 0;
-		elem->content = pstrdup(current_block.data);
-		elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-		elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-		elements = lappend(elements, elem);
-	}
+		elements = lappend(elements,
+			create_markdown_element(current_type, 0,
+				current_block.data, 0, current_heading_context));
 
 	/* Cleanup */
 	pfree(current_block.data);
