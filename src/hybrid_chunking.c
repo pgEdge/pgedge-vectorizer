@@ -59,7 +59,6 @@ is_likely_markdown(const char *content)
 	int indicators = 0;
 	const char *pos = content;
 	bool at_line_start = true;
-	int content_len;
 	bool has_heading = false;
 	bool has_code_fence = false;
 	bool has_list = false;
@@ -69,8 +68,6 @@ is_likely_markdown(const char *content)
 
 	if (content == NULL || content[0] == '\0')
 		return false;
-
-	content_len = strlen(content);
 
 	/* Quick scan for markdown indicators */
 	while (*pos != '\0')
@@ -227,7 +224,6 @@ parse_markdown_structure(const char *content)
 	StringInfoData current_block;
 	MarkdownElementType current_type = MD_ELEMENT_PARAGRAPH;
 	char *heading_stack[MAX_HEADING_LEVELS] = {NULL};
-	int stack_depth = 0;
 	char *current_heading_context = NULL;
 
 	if (content == NULL || content[0] == '\0')
@@ -237,6 +233,8 @@ parse_markdown_structure(const char *content)
 
 	while (*pos != '\0')
 	{
+		int heading_level;
+
 		/* Find end of current line */
 		line_start = pos;
 		while (*pos != '\0' && *pos != '\n')
@@ -325,25 +323,30 @@ parse_markdown_structure(const char *content)
 		}
 
 		/* Check for heading */
-		int heading_level = get_heading_level(line_start, line_len);
+		heading_level = get_heading_level(line_start, line_len);
 		if (heading_level > 0)
 		{
+			const char *heading_text;
+			int heading_text_len;
+			int i;
+			MarkdownElement *elem;
+
 			/* Save any pending content */
 			if (current_block.len > 0)
 			{
-				MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-				elem->type = current_type;
-				elem->heading_level = 0;
-				elem->content = pstrdup(current_block.data);
-				elem->token_count = count_tokens(elem->content, pgedge_vectorizer_model);
-				elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-				elements = lappend(elements, elem);
+				MarkdownElement *pending_elem = palloc0(sizeof(MarkdownElement));
+				pending_elem->type = current_type;
+				pending_elem->heading_level = 0;
+				pending_elem->content = pstrdup(current_block.data);
+				pending_elem->token_count = count_tokens(pending_elem->content, pgedge_vectorizer_model);
+				pending_elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
+				elements = lappend(elements, pending_elem);
 				resetStringInfo(&current_block);
 			}
 
 			/* Update heading stack */
 			/* Clear deeper levels */
-			for (int i = heading_level; i < MAX_HEADING_LEVELS; i++)
+			for (i = heading_level; i < MAX_HEADING_LEVELS; i++)
 			{
 				if (heading_stack[i] != NULL)
 				{
@@ -353,18 +356,15 @@ parse_markdown_structure(const char *content)
 			}
 
 			/* Extract heading text (skip # symbols and space) */
-			const char *heading_text = line_start + heading_level;
+			heading_text = line_start + heading_level;
 			while (*heading_text == ' ' || *heading_text == '\t')
 				heading_text++;
-			int heading_text_len = line_len - (heading_text - line_start);
+			heading_text_len = line_len - (heading_text - line_start);
 
 			/* Store in heading stack */
 			if (heading_stack[heading_level - 1] != NULL)
 				pfree(heading_stack[heading_level - 1]);
 			heading_stack[heading_level - 1] = pnstrdup(heading_text, heading_text_len);
-
-			/* Update stack depth */
-			stack_depth = heading_level;
 
 			/* Update current heading context */
 			if (current_heading_context != NULL)
@@ -372,7 +372,7 @@ parse_markdown_structure(const char *content)
 			current_heading_context = build_heading_context(heading_stack, MAX_HEADING_LEVELS);
 
 			/* Create heading element */
-			MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
+			elem = palloc0(sizeof(MarkdownElement));
 			elem->type = MD_ELEMENT_HEADING;
 			elem->heading_level = heading_level;
 			elem->content = pnstrdup(line_start, line_len);
@@ -401,13 +401,15 @@ parse_markdown_structure(const char *content)
 				resetStringInfo(&current_block);
 			}
 
-			MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
-			elem->type = MD_ELEMENT_HORIZONTAL_RULE;
-			elem->heading_level = 0;
-			elem->content = pnstrdup(line_start, line_len);
-			elem->token_count = 1;
-			elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
-			elements = lappend(elements, elem);
+			{
+				MarkdownElement *elem = palloc0(sizeof(MarkdownElement));
+				elem->type = MD_ELEMENT_HORIZONTAL_RULE;
+				elem->heading_level = 0;
+				elem->content = pnstrdup(line_start, line_len);
+				elem->token_count = 1;
+				elem->heading_context = current_heading_context ? pstrdup(current_heading_context) : NULL;
+				elements = lappend(elements, elem);
+			}
 
 			current_type = MD_ELEMENT_PARAGRAPH;
 			if (*pos == '\n')
