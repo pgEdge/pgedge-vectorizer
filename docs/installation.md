@@ -3,7 +3,7 @@
 pgEdge Vectorizer automatically chunks text content and generates vector
 embeddings using background workers. You can install pgEdge Vectorizer with
 [pgEdge Enterprise Postgres](https://docs.pgedge.com/enterprise/) packages
-or build from Vectorizer with source code from the
+or build Vectorizer from source code from the
 [pgEdge repository](https://github.com/pgEdge/pgedge-vectorizer).
 
 Before installing pgEdge Vectorizer, you need to install:
