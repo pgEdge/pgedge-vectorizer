@@ -166,10 +166,15 @@ BEGIN
             FOR i IN 1..array_length(chunks, 1) LOOP
                 chunk_text := chunks[i];
 
-                -- Insert chunk
+                -- Insert or update chunk
                 EXECUTE format('
                     INSERT INTO %I (source_id, chunk_index, content, token_count)
                     VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (source_id, chunk_index)
+                    DO UPDATE SET content = EXCLUDED.content,
+                                  token_count = EXCLUDED.token_count,
+                                  embedding = NULL,
+                                  updated_at = NOW()
                     RETURNING id', chunk_table)
                 USING row_record.id, i, chunk_text,
                       length(chunk_text) / 4  -- Approximate token count

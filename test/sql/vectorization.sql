@@ -54,6 +54,23 @@ FROM pgedge_vectorizer.queue
 WHERE chunk_table = 'test_docs_content_chunks'
 AND status IN ('pending', 'processing');
 
+-- Re-enable vectorization with existing chunk table (should not fail)
+SELECT pgedge_vectorizer.enable_vectorization(
+    'test_docs'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+
+-- Verify trigger was re-created
+SELECT tgname FROM pg_trigger
+WHERE tgname LIKE '%test_docs%vectorization%';
+
+-- Verify chunks still exist (upserted, not duplicated)
+SELECT COUNT(*) AS chunk_count FROM test_docs_content_chunks;
+
 -- Clean up
-DROP TABLE test_docs_content_chunks;
+SELECT pgedge_vectorizer.disable_vectorization('test_docs'::regclass, 'content', true);
 DROP TABLE test_docs;
