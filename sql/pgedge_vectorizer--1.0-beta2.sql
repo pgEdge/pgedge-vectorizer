@@ -150,6 +150,7 @@ BEGIN
         chunk_text TEXT;
         i INT;
         chunk_id BIGINT;
+        needs_embedding BOOLEAN;
         rows_processed INT := 0;
     BEGIN
         RAISE NOTICE 'Processing existing rows...';
@@ -166,23 +167,30 @@ BEGIN
             FOR i IN 1..array_length(chunks, 1) LOOP
                 chunk_text := chunks[i];
 
-                -- Insert or update chunk
+                -- Insert or update chunk (only clear embedding if content changed)
                 EXECUTE format('
                     INSERT INTO %I (source_id, chunk_index, content, token_count)
                     VALUES ($1, $2, $3, $4)
                     ON CONFLICT (source_id, chunk_index)
                     DO UPDATE SET content = EXCLUDED.content,
                                   token_count = EXCLUDED.token_count,
-                                  embedding = NULL,
+                                  embedding = CASE
+                                      WHEN %I.content = EXCLUDED.content THEN %I.embedding
+                                      ELSE NULL
+                                  END,
                                   updated_at = NOW()
-                    RETURNING id', chunk_table)
+                    RETURNING id,
+                              (embedding IS NULL) AS needs_embedding',
+                    chunk_table, chunk_table, chunk_table)
                 USING row_record.id, i, chunk_text,
                       length(chunk_text) / 4  -- Approximate token count
-                INTO chunk_id;
+                INTO chunk_id, needs_embedding;
 
-                -- Queue for embedding
-                INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)
-                VALUES (chunk_id, chunk_table, chunk_text);
+                -- Only queue for embedding if new or content changed
+                IF needs_embedding THEN
+                    INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)
+                    VALUES (chunk_id, chunk_table, chunk_text);
+                END IF;
             END LOOP;
 
             rows_processed := rows_processed + 1;
