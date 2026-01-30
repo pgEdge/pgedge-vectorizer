@@ -72,9 +72,19 @@ NOTICE:  Vectorization disabled (chunk table preserved): test_docs_content_chunk
 -- Verify trigger was dropped
 SELECT COUNT(*) AS trigger_count FROM pg_trigger
 WHERE tgname LIKE '%test_docs%vectorization%';
- trigger_count 
+ trigger_count
 ---------------
              0
+(1 row)
+
+-- Verify queue items were cleaned up
+SELECT COUNT(*) AS orphaned_queue_items
+FROM pgedge_vectorizer.queue
+WHERE chunk_table = 'test_docs_content_chunks'
+AND status IN ('pending', 'processing');
+ orphaned_queue_items
+----------------------
+                    0
 (1 row)
 
 -- Clean up

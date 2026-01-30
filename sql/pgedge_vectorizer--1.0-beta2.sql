@@ -210,6 +210,11 @@ BEGIN
         -- Drop trigger
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, source_table);
 
+        -- Remove orphaned queue items for this chunk table
+        DELETE FROM pgedge_vectorizer.queue q
+        WHERE q.chunk_table = disable_vectorization.chunk_table
+        AND q.status IN ('pending', 'processing');
+
         -- Optionally drop chunk table
         IF drop_chunk_table THEN
             EXECUTE format('DROP TABLE IF EXISTS %I CASCADE', chunk_table);
@@ -229,6 +234,11 @@ BEGIN
             EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_rec.tgname, source_table);
             RAISE NOTICE 'Dropped trigger: %', trigger_rec.tgname;
         END LOOP;
+
+        -- Remove orphaned queue items for all chunk tables of this source
+        DELETE FROM pgedge_vectorizer.queue q
+        WHERE q.chunk_table LIKE source_table::TEXT || '_%_chunks'
+        AND q.status IN ('pending', 'processing');
 
         -- Optionally drop all chunk tables
         IF drop_chunk_table THEN

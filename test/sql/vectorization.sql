@@ -48,6 +48,12 @@ SELECT pgedge_vectorizer.disable_vectorization('test_docs'::regclass, 'content',
 SELECT COUNT(*) AS trigger_count FROM pg_trigger
 WHERE tgname LIKE '%test_docs%vectorization%';
 
+-- Verify queue items were cleaned up
+SELECT COUNT(*) AS orphaned_queue_items
+FROM pgedge_vectorizer.queue
+WHERE chunk_table = 'test_docs_content_chunks'
+AND status IN ('pending', 'processing');
+
 -- Clean up
 DROP TABLE test_docs_content_chunks;
 DROP TABLE test_docs;
