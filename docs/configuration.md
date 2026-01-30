@@ -20,7 +20,7 @@ These settings control the background workers that process the embedding queue, 
 | Parameter | Default | Description | Reload | Restart | Superuser |
 |-----------|---------|-------------|--------|---------|-----------|
 | `pgedge_vectorizer.num_workers` | `2` | Number of workers | No | Yes | Yes |
-| `pgedge_vectorizer.databases` | (empty) | Comma-separated list of databases to monitor | Yes | Yes | No |
+| `pgedge_vectorizer.databases` | (empty) | **Required.** Comma-separated list of databases to monitor. Workers will not process any embeddings if this is not set. | Yes | Yes | No |
 | `pgedge_vectorizer.batch_size` | `10` | Batch size for embeddings | Yes | No | No |
 | `pgedge_vectorizer.max_retries` | `3` | Max retry attempts | Yes | No | No |
 | `pgedge_vectorizer.worker_poll_interval` | `1000` | Poll interval in ms | Yes | No | No |

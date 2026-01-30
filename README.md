@@ -65,6 +65,9 @@ Add to `postgresql.conf`:
 ```ini
 shared_preload_libraries = 'pgedge_vectorizer'
 
+# Database configuration (required)
+pgedge_vectorizer.databases = 'mydb'
+
 # Provider configuration
 pgedge_vectorizer.provider = 'openai'
 pgedge_vectorizer.api_key_file = '/path/to/your/api_key_file'
