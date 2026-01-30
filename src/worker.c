@@ -629,6 +629,7 @@ cleanup_completed_items(int worker_id)
 	last_cleanup_time = now;
 
 	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
 
 	SPI_connect();
 
@@ -651,5 +652,7 @@ cleanup_completed_items(int worker_id)
 	}
 
 	SPI_finish();
+
+	PopActiveSnapshot();
 	CommitTransactionCommand();
 }
