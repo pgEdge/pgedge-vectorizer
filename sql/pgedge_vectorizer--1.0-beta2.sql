@@ -240,9 +240,7 @@ BEGIN
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, source_table);
 
         -- Remove orphaned queue items for this chunk table
-        DELETE FROM pgedge_vectorizer.queue q
-        WHERE q.chunk_table = disable_vectorization.chunk_table
-        AND q.status IN ('pending', 'processing');
+        EXECUTE format('DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = %L AND status IN (''pending'', ''processing'')', chunk_table);
 
         -- Optionally drop chunk table
         IF drop_chunk_table THEN

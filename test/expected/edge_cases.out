@@ -109,9 +109,9 @@ NOTICE:  Vectorization enabled: custom_pk_test -> custom_pk_test_body_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
 NOTICE:  Processed 0 existing rows
- enable_vectorization
+ enable_vectorization 
 ----------------------
-
+ 
 (1 row)
 
 -- Insert a document using the custom PK
@@ -119,7 +119,7 @@ INSERT INTO custom_pk_test (body)
 VALUES ('This document uses a custom primary key column.');
 -- Verify chunks were created with correct source_id
 SELECT COUNT(*) > 0 AS chunks_created FROM custom_pk_test_body_chunks WHERE source_id = 1;
- chunks_created
+ chunks_created 
 ----------------
  t
 (1 row)
@@ -127,7 +127,7 @@ SELECT COUNT(*) > 0 AS chunks_created FROM custom_pk_test_body_chunks WHERE sour
 -- Verify queue entries exist
 SELECT COUNT(*) > 0 AS queue_entries FROM pgedge_vectorizer.queue
 WHERE chunk_table = 'custom_pk_test_body_chunks';
- queue_entries
+ queue_entries 
 ---------------
  t
 (1 row)
@@ -138,9 +138,9 @@ UPDATE custom_pk_test SET body = 'Updated body text.' WHERE doc_id = 1;
 DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'custom_pk_test_body_chunks';
 SELECT pgedge_vectorizer.disable_vectorization('custom_pk_test'::regclass, 'body', true);
 NOTICE:  Vectorization disabled and chunk table dropped: custom_pk_test_body_chunks
- disable_vectorization
+ disable_vectorization 
 -----------------------
-
+ 
 (1 row)
 
 DROP TABLE custom_pk_test;
