@@ -69,6 +69,15 @@ LANGUAGE C STRICT;
 COMMENT ON FUNCTION pgedge_vectorizer.generate_embedding IS
 'Generate an embedding vector from query text using the configured provider';
 
+-- Embedding dimension detection function
+CREATE FUNCTION pgedge_vectorizer.detect_embedding_dimension()
+RETURNS INT
+AS 'MODULE_PATHNAME', 'pgedge_vectorizer_detect_embedding_dimension'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION pgedge_vectorizer.detect_embedding_dimension IS
+'Detect the embedding dimension of the currently configured provider/model';
+
 ---------------------------------------------------------------------------
 -- SQL Functions
 ---------------------------------------------------------------------------
@@ -80,7 +89,7 @@ CREATE FUNCTION pgedge_vectorizer.enable_vectorization(
     chunk_strategy TEXT DEFAULT NULL,
     chunk_size INT DEFAULT NULL,
     chunk_overlap INT DEFAULT NULL,
-    embedding_dimension INT DEFAULT 1536,
+    embedding_dimension INT DEFAULT NULL,
     chunk_table_name TEXT DEFAULT NULL,
     source_pk NAME DEFAULT 'id'
 ) RETURNS VOID AS $$
@@ -98,6 +107,12 @@ BEGIN
         current_setting('pgedge_vectorizer.default_chunk_size')::INT);
     actual_chunk_overlap := COALESCE(chunk_overlap,
         current_setting('pgedge_vectorizer.default_chunk_overlap')::INT);
+
+    -- Auto-detect embedding dimension from configured model if not specified
+    IF embedding_dimension IS NULL THEN
+        embedding_dimension := pgedge_vectorizer.detect_embedding_dimension();
+        RAISE NOTICE 'Auto-detected embedding dimension: %', embedding_dimension;
+    END IF;
 
     -- Determine chunk table name
     chunk_table := COALESCE(chunk_table_name, source_table::TEXT || '_' || source_column || '_chunks');

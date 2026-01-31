@@ -86,3 +86,34 @@ UPDATE custom_pk_test SET body = 'Updated body text.' WHERE doc_id = 1;
 DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'custom_pk_test_body_chunks';
 SELECT pgedge_vectorizer.disable_vectorization('custom_pk_test'::regclass, 'body', true);
 DROP TABLE custom_pk_test;
+
+-- Test 9: Auto-detect embedding dimension (omit embedding_dimension parameter)
+CREATE TABLE autodetect_test (
+    id BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+
+-- Call without embedding_dimension; should auto-detect from configured model
+SELECT pgedge_vectorizer.enable_vectorization(
+    'autodetect_test'::regclass,
+    'content',
+    'token_based',
+    100,
+    10
+);
+
+-- Verify chunk table was created with auto-detected dimension
+SELECT tablename FROM pg_tables WHERE tablename = 'autodetect_test_content_chunks';
+
+-- Verify the vector column exists (dimension is model-dependent)
+SELECT attname, atttypmod FROM pg_attribute
+WHERE attrelid = 'autodetect_test_content_chunks'::regclass
+AND attname = 'embedding';
+
+-- Test 10: detect_embedding_dimension() returns a positive integer
+SELECT pgedge_vectorizer.detect_embedding_dimension() > 0 AS dim_detected;
+
+-- Clean up
+DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'autodetect_test_content_chunks';
+SELECT pgedge_vectorizer.disable_vectorization('autodetect_test'::regclass, 'content', true);
+DROP TABLE autodetect_test;

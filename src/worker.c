@@ -453,6 +453,66 @@ process_queue_batch(int worker_id)
 
 			if (embeddings != NULL)
 			{
+				/*
+				 * Validate that the embedding dimension matches the chunk
+				 * table's vector column. Check once per batch.
+				 */
+				{
+					int idx0 = batch_start;
+					int ret_dim;
+					bool isnull_dim;
+					Datum val_dim;
+
+					ret_dim = SPI_execute(psprintf(
+						"SELECT atttypmod FROM pg_attribute "
+						"WHERE attrelid = '%s'::regclass "
+						"AND attname = 'embedding'",
+						chunk_tables[idx0]),
+						true, 1);
+
+					if (ret_dim == SPI_OK_SELECT && SPI_processed == 1)
+					{
+						val_dim = SPI_getbinval(SPI_tuptable->vals[0],
+												SPI_tuptable->tupdesc, 1, &isnull_dim);
+						if (!isnull_dim)
+						{
+							int table_dim = DatumGetInt32(val_dim);
+							if (table_dim > 0 && table_dim != dim)
+							{
+								elog(WARNING, "Embedding dimension mismatch for table %s: "
+									 "model returned %d dimensions but table expects %d. "
+									 "Reconfigure pgedge_vectorizer.model or recreate the "
+									 "chunk table with the correct dimension.",
+									 chunk_tables[idx0], dim, table_dim);
+
+								/* Fail all items in this batch */
+								for (int i = 0; i < batch_count; i++)
+								{
+									int fidx = batch_start + i;
+									SPI_execute(psprintf(
+										"UPDATE pgedge_vectorizer.queue "
+										"SET status = 'failed', "
+										"    error_message = 'Dimension mismatch: model=%d, table=%d', "
+										"    next_retry_at = NULL "
+										"WHERE id = %ld",
+										dim, table_dim, queue_ids[fidx]),
+										false, 0);
+								}
+
+								/* Free embeddings and skip to next batch */
+								for (int i = 0; i < batch_count; i++)
+								{
+									if (embeddings[i] != NULL)
+										pfree(embeddings[i]);
+								}
+								pfree(embeddings);
+								embeddings = NULL;
+								continue;
+							}
+						}
+					}
+				}
+
 				/* Update chunk tables and mark as completed */
 				for (int i = 0; i < batch_count; i++)
 				{

@@ -13,7 +13,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     chunk_strategy TEXT DEFAULT NULL,
     chunk_size INT DEFAULT NULL,
     chunk_overlap INT DEFAULT NULL,
-    embedding_dimension INT DEFAULT 1536,
+    embedding_dimension INT DEFAULT NULL,
     chunk_table_name TEXT DEFAULT NULL
 );
 ```
@@ -25,7 +25,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
 - `chunk_strategy`: Chunking method (token_based, semantic, markdown)
 - `chunk_size`: Target chunk size in tokens
 - `chunk_overlap`: Overlap between chunks in tokens
-- `embedding_dimension`: Vector dimension (default 1536 for OpenAI)
+- `embedding_dimension`: Vector dimension. When NULL (the default), the dimension is auto-detected by making a probe call to the configured embedding provider/model. Can be set explicitly to override auto-detection.
 - `chunk_table_name`: Custom chunk table name (default: `{table}_{column}_chunks`)
 
 **Behavior:**
@@ -107,6 +107,18 @@ LIMIT 5;
 ```
 
 **Note:** This function calls the embedding provider synchronously, so it will wait for the API response. For large-scale batch operations, use the automatic vectorization features instead.
+
+### detect_embedding_dimension()
+
+Detect the embedding dimension of the currently configured provider/model.
+
+```sql
+SELECT pgedge_vectorizer.detect_embedding_dimension();
+```
+
+Returns: `INT` - The number of dimensions in the embedding vector
+
+This function generates a probe embedding using the configured provider and model, and returns the dimension of the resulting vector. It is called automatically by `enable_vectorization()` when `embedding_dimension` is not specified.
 
 ### retry_failed()
 

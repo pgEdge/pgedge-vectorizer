@@ -22,6 +22,7 @@
  * the configured provider (OpenAI, Voyage, or Ollama).
  */
 PG_FUNCTION_INFO_V1(pgedge_vectorizer_generate_embedding);
+PG_FUNCTION_INFO_V1(pgedge_vectorizer_detect_embedding_dimension);
 
 Datum
 pgedge_vectorizer_generate_embedding(PG_FUNCTION_ARGS)
@@ -143,4 +144,52 @@ pgedge_vectorizer_generate_embedding(PG_FUNCTION_ARGS)
 	pfree(vector_str.data);
 
 	PG_RETURN_DATUM(result);
+}
+
+/*
+ * SQL-callable function to detect the embedding dimension of the
+ * currently configured provider/model by generating a probe embedding.
+ */
+Datum
+pgedge_vectorizer_detect_embedding_dimension(PG_FUNCTION_ARGS)
+{
+	EmbeddingProvider *provider;
+	float *embedding;
+	int dim = 0;
+	char *error_msg = NULL;
+
+	/* Get the current provider */
+	provider = get_current_provider();
+	if (provider == NULL)
+	{
+		elog(ERROR, "no embedding provider configured");
+		PG_RETURN_NULL();
+	}
+
+	/* Initialize the provider if needed */
+	if (provider->init != NULL)
+	{
+		if (!provider->init(&error_msg))
+		{
+			elog(ERROR, "failed to initialize provider '%s': %s",
+				 provider->name,
+				 error_msg ? error_msg : "unknown error");
+			PG_RETURN_NULL();
+		}
+	}
+
+	/* Generate a probe embedding to detect dimension */
+	embedding = provider->generate("dimension probe", &dim, &error_msg);
+	if (embedding == NULL)
+	{
+		elog(ERROR, "failed to detect embedding dimension: %s",
+			 error_msg ? error_msg : "unknown error");
+		if (error_msg)
+			pfree(error_msg);
+		PG_RETURN_NULL();
+	}
+
+	pfree(embedding);
+
+	PG_RETURN_INT32(dim);
 }
