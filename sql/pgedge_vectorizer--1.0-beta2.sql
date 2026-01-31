@@ -81,7 +81,8 @@ CREATE FUNCTION pgedge_vectorizer.enable_vectorization(
     chunk_size INT DEFAULT NULL,
     chunk_overlap INT DEFAULT NULL,
     embedding_dimension INT DEFAULT 1536,
-    chunk_table_name TEXT DEFAULT NULL
+    chunk_table_name TEXT DEFAULT NULL,
+    source_pk NAME DEFAULT 'id'
 ) RETURNS VOID AS $$
 DECLARE
     chunk_table TEXT;
@@ -133,10 +134,10 @@ BEGIN
         CREATE OR REPLACE TRIGGER %I
         AFTER INSERT OR UPDATE ON %s
         FOR EACH ROW
-        EXECUTE FUNCTION pgedge_vectorizer.vectorization_trigger(%L, %L, %L, %L, %L)',
+        EXECUTE FUNCTION pgedge_vectorizer.vectorization_trigger(%L, %L, %L, %L, %L, %L)',
         trigger_name, source_table,
         source_column, chunk_table, actual_strategy,
-        actual_chunk_size, actual_chunk_overlap);
+        actual_chunk_size, actual_chunk_overlap, source_pk);
 
     RAISE NOTICE 'Vectorization enabled: % -> %', source_table, chunk_table;
     RAISE NOTICE 'Strategy: %, chunk_size: %, overlap: %',
@@ -155,8 +156,8 @@ BEGIN
     BEGIN
         RAISE NOTICE 'Processing existing rows...';
 
-        FOR row_record IN EXECUTE format('SELECT id, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
-            source_column, source_table, source_column, source_column)
+        FOR row_record IN EXECUTE format('SELECT %I as pk_val, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
+            source_pk, source_column, source_table, source_column, source_column)
         LOOP
             doc_content := row_record.content;
 
@@ -182,7 +183,7 @@ BEGIN
                     RETURNING id,
                               (embedding IS NULL) AS needs_embedding',
                     chunk_table, chunk_table, chunk_table)
-                USING row_record.id, i, chunk_text,
+                USING row_record.pk_val, i, chunk_text,
                       length(chunk_text) / 4  -- Approximate token count
                 INTO chunk_id, needs_embedding;
 
@@ -273,6 +274,7 @@ DECLARE
     strategy TEXT;
     chunk_sz INT;
     overlap INT;
+    pk_col TEXT;
     doc_content TEXT;
     chunks TEXT[];
     chunk_text TEXT;
@@ -286,9 +288,10 @@ BEGIN
     strategy := TG_ARGV[2];
     chunk_sz := TG_ARGV[3]::INT;
     overlap := TG_ARGV[4]::INT;
+    pk_col := COALESCE(TG_ARGV[5], 'id');
 
-    -- Get source document ID (assumes 'id' column)
-    EXECUTE format('SELECT $1.id') USING NEW INTO source_id_val;
+    -- Get source document ID
+    EXECUTE format('SELECT ($1).%I', pk_col) USING NEW INTO source_id_val;
 
     -- Get document content
     EXECUTE format('SELECT $1.%I', content_col) USING NEW INTO doc_content;
@@ -554,6 +557,7 @@ BEGIN
         actual_strategy TEXT;
         actual_chunk_size INT;
         actual_chunk_overlap INT;
+        pk_col TEXT;
     BEGIN
         -- Get chunking configuration from trigger arguments
         -- In PostgreSQL 17+, tgargs is bytea and needs to be decoded
@@ -567,18 +571,19 @@ BEGIN
             WHERE c.oid = source_table_name
             AND t.tgname = trigger_name;
 
-            -- Arguments are 0-indexed: 0=chunk_table, 1=source_column, 2=strategy, 3=size, 4=overlap
+            -- Arguments: 1=content_col, 2=chunk_table, 3=strategy, 4=size, 5=overlap, 6=pk_col
             actual_strategy := tgargs_array[3];
             actual_chunk_size := tgargs_array[4]::INT;
             actual_chunk_overlap := tgargs_array[5]::INT;
+            pk_col := COALESCE(tgargs_array[6], 'id');
         END;
 
         RAISE NOTICE 'Re-chunking with strategy=%, size=%, overlap=%',
             actual_strategy, actual_chunk_size, actual_chunk_overlap;
 
         FOR row_record IN EXECUTE format(
-            'SELECT id, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
-            source_column_name, source_table_name, source_column_name, source_column_name
+            'SELECT %I as pk_val, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
+            pk_col, source_column_name, source_table_name, source_column_name, source_column_name
         )
         LOOP
             doc_content := row_record.content;
@@ -595,7 +600,7 @@ BEGIN
                     INSERT INTO %I (source_id, chunk_index, content, token_count)
                     VALUES ($1, $2, $3, $4)
                     RETURNING id', chunk_table_name)
-                USING row_record.id, i, chunk_text,
+                USING row_record.pk_val, i, chunk_text,
                       length(chunk_text) / 4  -- Approximate token count
                 INTO chunk_id;
 
