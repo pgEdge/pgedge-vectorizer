@@ -6,7 +6,7 @@
  * This file implements SQL-callable functions for managing and monitoring
  * the embedding queue.
  *
- * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
+ * Copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

@@ -9,7 +9,7 @@
  *    - Split oversized chunks that exceed token limits
  *    - Merge undersized consecutive chunks with same heading context
  *
- * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
+ * Copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

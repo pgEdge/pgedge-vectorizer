@@ -14,7 +14,7 @@
  * 3. Replace approximation functions with tiktoken calls
  * 4. Use cl100k_base encoding for OpenAI models
  *
- * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
+ * Copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

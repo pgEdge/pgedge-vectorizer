@@ -467,4 +467,4 @@ For issues and questions:
 
 Developed by pgEdge, Inc.
 
-Portions copyright (c) 2025 - 2026, pgEdge, Inc.
+Copyright (c) 2025 - 2026, pgEdge, Inc.

@@ -13,7 +13,7 @@
  *   - Mark generate_embedding() as IMMUTABLE for index usage
  *   - Worker-side dimension mismatch validation
  *
- * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
+ * Copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */

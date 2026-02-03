@@ -6,7 +6,7 @@
  * This release adds hybrid and markdown chunking strategies implemented
  * in C code. No SQL schema changes are required.
  *
- * Portions copyright (c) 2025 - 2026, pgEdge, Inc.
+ * Copyright (c) 2025 - 2026, pgEdge, Inc.
  *
  *-------------------------------------------------------------------------
  */
