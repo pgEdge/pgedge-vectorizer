@@ -57,7 +57,7 @@ CREATE OR REPLACE FUNCTION pgedge_vectorizer.enable_vectorization(
     chunk_overlap INT DEFAULT NULL,
     embedding_dimension INT DEFAULT NULL,
     chunk_table_name TEXT DEFAULT NULL,
-    source_pk NAME DEFAULT 'id'
+    source_pk NAME DEFAULT NULL
 ) RETURNS VOID AS $$
 DECLARE
     chunk_table TEXT;
@@ -91,18 +91,18 @@ BEGIN
     WHERE i.indrelid = source_table
       AND i.indisprimary;
 
-    IF pk_count = 0 AND source_pk = 'id' THEN
+    IF pk_count = 0 AND source_pk IS NULL THEN
         RAISE EXCEPTION 'Table % has no primary key. Use the source_pk parameter to specify the column to use as document identifier.',
             source_table;
     END IF;
 
-    IF pk_count > 1 AND source_pk = 'id' THEN
+    IF pk_count > 1 AND source_pk IS NULL THEN
         RAISE EXCEPTION 'Table % has a composite primary key (% columns), which is not supported by auto-detection. Use the source_pk parameter to specify a single column.',
             source_table, pk_count;
     END IF;
 
-    -- Auto-detect PK column name and type if using default
-    IF source_pk = 'id' THEN
+    -- Auto-detect PK column name and type if source_pk not specified
+    IF source_pk IS NULL THEN
         SELECT a.attname, format_type(a.atttypid, a.atttypmod)
         INTO source_pk, pk_col_type
         FROM pg_index i

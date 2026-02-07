@@ -15,7 +15,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     chunk_overlap INT DEFAULT NULL,
     embedding_dimension INT DEFAULT NULL,
     chunk_table_name TEXT DEFAULT NULL,
-    source_pk NAME DEFAULT 'id'
+    source_pk NAME DEFAULT NULL
 );
 ```
 
@@ -28,15 +28,16 @@ SELECT pgedge_vectorizer.enable_vectorization(
 - `chunk_overlap`: Overlap between chunks in tokens
 - `embedding_dimension`: Vector dimension. When NULL (the default), the dimension is auto-detected by making a probe call to the configured embedding provider/model. Can be set explicitly to override auto-detection.
 - `chunk_table_name`: Custom chunk table name (default: `{table}_{column}_chunks`)
-- `source_pk`: Primary key column to use as the document identifier in the chunk table. When left as the default (`'id'`), the primary key column name and type are auto-detected from the table's primary key index. Set explicitly to use a non-PK column (e.g., `external_id`).
+- `source_pk`: Primary key column to use as the document identifier in the chunk table. When NULL (the default), the primary key column name and type are auto-detected from the table's primary key index via `pg_index`. Set explicitly to use a specific column (e.g., `'external_id'`).
 
 **Primary Key Handling:**
 
-- **Auto-detection**: By default, the primary key column name and type are detected from `pg_index`. The chunk table's `source_id` column is created with the matching type (e.g., `UUID`, `BIGINT`, `TEXT`, `VARCHAR(26)`).
+- **Auto-detection**: When `source_pk` is NULL, the primary key column name and type are detected from `pg_index`. The chunk table's `source_id` column is created with the matching type (e.g., `UUID`, `BIGINT`, `TEXT`, `VARCHAR(26)`).
 - **Supported types**: Any single-column primary key type — `UUID`, `BIGSERIAL`/`BIGINT`, `SERIAL`/`INTEGER`, `TEXT`, `VARCHAR(n)`, etc.
-- **Composite keys**: Tables with multi-column primary keys are not supported. Use `source_pk` to specify a single column instead.
+- **Composite keys**: Auto-detection does not support composite (multi-column) primary keys. However, you can vectorize a composite-PK table by passing `source_pk` to select one column explicitly (e.g., `source_pk := 'item_id'`).
 - **No primary key**: Tables without a primary key must specify `source_pk` explicitly.
 - **Override**: Pass `source_pk` to use a different column than the table's actual primary key (e.g., an `external_id UUID` column).
+- **Uniqueness requirement**: The column specified by `source_pk` must contain globally unique values. The chunk table enforces a `UNIQUE(source_id, chunk_index)` constraint, so duplicate `source_pk` values will cause conflicts.
 
 **Behavior:**
 

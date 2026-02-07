@@ -261,6 +261,7 @@ CREATE TABLE test_composite_override (
 );
 
 -- This should succeed because we specify which column to use
+-- Note: source_pk must be globally unique to avoid UNIQUE(source_id, chunk_index) conflicts
 SELECT pgedge_vectorizer.enable_vectorization(
     'test_composite_override'::regclass, 'content', 'token_based', 100, 10, 1536, NULL, 'item_id'
 );
@@ -271,12 +272,22 @@ FROM information_schema.columns
 WHERE table_name = 'test_composite_override_content_chunks'
 AND column_name = 'source_id';
 
--- Insert a test document
+-- Insert a test document with unique item_id
 INSERT INTO test_composite_override (tenant_id, item_id, content)
 VALUES (1, 42, 'Document in a composite PK table with explicit source_pk.');
 
 -- Verify chunks were created
 SELECT COUNT(*) > 0 AS chunks_created FROM test_composite_override_content_chunks;
+
+-- Insert a second row with the SAME item_id but different tenant_id.
+-- This demonstrates the uniqueness conflict: source_pk must be globally
+-- unique, not just unique within the composite key.
+INSERT INTO test_composite_override (tenant_id, item_id, content)
+VALUES (2, 42, 'Different tenant, same item_id — will conflict on chunk table.');
+
+-- Verify the conflict: the second insert's trigger overwrites the first
+-- row's chunks because they share the same source_id (42)
+SELECT COUNT(*) AS chunk_count FROM test_composite_override_content_chunks WHERE source_id = 42;
 
 -- Clean up
 DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'test_composite_override_content_chunks';
