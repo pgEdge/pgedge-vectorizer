@@ -43,6 +43,8 @@ CREATE EXTENSION pgedge_vectorizer;
 
 ## Basic Usage
 
+Any single-column primary key type is supported (UUID, BIGSERIAL, TEXT, VARCHAR, etc.) — the chunk table's `source_id` column will automatically match the source table's primary key type. See [Examples](examples.md) for more.
+
 ```sql
 -- Create a table
 CREATE TABLE documents (

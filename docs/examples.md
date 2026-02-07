@@ -65,7 +65,58 @@ SELECT pgedge_vectorizer.enable_vectorization(
 );
 ```
 
-## Example 4: Multi-Column Vectorization
+## Example 4: UUID Primary Keys
+
+This example creates a table using UUID primary keys, which are auto-detected by the vectorizer. The chunk table's `source_id` column will automatically use the `UUID` type to match.
+
+```sql
+CREATE TABLE knowledge_base (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    title TEXT,
+    content TEXT
+);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'knowledge_base',
+    'content',
+    chunk_size := 400,
+    chunk_overlap := 60
+);
+
+INSERT INTO knowledge_base (title, content)
+VALUES ('Getting Started', 'Welcome to our platform...');
+
+-- Query with UUID join
+SELECT
+    kb.id,
+    kb.title,
+    c.content,
+    c.embedding <=> pgedge_vectorizer.generate_embedding('how to get started') AS distance
+FROM knowledge_base kb
+JOIN knowledge_base_content_chunks c ON kb.id = c.source_id
+ORDER BY distance
+LIMIT 5;
+```
+
+## Example 5: Custom Primary Key Column
+
+This example uses `source_pk` to vectorize a table using a non-PK column as the document identifier.
+
+```sql
+CREATE TABLE imported_docs (
+    id BIGSERIAL PRIMARY KEY,
+    external_id UUID NOT NULL DEFAULT gen_random_uuid(),
+    content TEXT
+);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'imported_docs',
+    'content',
+    source_pk := 'external_id'
+);
+```
+
+## Example 6: Multi-Column Vectorization
 
 This example creates a table named `articles` that uses vectorization on multiple columns independently, with different chunk sizes for the title (100 tokens) and content (500 tokens) to match each field's characteristics.
 

@@ -17,6 +17,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     10,
     1536
 );
+NOTICE:  Using primary key column: id (bigint)
 NOTICE:  Vectorization enabled: maint_test -> maint_test_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...

@@ -15,6 +15,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     10,
     1536
 );
+NOTICE:  Using primary key column: id (bigint)
 NOTICE:  Vectorization enabled: test_docs -> test_docs_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -96,6 +97,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     10,
     1536
 );
+NOTICE:  Using primary key column: id (bigint)
 NOTICE:  relation "test_docs_content_chunks" already exists, skipping
 NOTICE:  relation "test_docs_content_chunks_embedding_idx" already exists, skipping
 NOTICE:  relation "test_docs_content_chunks_source_id_idx" already exists, skipping
