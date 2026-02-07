@@ -25,7 +25,7 @@ DATA = sql/$(EXTENSION)--$(EXTVERSION).sql \
        sql/$(EXTENSION)--1.0-beta2--1.0-beta3.sql
 
 # Test configuration for pg_regress
-REGRESS = setup chunking hybrid_chunking queue vectorization multi_column maintenance edge_cases providers worker cleanup embedding
+REGRESS = setup chunking hybrid_chunking queue vectorization multi_column maintenance edge_cases providers worker cleanup embedding pk_types
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # Documentation files (if any)
