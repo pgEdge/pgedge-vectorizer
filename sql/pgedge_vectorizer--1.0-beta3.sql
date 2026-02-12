@@ -259,6 +259,10 @@ BEGIN
                 END IF;
             END LOOP;
 
+            -- Remove any stale chunks beyond the new chunk count
+            EXECUTE format('DELETE FROM %I WHERE source_id = $1 AND chunk_index > $2', chunk_table)
+                USING row_record.pk_val, array_length(chunks, 1);
+
             rows_processed := rows_processed + 1;
         END LOOP;
 
@@ -572,11 +576,7 @@ BEGIN
     chunk_table_name := source_table_name::TEXT || '_' || source_column_name || '_chunks';
 
     -- Verify chunk table exists
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_tables
-        WHERE schemaname = 'public'
-        AND tablename = chunk_table_name
-    ) THEN
+    IF to_regclass(chunk_table_name) IS NULL THEN
         RAISE EXCEPTION 'Chunk table % does not exist. Use enable_vectorization() first.', chunk_table_name;
     END IF;
 
