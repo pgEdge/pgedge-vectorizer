@@ -67,5 +67,7 @@ core.*
 *.log
 *.tmp
 
-# AI
-.claude/settings.local.json
+# AI / Claude Code
+CLAUDE.md
+.claude/
+docs/plans/

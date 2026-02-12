@@ -5,7 +5,10 @@
  *
  * Changes in this release:
  *   - Auto-detect embedding dimension from configured model
- *   - Support custom primary key column names
+ *   - Support any single-column primary key type (UUID, TEXT, etc.)
+ *   - Auto-detect PK column name and type from pg_index
+ *   - Reject composite primary keys with clear error message
+ *   - Support custom primary key column names via source_pk parameter
  *   - Upsert when re-enabling vectorization with existing chunk table
  *   - Only re-queue chunks whose content changed on re-enable
  *   - Clean up orphaned queue items when disabling vectorization
@@ -38,8 +41,14 @@ LANGUAGE C IMMUTABLE STRICT;
 COMMENT ON FUNCTION pgedge_vectorizer.generate_embedding IS
 'Generate an embedding vector from query text using the configured provider';
 
+-- Drop old 7-parameter enable_vectorization before creating new 8-parameter version.
+-- Without this DROP, PostgreSQL creates a second overload (ambiguous calls).
+DROP FUNCTION IF EXISTS pgedge_vectorizer.enable_vectorization(
+    regclass, name, text, integer, integer, integer, text
+);
+
 -- Replace enable_vectorization with new signature and logic
--- (adds source_pk parameter, auto-detect dimension, upsert on re-enable)
+-- (adds source_pk parameter, auto-detect dimension and PK type, upsert on re-enable)
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.enable_vectorization(
     source_table REGCLASS,
     source_column NAME,
@@ -48,7 +57,7 @@ CREATE OR REPLACE FUNCTION pgedge_vectorizer.enable_vectorization(
     chunk_overlap INT DEFAULT NULL,
     embedding_dimension INT DEFAULT NULL,
     chunk_table_name TEXT DEFAULT NULL,
-    source_pk NAME DEFAULT 'id'
+    source_pk NAME DEFAULT NULL
 ) RETURNS VOID AS $$
 DECLARE
     chunk_table TEXT;
@@ -56,6 +65,8 @@ DECLARE
     actual_strategy TEXT;
     actual_chunk_size INT;
     actual_chunk_overlap INT;
+    pk_col_type TEXT;
+    pk_count INT;
 BEGIN
     -- Use defaults from GUC if not provided
     actual_strategy := COALESCE(chunk_strategy,
@@ -71,14 +82,62 @@ BEGIN
         RAISE NOTICE 'Auto-detected embedding dimension: %', embedding_dimension;
     END IF;
 
+    -- Detect PK column count to reject composite PKs
+    SELECT count(*)
+    INTO pk_count
+    FROM pg_index i
+    JOIN pg_attribute a ON a.attrelid = i.indrelid
+      AND a.attnum = ANY(i.indkey)
+    WHERE i.indrelid = source_table
+      AND i.indisprimary;
+
+    IF pk_count = 0 AND source_pk IS NULL THEN
+        RAISE EXCEPTION 'Table % has no primary key. Use the source_pk parameter to specify the column to use as document identifier.',
+            source_table;
+    END IF;
+
+    IF pk_count > 1 AND source_pk IS NULL THEN
+        RAISE EXCEPTION 'Table % has a composite primary key (% columns), which is not supported by auto-detection. Use the source_pk parameter to specify a single column.',
+            source_table, pk_count;
+    END IF;
+
+    -- Auto-detect PK column name and type if source_pk not specified
+    IF source_pk IS NULL THEN
+        SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+        INTO source_pk, pk_col_type
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid
+          AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = source_table
+          AND i.indisprimary;
+    ELSE
+        -- User specified a column; look up its type
+        SELECT format_type(a.atttypid, a.atttypmod)
+        INTO pk_col_type
+        FROM pg_attribute a
+        WHERE a.attrelid = source_table
+          AND a.attname = source_pk
+          AND NOT a.attisdropped;
+
+        IF pk_col_type IS NULL THEN
+            RAISE EXCEPTION 'Column "%" does not exist on table %',
+                source_pk, source_table;
+        END IF;
+    END IF;
+
+    RAISE NOTICE 'Using primary key column: % (%)', source_pk, pk_col_type;
+
     -- Determine chunk table name
     chunk_table := COALESCE(chunk_table_name, source_table::TEXT || '_' || source_column || '_chunks');
 
     -- Create chunks table
+    -- Note: pk_col_type uses %s (not %I) because format_type() returns
+    -- canonical SQL type names (e.g. "character varying(26)") that would
+    -- be incorrectly double-quoted by %I. This value is system-controlled.
     EXECUTE format('
         CREATE TABLE IF NOT EXISTS %I (
             id BIGSERIAL PRIMARY KEY,
-            source_id BIGINT NOT NULL,
+            source_id %s NOT NULL,
             chunk_index INT NOT NULL,
             content TEXT NOT NULL,
             token_count INT,
@@ -86,7 +145,7 @@ BEGIN
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(source_id, chunk_index)
-        )', chunk_table, embedding_dimension);
+        )', chunk_table, pk_col_type, embedding_dimension);
 
     -- Create vector index for similarity search
     EXECUTE format('
@@ -106,10 +165,10 @@ BEGIN
         CREATE OR REPLACE TRIGGER %I
         AFTER INSERT OR UPDATE ON %s
         FOR EACH ROW
-        EXECUTE FUNCTION pgedge_vectorizer.vectorization_trigger(%L, %L, %L, %L, %L, %L)',
+        EXECUTE FUNCTION pgedge_vectorizer.vectorization_trigger(%L, %L, %L, %L, %L, %L, %L)',
         trigger_name, source_table,
         source_column, chunk_table, actual_strategy,
-        actual_chunk_size, actual_chunk_overlap, source_pk);
+        actual_chunk_size, actual_chunk_overlap, source_pk, pk_col_type);
 
     RAISE NOTICE 'Vectorization enabled: % -> %', source_table, chunk_table;
     RAISE NOTICE 'Strategy: %, chunk_size: %, overlap: %',
@@ -229,29 +288,33 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Replace vectorization_trigger with custom PK support
+-- Replace vectorization_trigger with UUID-safe PK support
+-- Uses TEXT intermediate variable and explicit casting for any PK type
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.vectorization_trigger()
 RETURNS TRIGGER AS $$
 DECLARE
     content_col TEXT;
-    chunk_tbl TEXT;
+    chunk_table TEXT;
     strategy TEXT;
     chunk_sz INT;
     overlap INT;
     pk_col TEXT;
+    pk_type TEXT;
     doc_content TEXT;
     chunks TEXT[];
     chunk_text TEXT;
-    source_id_val BIGINT;
-    chunk_id BIGINT;
     i INT;
+    chunk_id BIGINT;
+    source_id_val TEXT;
 BEGIN
+    -- Extract trigger arguments
     content_col := TG_ARGV[0];
-    chunk_tbl := TG_ARGV[1];
+    chunk_table := TG_ARGV[1];
     strategy := TG_ARGV[2];
     chunk_sz := TG_ARGV[3]::INT;
     overlap := TG_ARGV[4]::INT;
     pk_col := COALESCE(TG_ARGV[5], 'id');
+    pk_type := COALESCE(TG_ARGV[6], 'bigint');
 
     -- Get source document ID
     EXECUTE format('SELECT ($1).%I', pk_col) USING NEW INTO source_id_val;
@@ -259,163 +322,190 @@ BEGIN
     -- Get document content
     EXECUTE format('SELECT $1.%I', content_col) USING NEW INTO doc_content;
 
-    -- Handle NULL or empty content
-    IF doc_content IS NULL OR trim(doc_content) = '' THEN
-        -- Delete existing chunks for this source
-        EXECUTE format('DELETE FROM %I WHERE source_id = $1', chunk_tbl) USING source_id_val;
-        -- Clean up any pending queue items for deleted chunks
-        EXECUTE format('
-            DELETE FROM pgedge_vectorizer.queue
-            WHERE chunk_table = %L
-            AND chunk_id NOT IN (SELECT id FROM %I)',
-            chunk_tbl, chunk_tbl);
+    -- Trim whitespace for empty check
+    IF doc_content IS NOT NULL THEN
+        doc_content := trim(doc_content);
+    END IF;
+
+    -- Skip if content unchanged (on UPDATE)
+    IF TG_OP = 'UPDATE' THEN
+        DECLARE
+            old_content TEXT;
+        BEGIN
+            EXECUTE format('SELECT $1.%I', content_col) USING OLD INTO old_content;
+            IF old_content IS NOT NULL THEN
+                old_content := trim(old_content);
+            END IF;
+            IF doc_content = old_content OR (doc_content IS NULL AND old_content IS NULL) THEN
+                RETURN NEW;
+            END IF;
+        END;
+    END IF;
+
+    -- Delete existing chunks for this document
+    -- pk_type uses %s: value from format_type() is system-controlled (see enable_vectorization)
+    EXECUTE format('DELETE FROM %I WHERE source_id = $1::%s', chunk_table, pk_type)
+        USING source_id_val;
+
+    -- Skip if content is NULL or empty (after deleting old chunks)
+    IF doc_content IS NULL OR doc_content = '' THEN
         RETURN NEW;
     END IF;
 
     -- Chunk the document
     chunks := pgedge_vectorizer.chunk_text(doc_content, strategy, chunk_sz, overlap);
 
-    IF chunks IS NULL OR array_length(chunks, 1) IS NULL THEN
-        RETURN NEW;
-    END IF;
-
-    -- Delete old chunks for this source that exceed new chunk count
-    EXECUTE format('DELETE FROM %I WHERE source_id = $1 AND chunk_index > $2', chunk_tbl)
-    USING source_id_val, array_length(chunks, 1);
-
-    -- Insert/update chunks
+    -- Insert chunks and queue for embedding
     FOR i IN 1..array_length(chunks, 1) LOOP
         chunk_text := chunks[i];
 
-        -- Skip empty chunks
-        IF chunk_text IS NOT NULL AND trim(chunk_text) != '' THEN
-            -- Upsert chunk
-            EXECUTE format('
-                INSERT INTO %I (source_id, chunk_index, content, token_count)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (source_id, chunk_index)
-                DO UPDATE SET
-                    content = EXCLUDED.content,
-                    token_count = EXCLUDED.token_count,
-                    embedding = CASE
-                        WHEN %I.content = EXCLUDED.content THEN %I.embedding
-                        ELSE NULL
-                    END,
-                    updated_at = NOW()
-                RETURNING id', chunk_tbl, chunk_tbl, chunk_tbl)
-            USING source_id_val, i, chunk_text,
-                  length(chunk_text) / 4  -- Approximate token count
-            INTO chunk_id;
+        -- Insert chunk
+        EXECUTE format('
+            INSERT INTO %I (source_id, chunk_index, content, token_count)
+            VALUES ($1::%s, $2, $3, $4)
+            RETURNING id', chunk_table, pk_type)
+        USING source_id_val, i, chunk_text,
+              length(chunk_text) / 4  -- Approximate token count
+        INTO chunk_id;
 
-            -- Queue for embedding only if embedding was cleared (content changed or new)
-            EXECUTE format('
-                INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)
-                SELECT $1, $2, $3
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM %I WHERE id = $1 AND embedding IS NOT NULL
-                )', chunk_tbl)
-            USING chunk_id, chunk_tbl, chunk_text;
-        END IF;
+        -- Queue for embedding
+        INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)
+        VALUES (chunk_id, chunk_table, chunk_text);
     END LOOP;
+
+    -- Notify workers (they will pick up work via polling and SKIP LOCKED)
+    PERFORM pg_notify('pgedge_vectorizer_queue', source_id_val::TEXT);
 
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
--- Replace recreate_chunks with custom PK support
+-- Replace recreate_chunks with robust version
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.recreate_chunks(
     source_table_name REGCLASS,
     source_column_name NAME
 ) RETURNS INT AS $$
 DECLARE
     chunk_table_name TEXT;
+    rows_affected INT := 0;
     trigger_name TEXT;
-    row_record RECORD;
-    doc_content TEXT;
-    chunks TEXT[];
-    chunk_text TEXT;
-    chunk_id BIGINT;
-    i INT;
-    total_processed INT := 0;
-    total_queued INT := 0;
-    -- Variables for getting trigger args
-    tgargs_array TEXT[];
-    actual_strategy TEXT;
-    actual_chunk_size INT;
-    actual_chunk_overlap INT;
-    pk_col TEXT;
+    trigger_exists BOOLEAN;
 BEGIN
-    -- Determine chunk table and trigger names
+    -- Determine chunk table name
     chunk_table_name := source_table_name::TEXT || '_' || source_column_name || '_chunks';
-    trigger_name := source_table_name::TEXT || '_' || source_column_name || '_vectorization_trigger';
 
-    -- Get chunking configuration from trigger arguments
-    -- In PostgreSQL 17+, tgargs is bytea and needs to be decoded
-    BEGIN
-        SELECT string_to_array(
-            encode(t.tgargs, 'escape'),
-            '\000'
-        ) INTO tgargs_array
-        FROM pg_trigger t
+    -- Verify chunk table exists
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_tables
+        WHERE schemaname = 'public'
+        AND tablename = chunk_table_name
+    ) THEN
+        RAISE EXCEPTION 'Chunk table % does not exist. Use enable_vectorization() first.', chunk_table_name;
+    END IF;
+
+    -- Verify trigger exists
+    trigger_name := source_table_name::TEXT || '_' || source_column_name || '_vectorization_trigger';
+    SELECT EXISTS (
+        SELECT 1 FROM pg_trigger t
         JOIN pg_class c ON t.tgrelid = c.oid
         WHERE c.oid = source_table_name
-        AND t.tgname = trigger_name;
+        AND t.tgname = trigger_name
+    ) INTO trigger_exists;
 
-        -- Arguments: 1=content_col, 2=chunk_table, 3=strategy, 4=size, 5=overlap, 6=pk_col
-        actual_strategy := tgargs_array[3];
-        actual_chunk_size := tgargs_array[4]::INT;
-        actual_chunk_overlap := tgargs_array[5]::INT;
-        pk_col := COALESCE(tgargs_array[6], 'id');
+    IF NOT trigger_exists THEN
+        RAISE EXCEPTION 'Vectorization trigger % does not exist. Use enable_vectorization() first.', trigger_name;
+    END IF;
+
+    RAISE NOTICE 'Recreating chunks for %.% -> %', source_table_name, source_column_name, chunk_table_name;
+
+    -- Delete all existing chunks
+    EXECUTE format('DELETE FROM %I', chunk_table_name);
+    GET DIAGNOSTICS rows_affected = ROW_COUNT;
+    RAISE NOTICE 'Deleted % existing chunks', rows_affected;
+
+    -- Delete all queue items for this chunk table (with retry logic)
+    BEGIN
+        -- Try to delete with a lock timeout
+        SET LOCAL lock_timeout = '5s';
+        DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = chunk_table_name;
+        RAISE NOTICE 'Cleared queue for %', chunk_table_name;
+    EXCEPTION WHEN lock_not_available OR deadlock_detected THEN
+        -- If we can't get the lock, just mark them for cleanup
+        RAISE WARNING 'Could not clear queue due to concurrent access, continuing anyway';
     END;
 
-    RAISE NOTICE 'Re-chunking with strategy=%, size=%, overlap=%',
-        actual_strategy, actual_chunk_size, actual_chunk_overlap;
+    -- Manually process each row to bypass trigger's unchanged-content optimization
+    DECLARE
+        row_record RECORD;
+        doc_content TEXT;
+        chunks TEXT[];
+        chunk_text TEXT;
+        i INT;
+        chunk_id BIGINT;
+        rows_processed INT := 0;
+        actual_strategy TEXT;
+        actual_chunk_size INT;
+        actual_chunk_overlap INT;
+        pk_col TEXT;
+        pk_type TEXT;
+    BEGIN
+        -- Get chunking configuration from trigger arguments
+        -- In PostgreSQL 17+, tgargs is bytea and needs to be decoded
+        DECLARE
+            tgargs_array TEXT[];
+        BEGIN
+            SELECT string_to_array(encode(t.tgargs, 'escape'), E'\\000')
+            INTO tgargs_array
+            FROM pg_trigger t
+            JOIN pg_class c ON t.tgrelid = c.oid
+            WHERE c.oid = source_table_name
+            AND t.tgname = trigger_name;
 
-    FOR row_record IN EXECUTE format(
-        'SELECT %I as pk_val, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
-        pk_col, source_column_name, source_table_name, source_column_name, source_column_name
-    )
-    LOOP
-        doc_content := row_record.content;
+            -- Arguments: 1=content_col, 2=chunk_table, 3=strategy, 4=size, 5=overlap, 6=pk_col, 7=pk_type
+            actual_strategy := tgargs_array[3];
+            actual_chunk_size := tgargs_array[4]::INT;
+            actual_chunk_overlap := tgargs_array[5]::INT;
+            pk_col := COALESCE(tgargs_array[6], 'id');
+            pk_type := COALESCE(tgargs_array[7], 'bigint');
+        END;
 
-        -- Delete existing chunks for this source
-        EXECUTE format('DELETE FROM %I WHERE source_id = $1', chunk_table_name)
-        USING row_record.pk_val;
+        RAISE NOTICE 'Re-chunking with strategy=%, size=%, overlap=%',
+            actual_strategy, actual_chunk_size, actual_chunk_overlap;
 
-        -- Chunk the document
-        chunks := pgedge_vectorizer.chunk_text(doc_content, actual_strategy, actual_chunk_size, actual_chunk_overlap);
+        FOR row_record IN EXECUTE format(
+            'SELECT %I as pk_val, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
+            pk_col, source_column_name, source_table_name, source_column_name, source_column_name
+        )
+        LOOP
+            doc_content := row_record.content;
 
-        IF chunks IS NOT NULL AND array_length(chunks, 1) IS NOT NULL THEN
-            -- Insert new chunks and queue for embedding
+            -- Chunk the document
+            chunks := pgedge_vectorizer.chunk_text(doc_content, actual_strategy, actual_chunk_size, actual_chunk_overlap);
+
+            -- Insert chunks and queue for embedding
             FOR i IN 1..array_length(chunks, 1) LOOP
                 chunk_text := chunks[i];
 
+                -- Insert chunk
+                -- pk_type uses %s: value from format_type() is system-controlled (see enable_vectorization)
                 EXECUTE format('
                     INSERT INTO %I (source_id, chunk_index, content, token_count)
-                    VALUES ($1, $2, $3, $4)
-                    RETURNING id', chunk_table_name)
+                    VALUES ($1::%s, $2, $3, $4)
+                    RETURNING id', chunk_table_name, pk_type)
                 USING row_record.pk_val, i, chunk_text,
                       length(chunk_text) / 4  -- Approximate token count
                 INTO chunk_id;
 
+                -- Queue for embedding
                 INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)
                 VALUES (chunk_id, chunk_table_name, chunk_text);
-                total_queued := total_queued + 1;
             END LOOP;
-        END IF;
 
-        total_processed := total_processed + 1;
-    END LOOP;
+            rows_processed := rows_processed + 1;
+        END LOOP;
 
-    -- Clean up any queue items referencing chunks that no longer exist
-    DELETE FROM pgedge_vectorizer.queue
-    WHERE chunk_table = chunk_table_name
-    AND chunk_id NOT IN (SELECT id FROM pgedge_vectorizer.queue q
-                         JOIN (SELECT id FROM unnest(ARRAY[]::bigint[]) AS id) x ON true);
-
-    RAISE NOTICE 'Recreated chunks: % source rows processed, % chunks queued',
-        total_processed, total_queued;
-
-    RETURN total_processed;
+        RAISE NOTICE 'Processed % rows', rows_processed;
+        RETURN rows_processed;
+    END;
 END;
 $$ LANGUAGE plpgsql;

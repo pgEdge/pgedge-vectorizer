@@ -91,7 +91,7 @@ CREATE FUNCTION pgedge_vectorizer.enable_vectorization(
     chunk_overlap INT DEFAULT NULL,
     embedding_dimension INT DEFAULT NULL,
     chunk_table_name TEXT DEFAULT NULL,
-    source_pk NAME DEFAULT 'id'
+    source_pk NAME DEFAULT NULL
 ) RETURNS VOID AS $$
 DECLARE
     chunk_table TEXT;
@@ -99,6 +99,8 @@ DECLARE
     actual_strategy TEXT;
     actual_chunk_size INT;
     actual_chunk_overlap INT;
+    pk_col_type TEXT;
+    pk_count INT;
 BEGIN
     -- Use defaults from GUC if not provided
     actual_strategy := COALESCE(chunk_strategy,
@@ -114,14 +116,62 @@ BEGIN
         RAISE NOTICE 'Auto-detected embedding dimension: %', embedding_dimension;
     END IF;
 
+    -- Detect PK column count to reject composite PKs
+    SELECT count(*)
+    INTO pk_count
+    FROM pg_index i
+    JOIN pg_attribute a ON a.attrelid = i.indrelid
+      AND a.attnum = ANY(i.indkey)
+    WHERE i.indrelid = source_table
+      AND i.indisprimary;
+
+    IF pk_count = 0 AND source_pk IS NULL THEN
+        RAISE EXCEPTION 'Table % has no primary key. Use the source_pk parameter to specify the column to use as document identifier.',
+            source_table;
+    END IF;
+
+    IF pk_count > 1 AND source_pk IS NULL THEN
+        RAISE EXCEPTION 'Table % has a composite primary key (% columns), which is not supported by auto-detection. Use the source_pk parameter to specify a single column.',
+            source_table, pk_count;
+    END IF;
+
+    -- Auto-detect PK column name and type if source_pk not specified
+    IF source_pk IS NULL THEN
+        SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+        INTO source_pk, pk_col_type
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid
+          AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = source_table
+          AND i.indisprimary;
+    ELSE
+        -- User specified a column; look up its type
+        SELECT format_type(a.atttypid, a.atttypmod)
+        INTO pk_col_type
+        FROM pg_attribute a
+        WHERE a.attrelid = source_table
+          AND a.attname = source_pk
+          AND NOT a.attisdropped;
+
+        IF pk_col_type IS NULL THEN
+            RAISE EXCEPTION 'Column "%" does not exist on table %',
+                source_pk, source_table;
+        END IF;
+    END IF;
+
+    RAISE NOTICE 'Using primary key column: % (%)', source_pk, pk_col_type;
+
     -- Determine chunk table name
     chunk_table := COALESCE(chunk_table_name, source_table::TEXT || '_' || source_column || '_chunks');
 
     -- Create chunks table
+    -- Note: pk_col_type uses %s (not %I) because format_type() returns
+    -- canonical SQL type names (e.g. "character varying(26)") that would
+    -- be incorrectly double-quoted by %I. This value is system-controlled.
     EXECUTE format('
         CREATE TABLE IF NOT EXISTS %I (
             id BIGSERIAL PRIMARY KEY,
-            source_id BIGINT NOT NULL,
+            source_id %s NOT NULL,
             chunk_index INT NOT NULL,
             content TEXT NOT NULL,
             token_count INT,
@@ -129,7 +179,7 @@ BEGIN
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(source_id, chunk_index)
-        )', chunk_table, embedding_dimension);
+        )', chunk_table, pk_col_type, embedding_dimension);
 
     -- Create vector index for similarity search
     EXECUTE format('
@@ -149,10 +199,10 @@ BEGIN
         CREATE OR REPLACE TRIGGER %I
         AFTER INSERT OR UPDATE ON %s
         FOR EACH ROW
-        EXECUTE FUNCTION pgedge_vectorizer.vectorization_trigger(%L, %L, %L, %L, %L, %L)',
+        EXECUTE FUNCTION pgedge_vectorizer.vectorization_trigger(%L, %L, %L, %L, %L, %L, %L)',
         trigger_name, source_table,
         source_column, chunk_table, actual_strategy,
-        actual_chunk_size, actual_chunk_overlap, source_pk);
+        actual_chunk_size, actual_chunk_overlap, source_pk, pk_col_type);
 
     RAISE NOTICE 'Vectorization enabled: % -> %', source_table, chunk_table;
     RAISE NOTICE 'Strategy: %, chunk_size: %, overlap: %',
@@ -208,6 +258,10 @@ BEGIN
                     VALUES (chunk_id, chunk_table, chunk_text);
                 END IF;
             END LOOP;
+
+            -- Remove any stale chunks beyond the new chunk count
+            EXECUTE format('DELETE FROM %I WHERE source_id = $1 AND chunk_index > $2', chunk_table)
+                USING row_record.pk_val, array_length(chunks, 1);
 
             rows_processed := rows_processed + 1;
         END LOOP;
@@ -288,12 +342,13 @@ DECLARE
     chunk_sz INT;
     overlap INT;
     pk_col TEXT;
+    pk_type TEXT;
     doc_content TEXT;
     chunks TEXT[];
     chunk_text TEXT;
     i INT;
     chunk_id BIGINT;
-    source_id_val BIGINT;
+    source_id_val TEXT;
 BEGIN
     -- Extract trigger arguments
     content_col := TG_ARGV[0];
@@ -302,6 +357,7 @@ BEGIN
     chunk_sz := TG_ARGV[3]::INT;
     overlap := TG_ARGV[4]::INT;
     pk_col := COALESCE(TG_ARGV[5], 'id');
+    pk_type := COALESCE(TG_ARGV[6], 'bigint');
 
     -- Get source document ID
     EXECUTE format('SELECT ($1).%I', pk_col) USING NEW INTO source_id_val;
@@ -330,7 +386,8 @@ BEGIN
     END IF;
 
     -- Delete existing chunks for this document
-    EXECUTE format('DELETE FROM %I WHERE source_id = $1', chunk_table)
+    -- pk_type uses %s: value from format_type() is system-controlled (see enable_vectorization)
+    EXECUTE format('DELETE FROM %I WHERE source_id = $1::%s', chunk_table, pk_type)
         USING source_id_val;
 
     -- Skip if content is NULL or empty (after deleting old chunks)
@@ -348,8 +405,8 @@ BEGIN
         -- Insert chunk
         EXECUTE format('
             INSERT INTO %I (source_id, chunk_index, content, token_count)
-            VALUES ($1, $2, $3, $4)
-            RETURNING id', chunk_table)
+            VALUES ($1::%s, $2, $3, $4)
+            RETURNING id', chunk_table, pk_type)
         USING source_id_val, i, chunk_text,
               length(chunk_text) / 4  -- Approximate token count
         INTO chunk_id;
@@ -519,11 +576,7 @@ BEGIN
     chunk_table_name := source_table_name::TEXT || '_' || source_column_name || '_chunks';
 
     -- Verify chunk table exists
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_tables
-        WHERE schemaname = 'public'
-        AND tablename = chunk_table_name
-    ) THEN
+    IF to_regclass(chunk_table_name) IS NULL THEN
         RAISE EXCEPTION 'Chunk table % does not exist. Use enable_vectorization() first.', chunk_table_name;
     END IF;
 
@@ -571,6 +624,7 @@ BEGIN
         actual_chunk_size INT;
         actual_chunk_overlap INT;
         pk_col TEXT;
+        pk_type TEXT;
     BEGIN
         -- Get chunking configuration from trigger arguments
         -- In PostgreSQL 17+, tgargs is bytea and needs to be decoded
@@ -584,11 +638,12 @@ BEGIN
             WHERE c.oid = source_table_name
             AND t.tgname = trigger_name;
 
-            -- Arguments: 1=content_col, 2=chunk_table, 3=strategy, 4=size, 5=overlap, 6=pk_col
+            -- Arguments: 1=content_col, 2=chunk_table, 3=strategy, 4=size, 5=overlap, 6=pk_col, 7=pk_type
             actual_strategy := tgargs_array[3];
             actual_chunk_size := tgargs_array[4]::INT;
             actual_chunk_overlap := tgargs_array[5]::INT;
             pk_col := COALESCE(tgargs_array[6], 'id');
+            pk_type := COALESCE(tgargs_array[7], 'bigint');
         END;
 
         RAISE NOTICE 'Re-chunking with strategy=%, size=%, overlap=%',
@@ -609,10 +664,11 @@ BEGIN
                 chunk_text := chunks[i];
 
                 -- Insert chunk
+                -- pk_type uses %s: value from format_type() is system-controlled (see enable_vectorization)
                 EXECUTE format('
                     INSERT INTO %I (source_id, chunk_index, content, token_count)
-                    VALUES ($1, $2, $3, $4)
-                    RETURNING id', chunk_table_name)
+                    VALUES ($1::%s, $2, $3, $4)
+                    RETURNING id', chunk_table_name, pk_type)
                 USING row_record.pk_val, i, chunk_text,
                       length(chunk_text) / 4  -- Approximate token count
                 INTO chunk_id;
