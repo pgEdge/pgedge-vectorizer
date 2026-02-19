@@ -123,7 +123,6 @@ END;
 $$;
 NOTICE:  Testing Voyage provider...
 NOTICE:  Voyage test failed: failed to generate embedding: Voyage AI API returned HTTP 401: {
-
 -- Test 4: Semantic search example (if OpenAI key available)
 -- Configure OpenAI settings again for semantic search test
 SET pgedge_vectorizer.provider = 'openai';
