@@ -664,6 +664,13 @@ update_embedding(int64 chunk_id, const char *chunk_table, const float *embedding
 			 chunk_table, chunk_id);
 	}
 
+	if (SPI_processed == 0)
+	{
+		elog(WARNING, "Chunk %ld not found in table %s "
+			 "(may have been deleted by a concurrent source update)",
+			 chunk_id, chunk_table);
+	}
+
 	pfree(vector_str.data);
 }
 

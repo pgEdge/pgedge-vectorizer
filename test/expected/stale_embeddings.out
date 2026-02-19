@@ -1,0 +1,234 @@
+-- Stale embeddings test
+-- Verifies that old queue entries and stale chunks are properly cleaned up
+-- when source content is updated or vectorization is re-enabled.
+---------------------------------------------------------------------------
+-- Setup
+---------------------------------------------------------------------------
+CREATE TABLE stale_test (
+    id BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'stale_test'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  Vectorization enabled: stale_test -> stale_test_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 1: UPDATE cleans up orphaned queue entries
+---------------------------------------------------------------------------
+-- Insert a document
+INSERT INTO stale_test (content)
+VALUES ('First version of this document content for testing.');
+-- Verify initial chunks and queue entries exist
+SELECT COUNT(*) AS initial_chunks FROM stale_test_content_chunks WHERE source_id = 1;
+ initial_chunks 
+----------------
+              1
+(1 row)
+
+SELECT COUNT(*) > 0 AS initial_queue_entries
+FROM pgedge_vectorizer.queue
+WHERE chunk_table = 'stale_test_content_chunks'
+  AND status = 'pending';
+ initial_queue_entries 
+-----------------------
+ t
+(1 row)
+
+-- Save old chunk IDs before the UPDATE deletes them
+CREATE TEMP TABLE old_chunk_ids AS
+SELECT id FROM stale_test_content_chunks WHERE source_id = 1;
+-- Update the document (should delete old chunks + their queue entries, insert new)
+UPDATE stale_test SET content = 'Completely different second version of content.' WHERE id = 1;
+-- Old queue entries should be gone (no orphans)
+SELECT COUNT(*) AS orphaned_queue_entries
+FROM pgedge_vectorizer.queue q
+JOIN old_chunk_ids o ON q.chunk_id = o.id
+WHERE q.chunk_table = 'stale_test_content_chunks'
+  AND q.status IN ('pending', 'failed');
+ orphaned_queue_entries 
+------------------------
+                      0
+(1 row)
+
+-- New queue entries should exist for the replacement chunks
+SELECT COUNT(*) > 0 AS new_queue_entries
+FROM pgedge_vectorizer.queue
+WHERE chunk_table = 'stale_test_content_chunks'
+  AND status = 'pending'
+  AND chunk_id NOT IN (SELECT id FROM old_chunk_ids);
+ new_queue_entries 
+-------------------
+ t
+(1 row)
+
+DROP TABLE old_chunk_ids;
+---------------------------------------------------------------------------
+-- Test 2: UPDATE to empty content cleans up queue entries
+---------------------------------------------------------------------------
+INSERT INTO stale_test (id, content) VALUES (2, 'Some content to be cleared out.');
+SELECT COUNT(*) > 0 AS chunks_before_clear
+FROM stale_test_content_chunks WHERE source_id = 2;
+ chunks_before_clear 
+---------------------
+ t
+(1 row)
+
+-- Save chunk IDs before the UPDATE deletes them
+CREATE TEMP TABLE old_chunk_ids_2 AS
+SELECT id FROM stale_test_content_chunks WHERE source_id = 2;
+-- Update to empty (should delete chunks AND their queue entries)
+UPDATE stale_test SET content = '' WHERE id = 2;
+SELECT COUNT(*) AS chunks_after_clear
+FROM stale_test_content_chunks WHERE source_id = 2;
+ chunks_after_clear 
+--------------------
+                  0
+(1 row)
+
+-- Verify queue entries for old chunks were cleaned up
+SELECT COUNT(*) AS queue_after_clear
+FROM pgedge_vectorizer.queue q
+JOIN old_chunk_ids_2 o ON q.chunk_id = o.id
+WHERE q.chunk_table = 'stale_test_content_chunks'
+  AND q.status IN ('pending', 'failed');
+ queue_after_clear 
+-------------------
+                 0
+(1 row)
+
+DROP TABLE old_chunk_ids_2;
+---------------------------------------------------------------------------
+-- Test 3: Re-enable vectorization cleans stale high-index chunks
+---------------------------------------------------------------------------
+-- Clear queue from prior tests
+DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'stale_test_content_chunks';
+-- Disable vectorization (keep chunk table)
+SELECT pgedge_vectorizer.disable_vectorization('stale_test'::regclass, 'content', false);
+NOTICE:  Vectorization disabled (chunk table preserved): stale_test_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+-- Insert a long document that will produce multiple chunks with small chunk_size
+DELETE FROM stale_test;
+INSERT INTO stale_test (id, content) VALUES (10,
+    'Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron ' ||
+    'pi rho sigma tau upsilon phi chi psi omega. ' ||
+    'More words here to ensure this document produces several chunks when using a very small chunk size. ' ||
+    'We need enough content that the chunker will split this into at least three or four separate pieces. ' ||
+    'Adding yet more filler text to be absolutely certain we get multiple chunks from this single document.'
+);
+-- Re-enable with a very small chunk_size to force many chunks
+SELECT pgedge_vectorizer.enable_vectorization(
+    'stale_test'::regclass,
+    'content',
+    'token_based',
+    10,
+    2,
+    1536
+);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  relation "stale_test_content_chunks" already exists, skipping
+NOTICE:  relation "stale_test_content_chunks_embedding_idx" already exists, skipping
+NOTICE:  relation "stale_test_content_chunks_source_id_idx" already exists, skipping
+NOTICE:  Vectorization enabled: stale_test -> stale_test_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 10, overlap: 2
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Verify multiple chunks were created
+SELECT COUNT(*) > 1 AS multiple_chunks FROM stale_test_content_chunks WHERE source_id = 10;
+ multiple_chunks 
+-----------------
+ t
+(1 row)
+
+-- Record the chunk count
+SELECT COUNT(*) AS chunk_count_before FROM stale_test_content_chunks WHERE source_id = 10;
+ chunk_count_before 
+--------------------
+                 29
+(1 row)
+
+-- Disable again (keep chunk table), clear queue
+DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'stale_test_content_chunks';
+SELECT pgedge_vectorizer.disable_vectorization('stale_test'::regclass, 'content', false);
+NOTICE:  Vectorization disabled (chunk table preserved): stale_test_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+-- Shorten the document drastically
+UPDATE stale_test SET content = 'Short.' WHERE id = 10;
+-- Re-enable with same small chunk_size (should produce fewer chunks)
+SELECT pgedge_vectorizer.enable_vectorization(
+    'stale_test'::regclass,
+    'content',
+    'token_based',
+    10,
+    2,
+    1536
+);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  relation "stale_test_content_chunks" already exists, skipping
+NOTICE:  relation "stale_test_content_chunks_embedding_idx" already exists, skipping
+NOTICE:  relation "stale_test_content_chunks_source_id_idx" already exists, skipping
+NOTICE:  Vectorization enabled: stale_test -> stale_test_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 10, overlap: 2
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Chunk count should have decreased (no stale high-index chunks)
+SELECT COUNT(*) AS chunk_count_after FROM stale_test_content_chunks WHERE source_id = 10;
+ chunk_count_after 
+-------------------
+                 1
+(1 row)
+
+-- No orphaned queue entries for stale chunks
+SELECT COUNT(*) AS stale_queue_entries
+FROM pgedge_vectorizer.queue
+WHERE chunk_table = 'stale_test_content_chunks'
+  AND chunk_id NOT IN (SELECT id FROM stale_test_content_chunks)
+  AND status IN ('pending', 'failed');
+ stale_queue_entries 
+---------------------
+                   0
+(1 row)
+
+---------------------------------------------------------------------------
+-- Cleanup
+---------------------------------------------------------------------------
+DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'stale_test_content_chunks';
+SELECT pgedge_vectorizer.disable_vectorization('stale_test'::regclass, 'content', true);
+NOTICE:  Vectorization disabled and chunk table dropped: stale_test_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE stale_test;

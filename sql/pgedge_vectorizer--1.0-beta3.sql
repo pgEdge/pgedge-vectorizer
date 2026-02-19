@@ -259,8 +259,22 @@ BEGIN
                 END IF;
             END LOOP;
 
+            -- Remove queue entries for stale high-index chunks before deleting them
+            -- pk_col_type uses %s: value from format_type() is system-controlled
+            EXECUTE format(
+                'DELETE FROM pgedge_vectorizer.queue
+                 WHERE chunk_table = %L
+                   AND chunk_id IN (
+                       SELECT id FROM %I WHERE source_id = $1::%s AND chunk_index > $2
+                   )
+                   AND status IN (''pending'', ''failed'')',
+                chunk_table, chunk_table, pk_col_type)
+                USING row_record.pk_val, array_length(chunks, 1);
+
             -- Remove any stale chunks beyond the new chunk count
-            EXECUTE format('DELETE FROM %I WHERE source_id = $1 AND chunk_index > $2', chunk_table)
+            -- pk_col_type uses %s: value from format_type() is system-controlled
+            EXECUTE format('DELETE FROM %I WHERE source_id = $1::%s AND chunk_index > $2',
+                chunk_table, pk_col_type)
                 USING row_record.pk_val, array_length(chunks, 1);
 
             rows_processed := rows_processed + 1;
@@ -384,6 +398,16 @@ BEGIN
             END IF;
         END;
     END IF;
+
+    -- Delete queue entries for this document's chunks before deleting the chunks.
+    -- Prevents orphaned queue entries that waste embedding API calls on deleted chunks.
+    EXECUTE format(
+        'DELETE FROM pgedge_vectorizer.queue
+         WHERE chunk_table = %L
+           AND chunk_id IN (SELECT id FROM %I WHERE source_id = $1::%s)
+           AND status IN (''pending'', ''failed'')',
+        chunk_table, chunk_table, pk_type)
+        USING source_id_val;
 
     -- Delete existing chunks for this document
     -- pk_type uses %s: value from format_type() is system-controlled (see enable_vectorization)
