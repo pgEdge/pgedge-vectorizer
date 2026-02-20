@@ -133,7 +133,9 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	char *db_copy;
 	int db_count = 0;
 	bool extension_exists = false;
-	int retry_interval = 300000; /* 5 minutes when extension not found */
+	int ext_retry_interval = 5000;	/* Start at 5s, doubles up to max */
+	bool first_ext_check = true;
+#define EXT_RETRY_MAX	300000		/* Cap at 5 minutes */
 
 	/* Setup signal handlers */
 	pqsignal(SIGTERM, worker_sigterm);
@@ -244,6 +246,7 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 			ProcessConfigFile(PGC_SIGHUP);
 			/* Recheck extension status after config reload */
 			extension_exists = false;
+			ext_retry_interval = 5000;
 		}
 
 		/* Check if extension is installed (periodically recheck) */
@@ -254,17 +257,26 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 				extension_exists = extension_installed();
 				if (!extension_exists)
 				{
-					/* Log once, then sleep for longer interval */
-					if (got_sighup || (time(NULL) % 300) == 0) /* Log every 5 minutes */
+					if (first_ext_check)
 					{
-						elog(LOG, "pgedge_vectorizer worker %d: extension not installed in database '%s', will retry",
-							 worker_id + 1, dbname);
+						elog(LOG, "pgedge_vectorizer worker %d: extension not installed in database '%s', "
+							 "will check again in %ds (hint: run CREATE EXTENSION pgedge_vectorizer)",
+							 worker_id + 1, dbname, ext_retry_interval / 1000);
+						first_ext_check = false;
+					}
+					else if (ext_retry_interval >= EXT_RETRY_MAX)
+					{
+						elog(LOG, "pgedge_vectorizer worker %d: extension still not installed in database '%s', "
+							 "next check in %ds",
+							 worker_id + 1, dbname, ext_retry_interval / 1000);
 					}
 				}
 				else
 				{
 					elog(LOG, "pgedge_vectorizer worker %d: extension found in database '%s', starting to process queue",
 						 worker_id + 1, dbname);
+					ext_retry_interval = 5000;
+					first_ext_check = true;
 				}
 			}
 			PG_CATCH();
@@ -281,7 +293,7 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		pgstat_report_activity(STATE_IDLE, NULL);
 
 		/* Use longer wait time if extension not installed */
-		wait_time = extension_exists ? pgedge_vectorizer_worker_poll_interval : retry_interval;
+		wait_time = extension_exists ? pgedge_vectorizer_worker_poll_interval : ext_retry_interval;
 
 		/* Wait for work or timeout */
 		rc = WaitLatch(MyLatch,
@@ -297,7 +309,10 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 
 		/* Only process queue if extension is installed */
 		if (!extension_exists)
+		{
+			ext_retry_interval = Min(ext_retry_interval * 2, EXT_RETRY_MAX);
 			continue;
+		}
 
 		/* Process pending queue items */
 		pgstat_report_activity(STATE_RUNNING, "processing embedding queue");
