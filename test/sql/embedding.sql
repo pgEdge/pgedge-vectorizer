@@ -59,7 +59,8 @@ BEGIN
 
             RAISE NOTICE 'OpenAI provider test passed - generated %d dimensional embedding', dims;
         EXCEPTION WHEN OTHERS THEN
-            RAISE NOTICE 'OpenAI test failed: %', SQLERRM;
+            -- Truncate to first line to avoid including API key values in output
+            RAISE NOTICE 'OpenAI test failed: %', split_part(SQLERRM, chr(10), 1);
         END;
 
         -- Test consistency
@@ -70,7 +71,8 @@ BEGIN
                 RAISE NOTICE 'WARNING: OpenAI embeddings may not be deterministic';
             END IF;
         EXCEPTION WHEN OTHERS THEN
-            RAISE NOTICE 'OpenAI consistency test failed: %', SQLERRM;
+            -- Truncate to first line to avoid including API key values in output
+            RAISE NOTICE 'OpenAI consistency test failed: %', split_part(SQLERRM, chr(10), 1);
         END;
     END IF;
 END;
@@ -111,7 +113,8 @@ BEGIN
 
             RAISE NOTICE 'Voyage provider test passed - generated %d dimensional embedding', dims;
         EXCEPTION WHEN OTHERS THEN
-            RAISE NOTICE 'Voyage test failed: %', SQLERRM;
+            -- Truncate to first line to avoid including API key values in output
+            RAISE NOTICE 'Voyage test failed: %', split_part(SQLERRM, chr(10), 1);
         END;
     END IF;
 END;
@@ -167,7 +170,8 @@ BEGIN
 
             DROP TABLE test_docs;
         EXCEPTION WHEN OTHERS THEN
-            RAISE NOTICE 'Semantic search test failed: %', SQLERRM;
+            -- Truncate to first line to avoid including API key values in output
+            RAISE NOTICE 'Semantic search test failed: %', split_part(SQLERRM, chr(10), 1);
         END;
     END IF;
 END;
