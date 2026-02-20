@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Support for any single-column primary key type in vectorized tables (#11)
+    - Auto-detect PK column name and type from `pg_index` instead of hardcoding `BIGINT`
+    - Chunk table `source_id` column now matches the source table's PK type (`UUID`, `TEXT`, `VARCHAR(n)`, etc.)
+    - New `source_pk` parameter on `enable_vectorization()` for explicit column selection
+    - Composite primary key tables supported by specifying `source_pk` explicitly
+
+### Fixed
+
+- Fixed stale embeddings and orphaned queue entries on content update (#12)
+    - Queue entries are now cleaned up before deleting chunks in the vectorization trigger
+    - Stale high-index chunks are cleaned up when re-enabling vectorization
+    - Worker warns when a chunk is deleted by a concurrent source update
+- Fixed queue processing not starting until SIGHUP after `CREATE EXTENSION` (#10)
+    - Workers now use exponential backoff (5s, 10s, 20s, ... up to 5 min) when checking for extension installation, instead of a fixed 5-minute sleep
+    - Extension is discovered within seconds of running `CREATE EXTENSION`, no SIGHUP needed
+    - Improved log messages with actionable hints on first check failure
+
 ## [1.0-beta2] - 2026-01-13
 
 ### Added
