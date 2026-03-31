@@ -590,55 +590,66 @@ process_queue_batch(int worker_id)
 								if (!isnull)
 									is_first_process =
 										!DatumGetBool(v);
+
+								/*
+								 * Chunk row exists — proceed with BM25
+								 * scoring and IDF stats update.
+								 * Keeping this inside the SPI_processed > 0
+								 * block ensures we bail out cleanly when
+								 * the chunk has been concurrently deleted.
+								 */
+								if (token_count <= 0)
+									token_count = 1;
+
+								tokens = bm25_tokenize(contents[idx],
+													   &ntokens);
+								idf_htab = bm25_load_idf_stats(
+										chunk_tables[idx]);
+								avg_doc_len = bm25_avg_doc_len_internal(
+										chunk_tables[idx]);
+								sparse_str = bm25_compute_sparse_str(
+										tokens, ntokens,
+										idf_htab,
+										pgedge_vectorizer_bm25_k1,
+										pgedge_vectorizer_bm25_b,
+										avg_doc_len,
+										token_count);
+
+								ret_bm25 = SPI_execute(
+									psprintf(
+										"UPDATE %s SET "
+										"sparse_embedding = "
+										"%s::sparsevec "
+										"WHERE id = %ld",
+										quote_identifier(chunk_tables[idx]),
+										quote_literal_cstr(sparse_str),
+										chunk_ids[idx]),
+									false, 0);
+
+								if (ret_bm25 != SPI_OK_UPDATE)
+									elog(WARNING,
+										 "Failed to update "
+										 "sparse_embedding for "
+										 "chunk " INT64_FORMAT,
+										 chunk_ids[idx]);
+
+								if (idf_htab != NULL)
+									hash_destroy(idf_htab);
+
+								/*
+								 * Only update IDF stats the first time
+								 * this chunk is processed — retries must
+								 * not increment doc_freq again.
+								 */
+								if (is_first_process)
+									bm25_update_idf_stats(
+										chunk_tables[idx],
+										tokens, ntokens);
 							}
-
-							if (token_count <= 0)
-								token_count = 1;
-
-							tokens = bm25_tokenize(contents[idx],
-												   &ntokens);
-							idf_htab = bm25_load_idf_stats(
-									chunk_tables[idx]);
-							avg_doc_len = bm25_avg_doc_len_internal(
-									chunk_tables[idx]);
-							sparse_str = bm25_compute_sparse_str(
-									tokens, ntokens,
-									idf_htab,
-									pgedge_vectorizer_bm25_k1,
-									pgedge_vectorizer_bm25_b,
-									avg_doc_len,
-									token_count);
-
-							ret_bm25 = SPI_execute(
-								psprintf(
-									"UPDATE %s SET "
-									"sparse_embedding = "
-									"%s::sparsevec "
-									"WHERE id = %ld",
-									quote_identifier(chunk_tables[idx]),
-									quote_literal_cstr(sparse_str),
-									chunk_ids[idx]),
-								false, 0);
-
-							if (ret_bm25 != SPI_OK_UPDATE)
-								elog(WARNING,
-									 "Failed to update "
-									 "sparse_embedding for "
-									 "chunk " INT64_FORMAT,
-									 chunk_ids[idx]);
-
-							if (idf_htab != NULL)
-								hash_destroy(idf_htab);
-
-							/*
-							 * Only update IDF stats the first time
-							 * this chunk is processed — retries must
-							 * not increment doc_freq again.
+							/* else: chunk row gone (concurrent delete) —
+							 * skip BM25 entirely to avoid inflating
+							 * corpus stats for a nonexistent chunk.
 							 */
-							if (is_first_process)
-								bm25_update_idf_stats(
-									chunk_tables[idx],
-									tokens, ntokens);
 						}
 
 						/* Mark as completed */

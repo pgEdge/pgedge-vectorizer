@@ -69,7 +69,8 @@ CREATE OR REPLACE FUNCTION pgedge_vectorizer.hybrid_search(
     p_query          TEXT,
     p_limit          INT     DEFAULT 10,
     p_alpha          FLOAT8  DEFAULT 0.7,
-    p_rrf_k          INT     DEFAULT 60
+    p_rrf_k          INT     DEFAULT 60,
+    p_source_column  NAME    DEFAULT NULL
 )
 RETURNS TABLE (
     source_id   TEXT,
@@ -84,11 +85,27 @@ DECLARE
     v_query_dense  vector;
     v_query_sparse sparsevec;
 BEGIN
-    -- Look up the chunk table name from the vectorizers registry
-    SELECT vz.chunk_table INTO v_chunk_table
-    FROM pgedge_vectorizer.vectorizers vz
-    WHERE vz.source_table = p_source_table::TEXT
-    LIMIT 1;
+    IF p_source_column IS NOT NULL THEN
+        SELECT vz.chunk_table INTO v_chunk_table
+        FROM pgedge_vectorizer.vectorizers vz
+        WHERE vz.source_table = p_source_table::TEXT
+          AND vz.source_column = p_source_column;
+    ELSE
+        SELECT vz.chunk_table INTO v_chunk_table
+        FROM pgedge_vectorizer.vectorizers vz
+        WHERE vz.source_table = p_source_table::TEXT
+        LIMIT 1;
+
+        IF v_chunk_table IS NOT NULL AND
+           (SELECT count(*) FROM pgedge_vectorizer.vectorizers
+            WHERE source_table = p_source_table::TEXT) > 1
+        THEN
+            RAISE EXCEPTION
+                'Table % has multiple vectorized columns. '
+                'Pass p_source_column to disambiguate.',
+                p_source_table;
+        END IF;
+    END IF;
 
     IF v_chunk_table IS NULL THEN
         RAISE EXCEPTION
@@ -172,9 +189,10 @@ COMMENT ON FUNCTION pgedge_vectorizer.hybrid_search IS
  Requires pgedge_vectorizer.enable_hybrid = true in postgresql.conf.';
 
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.hybrid_search_simple(
-    p_source_table REGCLASS,
-    p_query        TEXT,
-    p_limit        INT DEFAULT 10
+    p_source_table  REGCLASS,
+    p_query         TEXT,
+    p_limit         INT  DEFAULT 10,
+    p_source_column NAME DEFAULT NULL
 )
 RETURNS TABLE (
     source_id  TEXT,
@@ -184,7 +202,8 @@ RETURNS TABLE (
 LANGUAGE sql AS $$
     SELECT source_id, chunk, rrf_score
     FROM pgedge_vectorizer.hybrid_search(
-             p_source_table, p_query, p_limit);
+             p_source_table, p_query, p_limit,
+             p_source_column => p_source_column);
 $$;
 
 COMMENT ON FUNCTION pgedge_vectorizer.hybrid_search_simple IS
@@ -210,7 +229,21 @@ BEGIN
     -- If column specified, drop that specific trigger
     IF source_column IS NOT NULL THEN
         trigger_name := source_table::TEXT || '_' || source_column || '_vectorization_trigger';
-        chunk_table := source_table::TEXT || '_' || source_column || '_chunks';
+
+        -- Look up the authoritative chunk table name from the registry so that
+        -- custom chunk_table_name values (passed to enable_vectorization) are
+        -- honored; fall back to the default convention only when not registered.
+        -- Use EXECUTE...USING to avoid variable/column name ambiguity for
+        -- source_table and source_column (same pattern as the DELETE below).
+        EXECUTE
+            'SELECT v.chunk_table FROM pgedge_vectorizer.vectorizers v
+              WHERE v.source_table = $1 AND v.source_column = $2'
+        INTO chunk_table
+        USING source_table::TEXT, source_column;
+
+        IF chunk_table IS NULL THEN
+            chunk_table := source_table::TEXT || '_' || source_column || '_chunks';
+        END IF;
 
         -- Drop trigger
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, source_table);
@@ -315,9 +348,11 @@ BEGIN
               AND p.proname = 'vectorization_trigger'
         )
     LOOP
-        -- tgargs is a bytea of null-separated strings with a trailing null.
-        -- Split on chr(0); last element will be an empty string — ignore it.
-        args    := string_to_array(convert_from(rec.tgargs, 'UTF8'), chr(0));
+        -- tgargs is bytea with NUL-separated strings and a trailing NUL.
+        -- Use encode(...,'escape') + E'\\000' — the same pattern used in
+        -- recreate_chunks() — because PostgreSQL forbids NUL bytes in text,
+        -- making convert_from()+chr(0) unreliable.
+        args    := string_to_array(encode(rec.tgargs, 'escape'), E'\\000');
         src_col := args[1];   -- TG_ARGV[0]
         chk_tbl := args[2];   -- TG_ARGV[1]
 
@@ -332,7 +367,8 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Add sparse_embedding column and HNSW index to every known chunk table
+    -- For every known chunk table: add sparse_embedding column, HNSW index,
+    -- companion _idf_stats table, and enqueue existing rows for sparse backfill.
     FOR rec IN
         SELECT chunk_table FROM pgedge_vectorizer.vectorizers
     LOOP
@@ -347,6 +383,25 @@ BEGIN
             'USING hnsw (sparse_embedding sparsevec_ip_ops) '
             'WHERE sparse_embedding IS NOT NULL',
             chk_tbl || '_sparse_embedding_idx', chk_tbl);
+
+        -- Create the per-table IDF statistics table (same schema as fresh install)
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS %I ('
+            '    term        TEXT    PRIMARY KEY,'
+            '    doc_freq    INT     NOT NULL DEFAULT 1,'
+            '    total_docs  INT     NOT NULL DEFAULT 1,'
+            '    idf_weight  FLOAT8  NOT NULL DEFAULT 0.693,'
+            '    updated_at  TIMESTAMPTZ DEFAULT now()'
+            ')',
+            chk_tbl || '_idf_stats');
+
+        -- Enqueue existing chunks that have a dense embedding but no sparse
+        -- embedding yet so the worker can backfill BM25 scores for them.
+        EXECUTE format(
+            'INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)'
+            ' SELECT id, %L, content FROM %I'
+            ' WHERE embedding IS NOT NULL AND sparse_embedding IS NULL',
+            chk_tbl, chk_tbl);
     END LOOP;
 END;
 $$;

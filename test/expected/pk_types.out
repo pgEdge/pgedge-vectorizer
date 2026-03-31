@@ -378,7 +378,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 ERROR:  Table test_composite_pk has a composite primary key (2 columns), which is not supported by auto-detection. Use the source_pk parameter to specify a single column.
-CONTEXT:  PL/pgSQL function pgedge_vectorizer.enable_vectorization(regclass,name,text,integer,integer,integer,text,name) line 40 at RAISE
+CONTEXT:  PL/pgSQL function pgedge_vectorizer.enable_vectorization(regclass,name,text,integer,integer,integer,text,name) line 41 at RAISE
 -- Clean up (no vectorization to disable, just drop the table)
 DROP TABLE test_composite_pk;
 -- ============================================================================
@@ -466,7 +466,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 ERROR:  Table test_no_pk has no primary key. Use the source_pk parameter to specify the column to use as document identifier.
-CONTEXT:  PL/pgSQL function pgedge_vectorizer.enable_vectorization(regclass,name,text,integer,integer,integer,text,name) line 35 at RAISE
+CONTEXT:  PL/pgSQL function pgedge_vectorizer.enable_vectorization(regclass,name,text,integer,integer,integer,text,name) line 36 at RAISE
 -- Clean up
 DROP TABLE test_no_pk;
 -- ============================================================================
