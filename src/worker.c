@@ -615,7 +615,7 @@ process_queue_batch(int worker_id)
 									"sparse_embedding = "
 									"%s::sparsevec "
 									"WHERE id = %ld",
-									chunk_tables[idx],
+									quote_identifier(chunk_tables[idx]),
 									quote_literal_cstr(sparse_str),
 									chunk_ids[idx]),
 								false, 0);

@@ -256,9 +256,14 @@ bm25_load_idf_stats(const char *chunk_table)
 	HTAB            *htab = NULL;
 	HASHCTL          ctl;
 
-	sql = psprintf(
-		"SELECT term, doc_freq, total_docs, idf_weight FROM %s",
-		quote_identifier(psprintf("%s_idf_stats", chunk_table)));
+	{
+		char       *tbl_name = psprintf("%s_idf_stats", chunk_table);
+		const char *qtbl     = quote_identifier(tbl_name);
+
+		sql = psprintf(
+			"SELECT term, doc_freq, total_docs, idf_weight FROM %s", qtbl);
+		pfree(tbl_name);
+	}
 
 	oldctx   = CurrentMemoryContext;
 	oldowner = CurrentResourceOwner;
@@ -382,21 +387,34 @@ lookup_idf(const char *term, HTAB *idf_htab)
 typedef struct { int dim; float8 score; } DimScore;
 
 /*
- * accumulate_dim_score — add score to existing dim or append a new entry
+ * Hash entry mapping a sparse vector dimension to its index in the pairs[]
+ * array.  Key is the dimension (int); must be first field for dynahash.
+ * Used inside bm25_compute_sparse_str for O(1) collision resolution.
+ */
+typedef struct { int dim; int idx; } DimIndexEntry;
+
+/*
+ * accumulate_dim_score — add score to existing dim or append a new entry.
+ *
+ * dim_map is a HTAB keyed on int (the sparse vector dimension).  It maps
+ * each dimension to the index of its DimScore entry in pairs[], giving O(1)
+ * collision resolution instead of the previous O(n) linear scan.
  */
 static void
 accumulate_dim_score(DimScore **pairs, int *npairs, int *cap,
-					 int dim, float8 score)
+					 HTAB *dim_map, int dim, float8 score)
 {
-	for (int j = 0; j < *npairs; j++)
+	DimIndexEntry *entry;
+	bool           found;
+
+	entry = hash_search(dim_map, &dim, HASH_ENTER, &found);
+	if (found)
 	{
-		if ((*pairs)[j].dim == dim)
-		{
-			(*pairs)[j].score += score;
-			return;
-		}
+		(*pairs)[entry->idx].score += score;
+		return;
 	}
 
+	/* New dimension — append to pairs[] and record its index */
 	if (*npairs >= *cap)
 	{
 		*cap = (*cap == 0) ? 16 : *cap * 2;
@@ -407,6 +425,7 @@ accumulate_dim_score(DimScore **pairs, int *npairs, int *cap,
 	}
 	(*pairs)[*npairs].dim   = dim;
 	(*pairs)[*npairs].score = score;
+	entry->idx              = *npairs;
 	(*npairs)++;
 }
 
@@ -453,10 +472,19 @@ bm25_compute_sparse_str(BM25Term *tokens, int ntokens,
 	int         cap = 0;
 	float8      dl_ratio;
 	char       *result;
+	HASHCTL     ctl;
+	HTAB       *dim_map;
 
 	if (avg_doc_len <= 0.0)
 		avg_doc_len = 1.0;
 	dl_ratio = (float8) doc_len / avg_doc_len;
+
+	/* O(1) dimension → pairs[] index map for collision resolution */
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize   = sizeof(int);
+	ctl.entrysize = sizeof(DimIndexEntry);
+	dim_map = hash_create("bm25_dim_index", 64, &ctl,
+						  HASH_ELEM | HASH_BLOBS);
 
 	for (int i = 0; i < ntokens; i++)
 	{
@@ -467,9 +495,11 @@ bm25_compute_sparse_str(BM25Term *tokens, int ntokens,
 						idf * (tf * (k1 + 1.0)) / denom;
 
 		if (score > 0.0)
-			accumulate_dim_score(&pairs, &npairs, &cap,
+			accumulate_dim_score(&pairs, &npairs, &cap, dim_map,
 								 term_to_dim(tokens[i].term), score);
 	}
+
+	hash_destroy(dim_map);
 
 	result = build_sparsevec_string(pairs, npairs);
 
@@ -502,7 +532,7 @@ bm25_compute_sparse_vector(BM25Term *tokens, int ntokens,
 									  k1, b,
 									  avg_doc_len, doc_len);
 
-	sql = psprintf("SELECT '%s'::sparsevec", vec_str);
+	sql = psprintf("SELECT %s::sparsevec", quote_literal_cstr(vec_str));
 	ret = SPI_execute(sql, true, 1);
 	pfree(sql);
 	pfree(vec_str);
@@ -539,8 +569,8 @@ static void
 upsert_term_idf(const char *chunk_table, const char *term, int total_docs)
 {
 	char       *safe_term  = quote_literal_cstr(term);
-	const char *qidf       = quote_identifier(
-								psprintf("%s_idf_stats", chunk_table));
+	char       *tbl_name   = psprintf("%s_idf_stats", chunk_table);
+	const char *qidf       = quote_identifier(tbl_name);
 	char       *sql;
 	int         ret;
 
@@ -560,6 +590,7 @@ upsert_term_idf(const char *chunk_table, const char *term, int total_docs)
 		qidf,
 		total_docs, total_docs, qidf, qidf);
 
+	pfree(tbl_name);
 	pfree(safe_term);
 	ret = SPI_execute(sql, false, 0);
 	pfree(sql);

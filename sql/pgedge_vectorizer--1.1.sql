@@ -1,5 +1,5 @@
 -- pgedge_vectorizer extension
--- Version 1.0
+-- Version 1.1
 --
 -- Asynchronous text chunking and vectorization for PostgreSQL
 
