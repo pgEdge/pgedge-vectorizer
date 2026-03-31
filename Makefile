@@ -4,7 +4,7 @@
 EXTENSION = pgedge_vectorizer
 EXTVERSION = 1.1
 
-# Extension module and data files
+# Extension module and data file
 MODULE_big = $(EXTENSION)
 OBJS = src/pgedge_vectorizer.o \
        src/guc.o \
