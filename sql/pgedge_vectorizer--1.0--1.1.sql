@@ -67,9 +67,9 @@ CREATE INDEX IF NOT EXISTS idx_queue_created_at ON pgedge_vectorizer.queue(creat
 -- Chunking function
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.chunk_text(
     content TEXT,
-    strategy TEXT DEFAULT NULL,
-    chunk_size INT DEFAULT NULL,
-    overlap INT DEFAULT NULL
+    strategy TEXT,
+    chunk_size INT,
+    overlap INT
 ) RETURNS TEXT[]
 AS 'MODULE_PATHNAME', 'pgedge_vectorizer_chunk_text_sql'
 LANGUAGE C IMMUTABLE STRICT;
@@ -82,7 +82,7 @@ CREATE OR REPLACE FUNCTION pgedge_vectorizer.generate_embedding(
     query_text TEXT
 ) RETURNS vector
 AS 'MODULE_PATHNAME', 'pgedge_vectorizer_generate_embedding'
-LANGUAGE C IMMUTABLE STRICT;
+LANGUAGE C STABLE STRICT;
 
 COMMENT ON FUNCTION pgedge_vectorizer.generate_embedding IS
 'Generate an embedding vector from query text using the configured provider';
@@ -778,12 +778,23 @@ CREATE OR REPLACE FUNCTION pgedge_vectorizer.reprocess_chunks(
 DECLARE
     rows_affected INT := 0;
     chunk_record RECORD;
-    chunk_id_val BIGINT;
+    hybrid_enabled BOOLEAN;
 BEGIN
-    -- Queue all chunks from the specified table that don't have embeddings
+    hybrid_enabled := COALESCE(
+        current_setting('pgedge_vectorizer.enable_hybrid', true),
+        'false'
+    )::BOOLEAN;
+
+    -- Queue chunks that need dense embeddings, and when hybrid is enabled,
+    -- also queue chunks missing sparse embeddings.
     FOR chunk_record IN EXECUTE format(
-        'SELECT id, content FROM %I WHERE embedding IS NULL',
-        chunk_table_name
+        'SELECT id, content, (embedding IS NULL) AS needs_embedding, '
+        '       (sparse_embedding IS NULL) AS needs_sparse '
+        'FROM %I '
+        'WHERE embedding IS NULL '
+        '   OR (sparse_embedding IS NULL AND %L::boolean)',
+        chunk_table_name,
+        hybrid_enabled
     )
     LOOP
         -- Check if already queued
@@ -794,8 +805,17 @@ BEGIN
 
         -- Only queue if not already queued
         IF NOT FOUND THEN
-            INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)
-            VALUES (chunk_record.id, chunk_table_name, chunk_record.content);
+            INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, metadata)
+            VALUES (
+                chunk_record.id,
+                chunk_table_name,
+                chunk_record.content,
+                CASE
+                    WHEN NOT chunk_record.needs_embedding AND chunk_record.needs_sparse
+                        THEN jsonb_build_object('sparse_only', true)
+                    ELSE NULL
+                END
+            );
 
             rows_affected := rows_affected + 1;
         END IF;
