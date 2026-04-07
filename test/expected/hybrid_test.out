@@ -170,6 +170,7 @@ SELECT COALESCE(
 -------------
            0
 (1 row)
+
 ---------------------------------------------------------------------------
 -- Test 12: hybrid_search raises a clear exception for unknown table
 ---------------------------------------------------------------------------
@@ -213,6 +214,12 @@ NOTICE:  Got expected exception: Hybrid search is disabled. Set pgedge_vectorize
 ---------------------------------------------------------------------------
 -- Test 14: bm25_query_vector returns a non-null sparsevec
 ---------------------------------------------------------------------------
+SELECT pg_typeof(
+    pgedge_vectorizer.bm25_query_vector(
+        'quick brown fox',
+        'hybrid_test_docs_content_chunks'
+    )
+)::text AS result_type;
  result_type 
 -------------
  sparsevec
@@ -221,6 +228,9 @@ NOTICE:  Got expected exception: Hybrid search is disabled. Set pgedge_vectorize
 ---------------------------------------------------------------------------
 -- Test 15: bm25_avg_doc_len returns a sensible default for an empty table
 ---------------------------------------------------------------------------
+SELECT pgedge_vectorizer.bm25_avg_doc_len(
+    'hybrid_test_docs_content_chunks'
+) >= 0 AS non_negative;
  non_negative 
 --------------
  t
@@ -229,6 +239,10 @@ NOTICE:  Got expected exception: Hybrid search is disabled. Set pgedge_vectorize
 ---------------------------------------------------------------------------
 -- Test 16: BM25 tokenizer returns empty array for NULL input
 ---------------------------------------------------------------------------
+SELECT COALESCE(
+    array_length(pgedge_vectorizer.bm25_tokenize(NULL), 1),
+    0
+) AS token_count;
  token_count 
 -------------
            0
@@ -237,6 +251,10 @@ NOTICE:  Got expected exception: Hybrid search is disabled. Set pgedge_vectorize
 ---------------------------------------------------------------------------
 -- Test 17: BM25 tokenizer returns empty array for all-stopword input
 ---------------------------------------------------------------------------
+SELECT COALESCE(
+    array_length(pgedge_vectorizer.bm25_tokenize('the is a an and'), 1),
+    0
+) AS token_count;
  token_count 
 -------------
            0
@@ -246,12 +264,18 @@ NOTICE:  Got expected exception: Hybrid search is disabled. Set pgedge_vectorize
 -- Test 18: bm25_decrement_idf_stats handles NULL/empty terms gracefully
 ---------------------------------------------------------------------------
 -- Should return without error for NULL terms
+SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
+    'hybrid_test_docs_content_chunks', NULL, 1
+);
  bm25_decrement_idf_stats 
 --------------------------
  
 (1 row)
 
 -- Should return without error for empty array
+SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
+    'hybrid_test_docs_content_chunks', '{}'::text[], 1
+);
  bm25_decrement_idf_stats 
 --------------------------
  
@@ -265,12 +289,20 @@ INSERT INTO hybrid_test_docs_content_chunks_idf_stats
     (term, doc_freq, total_docs, idf_weight)
 VALUES ('testterm', 5, 10, 1.0);
 -- Decrement by 1
+SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
+    'hybrid_test_docs_content_chunks',
+    ARRAY['testterm'],
+    1
+);
  bm25_decrement_idf_stats 
 --------------------------
  
 (1 row)
 
 -- Verify the count was reduced
+SELECT term, doc_freq
+FROM hybrid_test_docs_content_chunks_idf_stats
+WHERE term = 'testterm';
    term   | doc_freq 
 ----------+----------
  testterm |        4
@@ -306,6 +338,9 @@ NOTICE:  Processed 0 existing rows
 (1 row)
 
 -- Verify _idf_stats table exists before disable
+SELECT tablename
+FROM pg_tables
+WHERE tablename = 'hybrid_cleanup_test_body_chunks_idf_stats';
                  tablename                 
 -------------------------------------------
  hybrid_cleanup_test_body_chunks_idf_stats
@@ -322,6 +357,9 @@ NOTICE:  Vectorization disabled and chunk table dropped: hybrid_cleanup_test_bod
 (1 row)
 
 -- Verify _idf_stats table was also dropped
+SELECT count(*) AS idf_stats_exists
+FROM pg_tables
+WHERE tablename = 'hybrid_cleanup_test_body_chunks_idf_stats';
  idf_stats_exists 
 ------------------
                 0
