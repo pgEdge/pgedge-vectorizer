@@ -273,7 +273,7 @@ VALUES ('testterm', 5, 10, 1.0);
 -- Verify the count was reduced
    term   | doc_freq 
 ----------+----------
- testterm |         4
+ testterm |        4
 (1 row)
 
 -- Clean up the test row
