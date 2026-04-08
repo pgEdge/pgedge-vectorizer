@@ -205,6 +205,115 @@ SELECT pgedge_vectorizer.recreate_chunks('product_docs', 'content');
 
 **Note:** This function deletes all existing chunks and queue items, then triggers re-chunking and re-embedding for all rows. Use with caution.
 
+### hybrid_search()
+
+Run a hybrid BM25 + dense vector search and merge results with Reciprocal Rank
+Fusion (RRF). Requires `pgedge_vectorizer.enable_hybrid = true`.
+
+```sql
+SELECT * FROM pgedge_vectorizer.hybrid_search(
+    p_source_table   REGCLASS,
+    p_query          TEXT,
+    p_limit          INT     DEFAULT 10,
+    p_alpha          FLOAT8  DEFAULT 0.7,
+    p_rrf_k          INT     DEFAULT 60,
+    p_source_column  NAME    DEFAULT NULL
+);
+```
+
+**Parameters:**
+
+- `p_source_table`: The source table that was vectorized
+- `p_query`: Search query text
+- `p_limit`: Maximum number of results to return
+- `p_alpha`: Balance between dense and sparse results (`0.0` = pure keyword,
+  `1.0` = pure semantic, `0.7` = default)
+- `p_rrf_k`: RRF smoothing constant (higher values reduce the influence of
+  rank position)
+- `p_source_column`: Source column name. Required when a table has multiple
+  vectorized columns; optional otherwise
+
+Returns a table with columns:
+
+- `source_id` (`TEXT`): Primary key of the source row (cast to text for
+  compatibility with all PK types)
+- `chunk` (`TEXT`): The matching text chunk
+- `dense_rank` (`INT`): Rank from dense vector search (9999 if not found)
+- `sparse_rank` (`INT`): Rank from BM25 keyword search (9999 if not found)
+- `rrf_score` (`FLOAT8`): Combined RRF score (higher is better)
+
+**Example:**
+
+```sql
+SELECT source_id, chunk, dense_rank, sparse_rank, rrf_score
+FROM pgedge_vectorizer.hybrid_search(
+    p_source_table := 'articles'::regclass,
+    p_query        := 'PostgreSQL replication',
+    p_limit        := 5,
+    p_alpha        := 0.7
+);
+```
+
+### hybrid_search_simple()
+
+Convenience wrapper around `hybrid_search()` that returns only the source ID,
+chunk text, and combined score.
+
+```sql
+SELECT * FROM pgedge_vectorizer.hybrid_search_simple(
+    p_source_table  REGCLASS,
+    p_query         TEXT,
+    p_limit         INT  DEFAULT 10,
+    p_source_column NAME DEFAULT NULL
+);
+```
+
+Returns a table with columns: `source_id`, `chunk`, `rrf_score`.
+
+**Example:**
+
+```sql
+SELECT * FROM pgedge_vectorizer.hybrid_search_simple(
+    'articles'::regclass, 'PostgreSQL replication', 5
+);
+```
+
+### bm25_query_vector()
+
+Compute a BM25 sparse vector for a query string. Primarily used internally by
+`hybrid_search()`, but available for advanced use cases.
+
+```sql
+SELECT pgedge_vectorizer.bm25_query_vector(
+    query       TEXT,
+    chunk_table TEXT
+);
+```
+
+Returns: `sparsevec` -- A sparse vector of BM25 scores using IDF statistics
+from the specified chunk table.
+
+### bm25_avg_doc_len()
+
+Return the average document length (in tokens) for a chunk table.
+
+```sql
+SELECT pgedge_vectorizer.bm25_avg_doc_len(chunk_table TEXT);
+```
+
+Returns: `FLOAT8`
+
+### bm25_tokenize()
+
+Tokenize text using the BM25 tokenizer (lowercase, remove stopwords,
+deduplicate). Useful for debugging and testing.
+
+```sql
+SELECT pgedge_vectorizer.bm25_tokenize(query TEXT);
+```
+
+Returns: `TEXT[]` -- Array of distinct non-stopword terms.
+
 ### show_config()
 
 Display all pgedge_vectorizer configuration settings.

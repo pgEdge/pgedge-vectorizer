@@ -17,6 +17,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "stale_test_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: stale_test -> stale_test_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -144,8 +145,11 @@ SELECT pgedge_vectorizer.enable_vectorization(
 );
 NOTICE:  Using primary key column: id (bigint)
 NOTICE:  relation "stale_test_content_chunks" already exists, skipping
+NOTICE:  column "sparse_embedding" of relation "stale_test_content_chunks" already exists, skipping
 NOTICE:  relation "stale_test_content_chunks_embedding_idx" already exists, skipping
 NOTICE:  relation "stale_test_content_chunks_source_id_idx" already exists, skipping
+NOTICE:  relation "stale_test_content_chunks_sparse_idx" already exists, skipping
+NOTICE:  relation "stale_test_content_chunks_idf_stats" already exists, skipping
 NOTICE:  Vectorization enabled: stale_test -> stale_test_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 10, overlap: 2
 NOTICE:  Processing existing rows...
@@ -191,8 +195,11 @@ SELECT pgedge_vectorizer.enable_vectorization(
 );
 NOTICE:  Using primary key column: id (bigint)
 NOTICE:  relation "stale_test_content_chunks" already exists, skipping
+NOTICE:  column "sparse_embedding" of relation "stale_test_content_chunks" already exists, skipping
 NOTICE:  relation "stale_test_content_chunks_embedding_idx" already exists, skipping
 NOTICE:  relation "stale_test_content_chunks_source_id_idx" already exists, skipping
+NOTICE:  relation "stale_test_content_chunks_sparse_idx" already exists, skipping
+NOTICE:  relation "stale_test_content_chunks_idf_stats" already exists, skipping
 NOTICE:  Vectorization enabled: stale_test -> stale_test_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 10, overlap: 2
 NOTICE:  Processing existing rows...

@@ -11,6 +11,7 @@
  *-------------------------------------------------------------------------
  */
 #include "pgedge_vectorizer.h"
+#include "bm25.h"
 
 #include <time.h>
 
@@ -366,7 +367,8 @@ process_queue_batch(int worker_id)
 
 	/* Fetch pending items using FOR UPDATE SKIP LOCKED */
 	ret = SPI_execute(psprintf(
-		"SELECT id, chunk_id, chunk_table, content, attempts, max_attempts "
+		"SELECT id, chunk_id, chunk_table, content, attempts, max_attempts, "
+		"       COALESCE((metadata->>'sparse_only')::boolean, false) AS sparse_only "
 		"FROM pgedge_vectorizer.queue "
 		"WHERE status = 'pending' "
 		"AND (next_retry_at IS NULL OR next_retry_at <= NOW()) "
@@ -383,11 +385,14 @@ process_queue_batch(int worker_id)
 		int64 *chunk_ids = palloc(n_items * sizeof(int64));
 		char **chunk_tables = palloc(n_items * sizeof(char *));
 		const char **contents = palloc(n_items * sizeof(char *));
+		int *content_lens = palloc(n_items * sizeof(int));
 		int *attempts = palloc(n_items * sizeof(int));
 		int *max_attempts = palloc(n_items * sizeof(int));
+		bool *sparse_only = palloc(n_items * sizeof(bool));
 		float **embeddings = NULL;
 		int dim = 0;
 		bool has_retries = false;
+		bool has_sparse_only = false;
 		int effective_batch_size = n_items;
 
 		elog(DEBUG1, "Worker %d processing %d queue items", worker_id + 1, n_items);
@@ -408,6 +413,7 @@ process_queue_batch(int worker_id)
 			chunk_tables[i] = TextDatumGetCString(val);
 
 			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull);
+			content_lens[i] = (int) VARSIZE_ANY_EXHDR(DatumGetTextPP(val));
 			contents[i] = TextDatumGetCString(val);
 
 			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull);
@@ -416,8 +422,35 @@ process_queue_batch(int worker_id)
 			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6, &isnull);
 			max_attempts[i] = DatumGetInt32(val);
 
+			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 7, &isnull);
+			sparse_only[i] = (!isnull && DatumGetBool(val));
+
 			if (attempts[i] > 0)
 				has_retries = true;
+		}
+
+		/* Dense embedding already present means this item can be sparse-only. */
+		for (int i = 0; i < n_items; i++)
+		{
+			bool	isnull = false;
+			int		ret_dense;
+			Datum	val;
+
+			ret_dense = SPI_execute(psprintf(
+				"SELECT embedding IS NOT NULL FROM %s WHERE id = %ld",
+				quote_identifier(chunk_tables[i]),
+				chunk_ids[i]),
+				true, 1);
+
+			if (ret_dense == SPI_OK_SELECT && SPI_processed == 1)
+			{
+				val = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull);
+				if (!isnull && DatumGetBool(val))
+					sparse_only[i] = true;
+			}
+
+			if (sparse_only[i])
+				has_sparse_only = true;
 		}
 
 		/* If any items have been retried, process individually to isolate failures */
@@ -425,6 +458,11 @@ process_queue_batch(int worker_id)
 		{
 			effective_batch_size = 1;
 			elog(DEBUG1, "Worker %d: found retried items, processing individually", worker_id + 1);
+		}
+		else if (has_sparse_only && n_items > 1)
+		{
+			effective_batch_size = 1;
+			elog(DEBUG1, "Worker %d: found sparse-only items, processing individually", worker_id + 1);
 		}
 
 		/* Mark all as processing */
@@ -463,8 +501,32 @@ process_queue_batch(int worker_id)
 				batch_end = n_items;
 			batch_count = batch_end - batch_start;
 
-			/* Generate embeddings for this batch */
-			embeddings = provider->generate_batch(&contents[batch_start], batch_count, &dim, &error_msg);
+			/* Skip dense generation when every item in this batch is sparse-only. */
+			{
+				bool batch_sparse_only = true;
+
+				for (int i = 0; i < batch_count; i++)
+				{
+					int idx = batch_start + i;
+					if (!sparse_only[idx])
+					{
+						batch_sparse_only = false;
+						break;
+					}
+				}
+
+				if (batch_sparse_only)
+				{
+					embeddings = palloc0(batch_count * sizeof(float *));
+					dim = 0;
+					error_msg = NULL;
+				}
+				else
+				{
+					/* Generate embeddings for this batch */
+					embeddings = provider->generate_batch(&contents[batch_start], batch_count, &dim, &error_msg);
+				}
+			}
 
 			if (embeddings != NULL)
 			{
@@ -472,6 +534,7 @@ process_queue_batch(int worker_id)
 				 * Validate that the embedding dimension matches the chunk
 				 * table's vector column. Check once per batch.
 				 */
+				if (!sparse_only[batch_start])
 				{
 					int idx0 = batch_start;
 					int ret_dim;
@@ -534,7 +597,123 @@ process_queue_batch(int worker_id)
 					int idx = batch_start + i;
 					PG_TRY();
 					{
-						update_embedding(chunk_ids[idx], chunk_tables[idx], embeddings[i], dim);
+						if (!sparse_only[idx])
+							update_embedding(chunk_ids[idx], chunk_tables[idx], embeddings[i], dim);
+						else if (!pgedge_vectorizer_enable_hybrid)
+							elog(ERROR, "cannot process sparse-only queue item while pgedge_vectorizer.enable_hybrid is disabled");
+
+						/*
+						 * BM25 sparse vector update (opt-in via
+						 * pgedge_vectorizer.enable_hybrid GUC).
+						 */
+						if (pgedge_vectorizer_enable_hybrid)
+						{
+							int			ntokens;
+							int			token_count = 0;
+							bool		is_first_process = true;
+							BM25Term   *tokens;
+							HTAB	   *idf_htab;
+							float8		avg_doc_len;
+							char	   *sparse_str;
+							int			ret_bm25;
+							char	   *chunk_sql;
+
+							/*
+							 * Fetch token_count and check whether
+							 * sparse_embedding is already set (for
+							 * idempotency — skip IDF update on retry).
+							 */
+							chunk_sql = psprintf(
+								"SELECT token_count, "
+								"sparse_embedding IS NOT NULL "
+								"FROM %s WHERE id = %ld",
+								quote_identifier(chunk_tables[idx]),
+								chunk_ids[idx]);
+							ret_bm25 = SPI_execute(chunk_sql,
+												   true, 1);
+							pfree(chunk_sql);
+
+							if (ret_bm25 == SPI_OK_SELECT &&
+								SPI_processed > 0)
+							{
+								bool   isnull;
+								Datum  v;
+
+								v = SPI_getbinval(
+									SPI_tuptable->vals[0],
+									SPI_tuptable->tupdesc,
+									1, &isnull);
+								if (!isnull)
+									token_count = DatumGetInt32(v);
+
+								v = SPI_getbinval(
+									SPI_tuptable->vals[0],
+									SPI_tuptable->tupdesc,
+									2, &isnull);
+								if (!isnull)
+									is_first_process =
+										!DatumGetBool(v);
+
+								/*
+								 * Chunk row exists — proceed with BM25
+								 * scoring and IDF stats update.
+								 * Keeping this inside the SPI_processed > 0
+								 * block ensures we bail out cleanly when
+								 * the chunk has been concurrently deleted.
+								 */
+								if (token_count <= 0)
+									token_count = 1;
+
+								tokens = bm25_tokenize(contents[idx],
+													   &ntokens);
+								idf_htab = bm25_load_idf_stats(
+										chunk_tables[idx]);
+								avg_doc_len = bm25_avg_doc_len_internal(
+										chunk_tables[idx]);
+								sparse_str = bm25_compute_sparse_str(
+										tokens, ntokens,
+										idf_htab,
+										pgedge_vectorizer_bm25_k1,
+										pgedge_vectorizer_bm25_b,
+										avg_doc_len,
+										token_count);
+
+								ret_bm25 = SPI_execute(
+									psprintf(
+										"UPDATE %s SET "
+										"sparse_embedding = "
+										"%s::sparsevec "
+										"WHERE id = %ld",
+										quote_identifier(chunk_tables[idx]),
+										quote_literal_cstr(sparse_str),
+										chunk_ids[idx]),
+									false, 0);
+
+								if (ret_bm25 != SPI_OK_UPDATE)
+									elog(WARNING,
+										 "Failed to update "
+										 "sparse_embedding for "
+										 "chunk " INT64_FORMAT,
+										 chunk_ids[idx]);
+
+								if (idf_htab != NULL)
+									hash_destroy(idf_htab);
+
+								/*
+								 * Only update IDF stats the first time
+								 * this chunk is processed — retries must
+								 * not increment doc_freq again.
+								 */
+								if (is_first_process)
+									bm25_update_idf_stats(
+										chunk_tables[idx],
+										tokens, ntokens);
+							}
+							/* else: chunk row gone (concurrent delete) —
+							 * skip BM25 entirely to avoid inflating
+							 * corpus stats for a nonexistent chunk.
+							 */
+						}
 
 						/* Mark as completed */
 						SPI_execute(psprintf(
@@ -640,6 +819,7 @@ process_queue_batch(int worker_id)
 		pfree(contents);
 		pfree(attempts);
 		pfree(max_attempts);
+		pfree(sparse_only);
 	}
 
 	SPI_finish();

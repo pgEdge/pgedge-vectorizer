@@ -63,6 +63,13 @@ extern bool pgedge_vectorizer_strip_non_ascii;
 extern int pgedge_vectorizer_auto_cleanup_hours;
 
 /*
+ * GUC Variables - Hybrid search configuration
+ */
+extern bool   pgedge_vectorizer_enable_hybrid;
+extern double pgedge_vectorizer_bm25_k1;
+extern double pgedge_vectorizer_bm25_b;
+
+/*
  * Chunking strategy enumeration
  */
 typedef enum

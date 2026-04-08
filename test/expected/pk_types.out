@@ -17,6 +17,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: id (uuid)
+NOTICE:  column "sparse_embedding" of relation "test_uuid_pk_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: test_uuid_pk -> test_uuid_pk_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -82,6 +83,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: id (integer)
+NOTICE:  column "sparse_embedding" of relation "test_serial_pk_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: test_serial_pk -> test_serial_pk_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -138,6 +140,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "test_bigint_pk_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: test_bigint_pk -> test_bigint_pk_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -194,6 +197,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: slug (text)
+NOTICE:  column "sparse_embedding" of relation "test_text_pk_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: test_text_pk -> test_text_pk_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -257,6 +261,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: id (character varying(26))
+NOTICE:  column "sparse_embedding" of relation "test_varchar_pk_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: test_varchar_pk -> test_varchar_pk_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -314,6 +319,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: record_num (bigint)
+NOTICE:  column "sparse_embedding" of relation "test_autodetect_pk_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: test_autodetect_pk -> test_autodetect_pk_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -390,6 +396,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     'test_composite_override'::regclass, 'content', 'token_based', 100, 10, 1536, NULL, 'item_id'
 );
 NOTICE:  Using primary key column: item_id (integer)
+NOTICE:  column "sparse_embedding" of relation "test_composite_override_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: test_composite_override -> test_composite_override_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -476,6 +483,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     'test_override_pk'::regclass, 'content', 'token_based', 100, 10, 1536, NULL, 'external_id'
 );
 NOTICE:  Using primary key column: external_id (uuid)
+NOTICE:  column "sparse_embedding" of relation "test_override_pk_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: test_override_pk -> test_override_pk_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...

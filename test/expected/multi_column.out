@@ -17,6 +17,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "multi_test_title_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: multi_test -> multi_test_title_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -52,6 +53,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "multi_test_description_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: multi_test -> multi_test_description_chunks
 NOTICE:  Strategy: token_based, chunk_size: 200, overlap: 20
 NOTICE:  Processing existing rows...

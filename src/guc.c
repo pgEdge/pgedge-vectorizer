@@ -45,6 +45,13 @@ bool pgedge_vectorizer_strip_non_ascii = true;
 int pgedge_vectorizer_auto_cleanup_hours = 24;
 
 /*
+ * GUC Variables - Hybrid search (BM25 + dense RRF)
+ */
+bool   pgedge_vectorizer_enable_hybrid = false;
+double pgedge_vectorizer_bm25_k1       = 1.2;
+double pgedge_vectorizer_bm25_b        = 0.75;
+
+/*
  * Initialize all GUC variables
  */
 void
@@ -212,6 +219,46 @@ pgedge_vectorizer_init_guc(void)
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
+
+	/* Hybrid search configuration */
+	DefineCustomBoolVariable(
+		"pgedge_vectorizer.enable_hybrid",
+		"Enable BM25 sparse vectors alongside dense embeddings "
+		"for hybrid search support",
+		"When enabled, the background worker computes a BM25 "
+		"sparse vector for every chunk and stores it in the "
+		"sparse_embedding column of the chunk table.",
+		&pgedge_vectorizer_enable_hybrid,
+		false,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomRealVariable(
+		"pgedge_vectorizer.bm25_k1",
+		"BM25 term frequency saturation parameter",
+		"Controls how quickly term frequency saturates. "
+		"Typical range: 1.2 to 2.0.",
+		&pgedge_vectorizer_bm25_k1,
+		1.2,    /* default */
+		0.0,    /* min */
+		3.0,    /* max */
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	DefineCustomRealVariable(
+		"pgedge_vectorizer.bm25_b",
+		"BM25 length normalization parameter",
+		"Controls how much document length normalizes term "
+		"frequency. 0 = no normalization, 1 = full normalization.",
+		&pgedge_vectorizer_bm25_b,
+		0.75,   /* default */
+		0.0,    /* min */
+		1.0,    /* max */
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
 
 	elog(DEBUG1, "pgedge_vectorizer GUC variables initialized");
 }

@@ -18,6 +18,7 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "maint_test_content_chunks" already exists, skipping
 NOTICE:  Vectorization enabled: maint_test -> maint_test_content_chunks
 NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
 NOTICE:  Processing existing rows...
@@ -62,7 +63,7 @@ VALUES ('Additional content for recreate testing');
 -- Test recreate_chunks
 SELECT pgedge_vectorizer.recreate_chunks('maint_test'::regclass, 'content') >= 2 AS recreate_count;
 NOTICE:  Recreating chunks for maint_test.content -> maint_test_content_chunks
-NOTICE:  Deleted 2 existing chunks
+NOTICE:  Deleted 0 existing chunks
 NOTICE:  Cleared queue for maint_test_content_chunks
 NOTICE:  Re-chunking with strategy=token_based, size=100, overlap=10
 NOTICE:  Processed 2 rows

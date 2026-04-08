@@ -153,6 +153,68 @@ ORDER BY distance
 LIMIT 5;
 ```
 
+## Hybrid Search
+
+Hybrid search combines dense vector similarity with BM25 keyword ranking, merging
+the two result lists using **Reciprocal Rank Fusion (RRF)**. This typically
+outperforms either approach alone, especially for queries that contain specific
+technical terms or proper nouns that dense models may not distinguish well.
+
+### Enabling Hybrid Search
+
+Add to `postgresql.conf` and reload (`SELECT pg_reload_conf()`):
+
+```ini
+pgedge_vectorizer.enable_hybrid = true
+
+# Optional tuning (defaults shown)
+pgedge_vectorizer.bm25_k1 = 1.2    # term-frequency saturation (0.0–3.0)
+pgedge_vectorizer.bm25_b  = 0.75   # length normalization (0.0–1.0)
+```
+
+The background worker will begin populating the `sparse_embedding` column and
+`_idf_stats` table for every chunk it processes after this setting is enabled.
+
+### Usage Example
+
+```sql
+-- 1. Enable vectorization as normal
+SELECT pgedge_vectorizer.enable_vectorization(
+    source_table  := 'articles',
+    source_column := 'content'
+);
+
+-- 2. Insert documents; background workers handle both dense and sparse vectors
+INSERT INTO articles (title, content) VALUES
+    ('PostgreSQL Full-Text Search', 'BM25 ranking improves recall for keyword queries...'),
+    ('Vector Similarity Search',    'Dense embeddings capture semantic meaning...');
+
+-- 3. Run a hybrid search (returns ranked results with both score components)
+SELECT source_id, chunk, dense_rank, sparse_rank, rrf_score
+FROM pgedge_vectorizer.hybrid_search(
+    p_source_table := 'articles'::regclass,
+    p_query        := 'keyword ranking BM25',
+    p_limit        := 10,
+    p_alpha        := 0.7,   -- 0 = pure sparse, 1 = pure dense
+    p_rrf_k        := 60     -- RRF smoothing constant
+);
+
+-- Convenience wrapper (source_id, chunk, rrf_score only)
+SELECT * FROM pgedge_vectorizer.hybrid_search_simple(
+    'articles'::regclass,
+    'vector similarity search',
+    5
+);
+```
+
+### Hybrid Search GUC Parameters
+
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `pgedge_vectorizer.enable_hybrid` | bool | `false` | — | Enable BM25 sparse vectors alongside dense embeddings |
+| `pgedge_vectorizer.bm25_k1` | real | `1.2` | `0.0–3.0` | Term frequency saturation parameter |
+| `pgedge_vectorizer.bm25_b` | real | `0.75` | `0.0–1.0` | Document length normalization parameter |
+
 ## Configuration Parameters
 
 All configuration parameters can be set in `postgresql.conf` or via `ALTER SYSTEM`.
