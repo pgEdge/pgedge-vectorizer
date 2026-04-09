@@ -72,4 +72,16 @@ float **provider_parse_openai_embedding_response(const char *json_response,
 												 int count, int *dim,
 												 char **error_msg);
 
+/* Count dimensions by counting commas in a JSON float array (after '[') */
+int provider_count_array_dimensions(const char *p);
+
+/* Parse a JSON float array into pre-allocated output; returns count parsed */
+int provider_parse_float_array(const char **pos, float *output, int dim);
+
+/* Append extra headers from GUC to a curl header list */
+void provider_append_extra_headers(struct curl_slist **headers);
+
+/* Free a partially-allocated embeddings array */
+void provider_free_embeddings(float **embeddings, int count);
+
 #endif /* PROVIDER_COMMON_H */

@@ -198,93 +198,51 @@ parse_gemini_batch_embedding_response(const char *json_response, int count,
 									  int *dim, char **error_msg)
 {
 	const char *p;
-	float **embeddings = NULL;
+	float **embeddings;
 	int embedding_idx = 0;
-	int value_idx;
-	char value_buf[32];
-	int value_pos;
 
-	/* Allocate array for embeddings */
 	embeddings = (float **) palloc0(sizeof(float *) * count);
 
-	/* Find "embeddings" array */
 	p = strstr(json_response, "\"embeddings\"");
 	if (p == NULL)
 	{
 		*error_msg = pstrdup("Invalid response: 'embeddings' field not found");
-		goto error;
+		pfree(embeddings);
+		return NULL;
 	}
 
-	/* Find first "values" array */
 	p = strstr(p, "\"values\"");
 	if (p == NULL)
 	{
 		*error_msg = pstrdup("Invalid response: 'values' field not found");
-		goto error;
+		pfree(embeddings);
+		return NULL;
 	}
 
-	/* Process each embedding */
 	while (embedding_idx < count && p != NULL)
 	{
-		/* Find opening bracket */
+		int parsed;
+
 		p = strchr(p, '[');
 		if (p == NULL)
 			break;
 		p++;
 
-		/* Count dimensions if first embedding */
 		if (*dim == 0)
-		{
-			const char *temp = p;
-			int comma_count = 0;
-			while (*temp && *temp != ']')
-			{
-				if (*temp == ',')
-					comma_count++;
-				temp++;
-			}
-			*dim = comma_count + 1;
-		}
+			*dim = provider_count_array_dimensions(p);
 
-		/* Allocate array for this embedding */
 		embeddings[embedding_idx] = (float *) palloc(sizeof(float) * (*dim));
-		value_idx = 0;
+		parsed = provider_parse_float_array(&p, embeddings[embedding_idx], *dim);
 
-		/* Parse values */
-		while (value_idx < *dim && *p && *p != ']')
-		{
-			while (*p && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n'))
-				p++;
-
-			if (*p == ']')
-				break;
-
-			value_pos = 0;
-			while (*p && (isdigit(*p) || *p == '.' || *p == '-' || *p == '+' || *p == 'e' || *p == 'E'))
-			{
-				if (value_pos < sizeof(value_buf) - 1)
-					value_buf[value_pos++] = *p;
-				p++;
-			}
-			value_buf[value_pos] = '\0';
-
-			if (value_pos > 0)
-			{
-				embeddings[embedding_idx][value_idx] = atof(value_buf);
-				value_idx++;
-			}
-		}
-
-		if (value_idx != *dim)
+		if (parsed != *dim)
 		{
 			*error_msg = psprintf("Dimension mismatch: expected %d, got %d",
-								  *dim, value_idx);
-			goto error;
+								  *dim, parsed);
+			provider_free_embeddings(embeddings, embedding_idx + 1);
+			return NULL;
 		}
 
 		embedding_idx++;
-
-		/* Find next values array */
 		p = strstr(p, "\"values\"");
 	}
 
@@ -292,20 +250,9 @@ parse_gemini_batch_embedding_response(const char *json_response, int count,
 	{
 		*error_msg = psprintf("Expected %d embeddings, got %d",
 							  count, embedding_idx);
-		goto error;
+		provider_free_embeddings(embeddings, embedding_idx);
+		return NULL;
 	}
 
 	return embeddings;
-
-error:
-	if (embeddings != NULL)
-	{
-		for (int i = 0; i < embedding_idx; i++)
-		{
-			if (embeddings[i] != NULL)
-				pfree(embeddings[i]);
-		}
-		pfree(embeddings);
-	}
-	return NULL;
 }

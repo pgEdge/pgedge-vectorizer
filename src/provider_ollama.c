@@ -179,12 +179,9 @@ parse_ollama_embedding_response(const char *json_response, int *dim,
 								char **error_msg)
 {
 	const char *p;
-	float *embedding = NULL;
-	int value_idx = 0;
-	char value_buf[32];
-	int value_pos;
+	float *embedding;
+	int parsed;
 
-	/* Find "embedding" array */
 	p = strstr(json_response, "\"embedding\"");
 	if (p == NULL)
 	{
@@ -192,7 +189,6 @@ parse_ollama_embedding_response(const char *json_response, int *dim,
 		return NULL;
 	}
 
-	/* Find opening bracket */
 	p = strchr(p, '[');
 	if (p == NULL)
 	{
@@ -201,52 +197,16 @@ parse_ollama_embedding_response(const char *json_response, int *dim,
 	}
 	p++;
 
-	/* Count dimensions if not known */
 	if (*dim == 0)
-	{
-		const char *temp = p;
-		int comma_count = 0;
-		while (*temp && *temp != ']')
-		{
-			if (*temp == ',')
-				comma_count++;
-			temp++;
-		}
-		*dim = comma_count + 1;
-	}
+		*dim = provider_count_array_dimensions(p);
 
-	/* Allocate array for embedding */
 	embedding = (float *) palloc(sizeof(float) * (*dim));
+	parsed = provider_parse_float_array(&p, embedding, *dim);
 
-	/* Parse values */
-	while (value_idx < *dim && *p && *p != ']')
-	{
-		while (*p && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n'))
-			p++;
-
-		if (*p == ']')
-			break;
-
-		value_pos = 0;
-		while (*p && (isdigit(*p) || *p == '.' || *p == '-' || *p == '+' || *p == 'e' || *p == 'E'))
-		{
-			if (value_pos < sizeof(value_buf) - 1)
-				value_buf[value_pos++] = *p;
-			p++;
-		}
-		value_buf[value_pos] = '\0';
-
-		if (value_pos > 0)
-		{
-			embedding[value_idx] = atof(value_buf);
-			value_idx++;
-		}
-	}
-
-	if (value_idx != *dim)
+	if (parsed != *dim)
 	{
 		*error_msg = psprintf("Dimension mismatch: expected %d, got %d",
-							  *dim, value_idx);
+							  *dim, parsed);
 		pfree(embedding);
 		return NULL;
 	}
