@@ -32,9 +32,7 @@ static float *gemini_generate(const char *text, int *dim, char **error_msg);
 static float **gemini_generate_batch(const char **texts, int count, int *dim,
 									 char **error_msg);
 
-/* Gemini-specific response parsers */
-static float *parse_gemini_embedding_response(const char *json_response,
-											  int *dim, char **error_msg);
+/* Gemini-specific response parser */
 static float **parse_gemini_batch_embedding_response(const char *json_response,
 													 int count, int *dim,
 													 char **error_msg);
@@ -98,70 +96,21 @@ gemini_cleanup(void)
 
 /*
  * Generate a single embedding
- *
- * Gemini single embedding endpoint:
- * POST {base_url}/models/{model}:embedContent
- * Body: {"model":"models/{model}","content":{"parts":[{"text":"..."}]}}
- * Response: {"embedding":{"values":[0.1,0.2,...]}}
  */
 static float *
 gemini_generate(const char *text, int *dim, char **error_msg)
 {
-	char *json_request;
-	char *url;
-	const char *base_url;
-	char *escaped;
-	char auth_header[512];
-	StringInfoData request_buf;
-	ResponseBuffer response;
-	float *embedding;
+	const char *texts[1] = {text};
+	float **embeddings;
+	float *result;
 
-	if (!provider_initialized)
-	{
-		if (!gemini_init(error_msg))
-			return NULL;
-	}
-
-	/* Build JSON request - Gemini format */
-	initStringInfo(&request_buf);
-	escaped = provider_escape_json_string(text);
-	appendStringInfo(&request_buf,
-					 "{\"model\":\"models/%s\","
-					 "\"content\":{\"parts\":[{\"text\":\"%s\"}]}}",
-					 pgedge_vectorizer_model, escaped);
-	pfree(escaped);
-	json_request = request_buf.data;
-
-	/* Build URL - model name is in the path */
-	base_url = (pgedge_vectorizer_api_url != NULL &&
-				pgedge_vectorizer_api_url[0] != '\0')
-		? pgedge_vectorizer_api_url
-		: GEMINI_DEFAULT_BASE_URL;
-	url = psprintf("%s/models/%s:embedContent", base_url,
-				   pgedge_vectorizer_model);
-
-	/* Build auth header - Gemini uses x-goog-api-key */
-	snprintf(auth_header, sizeof(auth_header),
-			 "x-goog-api-key: %s", api_key);
-
-	/* Perform request */
-	if (!provider_do_curl_request(url, auth_header, json_request,
-								  "Gemini", &response, error_msg))
-	{
-		pfree(json_request);
-		pfree(url);
-		if (response.data)
-			pfree(response.data);
+	embeddings = gemini_generate_batch(texts, 1, dim, error_msg);
+	if (embeddings == NULL)
 		return NULL;
-	}
 
-	/* Parse Gemini-specific response */
-	embedding = parse_gemini_embedding_response(response.data, dim, error_msg);
-
-	pfree(json_request);
-	pfree(url);
-	pfree(response.data);
-	return embedding;
+	result = embeddings[0];
+	pfree(embeddings);
+	return result;
 }
 
 /*
@@ -237,98 +186,6 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	pfree(url);
 	pfree(response.data);
 	return embeddings;
-}
-
-/*
- * Parse Gemini single embedding response
- *
- * Expected format: {"embedding":{"values":[0.1,0.2,...]}}
- */
-static float *
-parse_gemini_embedding_response(const char *json_response, int *dim,
-								char **error_msg)
-{
-	const char *p;
-	float *embedding = NULL;
-	int value_idx = 0;
-	char value_buf[32];
-	int value_pos;
-
-	/* Find "values" array inside "embedding" object */
-	p = strstr(json_response, "\"embedding\"");
-	if (p == NULL)
-	{
-		*error_msg = pstrdup("Invalid response: 'embedding' field not found");
-		return NULL;
-	}
-
-	p = strstr(p, "\"values\"");
-	if (p == NULL)
-	{
-		*error_msg = pstrdup("Invalid response: 'values' field not found");
-		return NULL;
-	}
-
-	/* Find opening bracket */
-	p = strchr(p, '[');
-	if (p == NULL)
-	{
-		*error_msg = pstrdup("Invalid response: values array not found");
-		return NULL;
-	}
-	p++;
-
-	/* Count dimensions if not known */
-	if (*dim == 0)
-	{
-		const char *temp = p;
-		int comma_count = 0;
-		while (*temp && *temp != ']')
-		{
-			if (*temp == ',')
-				comma_count++;
-			temp++;
-		}
-		*dim = comma_count + 1;
-	}
-
-	/* Allocate array */
-	embedding = (float *) palloc(sizeof(float) * (*dim));
-
-	/* Parse values */
-	while (value_idx < *dim && *p && *p != ']')
-	{
-		while (*p && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n'))
-			p++;
-
-		if (*p == ']')
-			break;
-
-		value_pos = 0;
-		while (*p && (isdigit(*p) || *p == '.' || *p == '-' || *p == '+' || *p == 'e' || *p == 'E'))
-		{
-			if (value_pos < sizeof(value_buf) - 1)
-				value_buf[value_pos++] = *p;
-			p++;
-		}
-		value_buf[value_pos] = '\0';
-
-		if (value_pos > 0)
-		{
-			embedding[value_idx] = atof(value_buf);
-			value_idx++;
-		}
-	}
-
-	if (value_idx != *dim)
-	{
-		*error_msg = psprintf("Dimension mismatch: expected %d, got %d",
-							  *dim, value_idx);
-		pfree(embedding);
-		return NULL;
-	}
-
-	return embedding;
 }
 
 /*
