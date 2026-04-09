@@ -60,7 +60,7 @@ pgedge_vectorizer_init_guc(void)
 {
 	/* Provider configuration */
 	DefineCustomStringVariable("pgedge_vectorizer.provider",
-								"Embedding provider to use (openai, voyage, ollama)",
+								"Embedding provider to use (openai, voyage, ollama, gemini)",
 								"Determines which API provider is used for generating embeddings.",
 								&pgedge_vectorizer_provider,
 								"openai",
@@ -79,11 +79,16 @@ pgedge_vectorizer_init_guc(void)
 								NULL, NULL, NULL);
 
 	DefineCustomStringVariable("pgedge_vectorizer.api_url",
-								"API endpoint URL",
-								"API endpoint URL. Defaults: OpenAI=https://api.openai.com/v1, "
-								"Voyage=https://api.voyageai.com/v1, Ollama=http://localhost:11434",
+								"API endpoint URL (empty = provider default)",
+								"API endpoint URL. Leave empty to use provider defaults: "
+								"OpenAI=https://api.openai.com/v1, "
+								"Voyage=https://api.voyageai.com/v1, "
+								"Gemini=https://generativelanguage.googleapis.com/v1beta, "
+								"Ollama=http://localhost:11434. "
+								"Set a custom URL for OpenAI-compatible local providers "
+								"(LM Studio, Docker Model Runner, EXO) or proxies (Portkey).",
 								&pgedge_vectorizer_api_url,
-								"https://api.openai.com/v1",
+								"",
 								PGC_USERSET,
 								0,
 								NULL, NULL, NULL);
@@ -96,6 +101,17 @@ pgedge_vectorizer_init_guc(void)
 								"Ollama: nomic-embed-text, mxbai-embed-large",
 								&pgedge_vectorizer_model,
 								"text-embedding-3-small",
+								PGC_USERSET,
+								0,
+								NULL, NULL, NULL);
+
+	DefineCustomStringVariable("pgedge_vectorizer.extra_headers",
+								"Extra HTTP headers for API requests",
+								"Semicolon-separated key: value pairs added to all "
+								"provider HTTP requests. Example: "
+								"'x-portkey-provider: openai; x-custom: value'",
+								&pgedge_vectorizer_extra_headers,
+								"",
 								PGC_USERSET,
 								0,
 								NULL, NULL, NULL);
