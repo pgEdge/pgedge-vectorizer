@@ -13,9 +13,11 @@ OBJS = src/pgedge_vectorizer.o \
        src/hybrid_chunking.o \
        src/tokenizer.o \
        src/provider.o \
+       src/provider_common.o \
        src/provider_openai.o \
        src/provider_voyage.o \
        src/provider_ollama.o \
+       src/provider_gemini.o \
        src/worker.o \
        src/queue.o \
        src/embed.o

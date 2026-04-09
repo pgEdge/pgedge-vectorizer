@@ -37,8 +37,33 @@ SHOW pgedge_vectorizer.provider;
 SHOW pgedge_vectorizer.api_url;
 SHOW pgedge_vectorizer.model;
 
+-- Test Gemini provider configuration
+SET pgedge_vectorizer.provider = 'gemini';
+SET pgedge_vectorizer.api_url = 'https://generativelanguage.googleapis.com/v1beta';
+SET pgedge_vectorizer.model = 'text-embedding-004';
+SHOW pgedge_vectorizer.provider;
+SHOW pgedge_vectorizer.api_url;
+SHOW pgedge_vectorizer.model;
+
+-- Test extra headers configuration
+SET pgedge_vectorizer.extra_headers = 'x-portkey-provider: openai; x-custom-header: value123';
+SHOW pgedge_vectorizer.extra_headers;
+
+-- Test empty extra headers (default)
+RESET pgedge_vectorizer.extra_headers;
+SHOW pgedge_vectorizer.extra_headers;
+
+-- Test OpenAI-compatible local provider configuration (custom URL, no key needed)
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.api_url = 'http://localhost:1234/v1';
+SET pgedge_vectorizer.model = 'local-embed-model';
+SHOW pgedge_vectorizer.provider;
+SHOW pgedge_vectorizer.api_url;
+SHOW pgedge_vectorizer.model;
+
 -- Reset to defaults
 RESET pgedge_vectorizer.provider;
 RESET pgedge_vectorizer.api_url;
 RESET pgedge_vectorizer.model;
 SHOW pgedge_vectorizer.provider;
+SHOW pgedge_vectorizer.api_url;

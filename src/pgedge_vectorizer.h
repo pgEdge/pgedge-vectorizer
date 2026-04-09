@@ -50,6 +50,7 @@ extern char *pgedge_vectorizer_provider;
 extern char *pgedge_vectorizer_api_key_file;
 extern char *pgedge_vectorizer_api_url;
 extern char *pgedge_vectorizer_model;
+extern char *pgedge_vectorizer_extra_headers;
 extern char *pgedge_vectorizer_databases;
 extern int pgedge_vectorizer_num_workers;
 extern int pgedge_vectorizer_batch_size;
@@ -162,6 +163,9 @@ extern EmbeddingProvider VoyageProvider;
 
 /* provider_ollama.c */
 extern EmbeddingProvider OllamaProvider;
+
+/* provider_gemini.c */
+extern EmbeddingProvider GeminiProvider;
 
 /* tokenizer.c */
 int count_tokens(const char *text, const char *model);

@@ -8,10 +8,11 @@ These settings configure the connection to your embedding provider, including th
 
 | Parameter | Default | Description | Reload | Restart | Superuser |
 |-----------|---------|-------------|--------|---------|-----------|
-| `pgedge_vectorizer.provider` | `openai` | Embedding provider (openai, voyage, ollama) | No | No | No |
-| `pgedge_vectorizer.api_key_file` | `~/.pgedge-vectorizer-llm-api-key` | API key file path (not needed for Ollama) | No | No | No |
-| `pgedge_vectorizer.api_url` | `https://api.openai.com/v1` | API endpoint | No | No | No |
+| `pgedge_vectorizer.provider` | `openai` | Embedding provider (openai, voyage, ollama, gemini) | No | No | No |
+| `pgedge_vectorizer.api_key_file` | `~/.pgedge-vectorizer-llm-api-key` | API key file path (not needed for Ollama; optional for OpenAI with custom URL) | No | No | No |
+| `pgedge_vectorizer.api_url` | (empty) | API endpoint URL. Leave empty for provider defaults. Set for custom/local endpoints. | No | No | No |
 | `pgedge_vectorizer.model` | `text-embedding-3-small` | Model name | No | No | No |
+| `pgedge_vectorizer.extra_headers` | (empty) | Semicolon-separated `key: value` HTTP headers added to all API requests | No | No | No |
 
 ## Worker Settings
 
