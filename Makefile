@@ -17,6 +17,7 @@ OBJS = src/pgedge_vectorizer.o \
        src/provider_openai.o \
        src/provider_voyage.o \
        src/provider_ollama.o \
+       src/provider_gemini.o \
        src/worker.o \
        src/queue.o \
        src/embed.o

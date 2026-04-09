@@ -18,6 +18,7 @@ static EmbeddingProvider *providers[] = {
 	&OpenAIProvider,
 	&VoyageProvider,
 	&OllamaProvider,
+	&GeminiProvider,
 	NULL  /* Sentinel */
 };
 

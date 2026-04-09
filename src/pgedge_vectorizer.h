@@ -164,6 +164,9 @@ extern EmbeddingProvider VoyageProvider;
 /* provider_ollama.c */
 extern EmbeddingProvider OllamaProvider;
 
+/* provider_gemini.c */
+extern EmbeddingProvider GeminiProvider;
+
 /* tokenizer.c */
 int count_tokens(const char *text, const char *model);
 int *tokenize_text(const char *text, const char *model, int *token_count);
