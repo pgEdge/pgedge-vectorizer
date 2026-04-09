@@ -93,8 +93,8 @@ SHOW pgedge_vectorizer.provider;
 (1 row)
 
 SHOW pgedge_vectorizer.api_url;
-                pgedge_vectorizer.api_url                 
-----------------------------------------------------------
+            pgedge_vectorizer.api_url             
+--------------------------------------------------
  https://generativelanguage.googleapis.com/v1beta
 (1 row)
 
@@ -107,8 +107,8 @@ SHOW pgedge_vectorizer.model;
 -- Test extra headers configuration
 SET pgedge_vectorizer.extra_headers = 'x-portkey-provider: openai; x-custom-header: value123';
 SHOW pgedge_vectorizer.extra_headers;
-               pgedge_vectorizer.extra_headers                
---------------------------------------------------------------
+            pgedge_vectorizer.extra_headers            
+-------------------------------------------------------
  x-portkey-provider: openai; x-custom-header: value123
 (1 row)
 
@@ -131,8 +131,8 @@ SHOW pgedge_vectorizer.provider;
 (1 row)
 
 SHOW pgedge_vectorizer.api_url;
-  pgedge_vectorizer.api_url  
------------------------------
+ pgedge_vectorizer.api_url 
+---------------------------
  http://localhost:1234/v1
 (1 row)
 
