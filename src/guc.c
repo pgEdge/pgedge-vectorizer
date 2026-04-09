@@ -20,6 +20,7 @@ char *pgedge_vectorizer_provider = NULL;
 char *pgedge_vectorizer_api_key_file = NULL;
 char *pgedge_vectorizer_api_url = NULL;
 char *pgedge_vectorizer_model = NULL;
+char *pgedge_vectorizer_extra_headers = NULL;
 
 /*
  * GUC Variables - Worker Configuration
