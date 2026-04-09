@@ -47,7 +47,7 @@ provider_expand_tilde(const char *path)
 {
 	if (path[0] == '~' && (path[1] == '/' || path[1] == '\0'))
 	{
-		const char *home = getenv("HOME");
+		const char *home = getenv("HOME");  /* nosemgrep */
 		if (home)
 			return psprintf("%s%s", home, path + 1);
 	}
@@ -55,10 +55,9 @@ provider_expand_tilde(const char *path)
 }
 
 /*
- * Load API key from file
+ * Read API key from file into a persistent (TopMemoryContext) string.
  *
- * Handles tilde expansion, file permission checks, and persists the key
- * in TopMemoryContext so it survives across transactions.
+ * Handles tilde expansion, file permission checks, and whitespace trimming.
  */
 char *
 provider_load_api_key(const char *filepath, char **error_msg)
@@ -68,6 +67,8 @@ provider_load_api_key(const char *filepath, char **error_msg)
 	StringInfoData key_buf;
 	int c;
 	struct stat st;
+	MemoryContext oldcontext;
+	char *persistent_key;
 
 	if (filepath == NULL || filepath[0] == '\0')
 	{
@@ -75,10 +76,8 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		return NULL;
 	}
 
-	/* Expand tilde */
 	expanded_path = provider_expand_tilde(filepath);
 
-	/* Check file exists and has proper permissions */
 	if (stat(expanded_path, &st) != 0)
 	{
 		*error_msg = psprintf("API key file not found: %s", expanded_path);
@@ -86,14 +85,10 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		return NULL;
 	}
 
-	/* Warn if file is world-readable */
 	if (st.st_mode & (S_IRWXG | S_IRWXO))
-	{
 		elog(WARNING, "API key file %s has permissive permissions (should be 0600)",
 			 expanded_path);
-	}
 
-	/* Open and read file */
 	fp = fopen(expanded_path, "r");
 	if (fp == NULL)
 	{
@@ -102,17 +97,16 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		return NULL;
 	}
 
+	pfree(expanded_path);
 	initStringInfo(&key_buf);
 
-	/* Read the file, trimming whitespace */
+	/* flawfinder: ignore - fgetc reads into auto-resizing StringInfo */
 	while ((c = fgetc(fp)) != EOF)
 	{
 		if (c != '\n' && c != '\r' && c != ' ' && c != '\t')
 			appendStringInfoChar(&key_buf, c);
 	}
-
 	fclose(fp);
-	pfree(expanded_path);
 
 	if (key_buf.len == 0)
 	{
@@ -121,18 +115,12 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		return NULL;
 	}
 
-	/* Copy to TopMemoryContext so it persists across transactions */
-	{
-		char *persistent_key;
-		MemoryContext oldcontext;
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	persistent_key = pstrdup(key_buf.data);
+	MemoryContextSwitchTo(oldcontext);
 
-		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-		persistent_key = pstrdup(key_buf.data);
-		MemoryContextSwitchTo(oldcontext);
-
-		pfree(key_buf.data);
-		return persistent_key;
-	}
+	pfree(key_buf.data);
+	return persistent_key;
 }
 
 /*
@@ -187,7 +175,6 @@ provider_escape_json_string(const char *str)
  * Build an OpenAI-format embedding request body.
  *
  * Returns a palloc'd JSON string: {"input":["text1","text2"],"model":"model-name"}
- * Caller must pfree the result.
  */
 char *
 provider_build_openai_request(const char **texts, int count, const char *model)
@@ -210,15 +197,139 @@ provider_build_openai_request(const char **texts, int count, const char *model)
 }
 
 /*
+ * Count dimensions in a JSON float array by counting commas.
+ * Pointer should be positioned just after the opening '['.
+ */
+int
+provider_count_array_dimensions(const char *p)
+{
+	int comma_count = 0;
+
+	while (*p && *p != ']')
+	{
+		if (*p == ',')
+			comma_count++;
+		p++;
+	}
+	return comma_count + 1;
+}
+
+/*
+ * Parse a JSON float array into a pre-allocated output buffer.
+ *
+ * Reads up to `dim` float values from the current position (after '[').
+ * Advances *pos past the parsed values (to ']' or end of parsed data).
+ * Returns the number of values successfully parsed.
+ */
+int
+provider_parse_float_array(const char **pos, float *output, int dim)
+{
+	const char *p = *pos;
+	int idx = 0;
+	char value_buf[32];
+	int value_pos;
+
+	while (idx < dim && *p && *p != ']')
+	{
+		/* Skip whitespace and commas */
+		while (*p && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n'))
+			p++;
+
+		if (*p == ']')
+			break;
+
+		/* Read numeric value */
+		value_pos = 0;
+		while (*p && (isdigit(*p) || *p == '.' || *p == '-' ||
+					  *p == '+' || *p == 'e' || *p == 'E'))
+		{
+			if (value_pos < (int) sizeof(value_buf) - 1)
+				value_buf[value_pos++] = *p;
+			p++;
+		}
+		value_buf[value_pos] = '\0';
+
+		if (value_pos > 0)
+		{
+			output[idx] = atof(value_buf);
+			idx++;
+		}
+	}
+
+	*pos = p;
+	return idx;
+}
+
+/*
+ * Append extra headers from the pgedge_vectorizer.extra_headers GUC
+ * to a curl header list. Parses semicolon-separated "key: value" pairs.
+ */
+void
+provider_append_extra_headers(struct curl_slist **headers)
+{
+	char *headers_copy;
+	char *saveptr = NULL;
+	char *token;
+
+	if (pgedge_vectorizer_extra_headers == NULL ||
+		pgedge_vectorizer_extra_headers[0] == '\0')
+		return;
+
+	headers_copy = pstrdup(pgedge_vectorizer_extra_headers);
+
+	for (token = strtok_r(headers_copy, ";", &saveptr);
+		 token != NULL;
+		 token = strtok_r(NULL, ";", &saveptr))
+	{
+		char *end;
+
+		/* Trim leading whitespace */
+		while (*token == ' ' || *token == '\t')
+			token++;
+
+		/* Trim trailing whitespace */
+		/* flawfinder: ignore - token is NUL-terminated by strtok_r */
+		end = token + strlen(token) - 1;  /* nosemgrep */
+		while (end > token && (*end == ' ' || *end == '\t'))
+			*end-- = '\0';
+
+		if (*token == '\0')
+			continue;
+
+		if (strchr(token, ':') == NULL)
+		{
+			elog(WARNING, "Ignoring invalid extra header (no colon): %s", token);
+			continue;
+		}
+
+		*headers = curl_slist_append(*headers, token);
+	}
+
+	pfree(headers_copy);
+}
+
+/*
+ * Free a partially-allocated embeddings array (for error cleanup).
+ */
+void
+provider_free_embeddings(float **embeddings, int count)
+{
+	if (embeddings == NULL)
+		return;
+
+	for (int i = 0; i < count; i++)
+	{
+		if (embeddings[i] != NULL)
+			pfree(embeddings[i]);
+	}
+	pfree(embeddings);
+}
+
+/*
  * Perform an HTTP POST request via curl.
  *
- * Handles:
- * - Setting Content-Type header
- * - Adding provider-specific auth header (if non-NULL)
- * - Parsing and appending extra_headers from GUC
- * - Curl lifecycle (init, perform, cleanup)
- * - HTTP response code checking
- *
+ * Handles Content-Type, auth header, extra headers from GUC,
+ * curl lifecycle, and HTTP response code checking.
  * Returns true on HTTP 200, false otherwise.
  */
 bool
@@ -238,7 +349,6 @@ provider_do_curl_request(const char *url, const char *auth_header,
 	response_out->data[0] = '\0';
 	response_out->size = 0;
 
-	/* Initialize curl */
 	curl = curl_easy_init();
 	if (!curl)
 	{
@@ -250,61 +360,20 @@ provider_do_curl_request(const char *url, const char *auth_header,
 
 	/* Set up headers */
 	headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
-
 	if (auth_header != NULL)
 		headers = curl_slist_append(headers, auth_header);
+	provider_append_extra_headers(&headers);
 
-	/* Parse and append extra headers from GUC */
-	if (pgedge_vectorizer_extra_headers != NULL &&
-		pgedge_vectorizer_extra_headers[0] != '\0')
-	{
-		char *headers_copy = pstrdup(pgedge_vectorizer_extra_headers);
-		char *saveptr = NULL;
-		char *token;
-
-		for (token = strtok_r(headers_copy, ";", &saveptr);
-			 token != NULL;
-			 token = strtok_r(NULL, ";", &saveptr))
-		{
-			/* Trim leading whitespace */
-			while (*token == ' ' || *token == '\t')
-				token++;
-
-			/* Trim trailing whitespace */
-			{
-				char *end = token + strlen(token) - 1;
-				while (end > token && (*end == ' ' || *end == '\t'))
-					*end-- = '\0';
-			}
-
-			/* Skip empty tokens */
-			if (*token == '\0')
-				continue;
-
-			/* Validate: must contain a colon */
-			if (strchr(token, ':') == NULL)
-			{
-				elog(WARNING, "Ignoring invalid extra header (no colon): %s", token);
-				continue;
-			}
-
-			headers = curl_slist_append(headers, token);
-		}
-
-		pfree(headers_copy);
-	}
-
-	/* Configure curl */
+	/* Configure and perform request */
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_request);
 	/* flawfinder: ignore - json_request is null-terminated */
-	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json_request));
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json_request));  /* nosemgrep */
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, provider_write_callback);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, response_out);
-	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);  /* 5 minute timeout */
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
 
-	/* Perform the request */
 	res = curl_easy_perform(curl);
 
 	if (res != CURLE_OK)
@@ -316,19 +385,17 @@ provider_do_curl_request(const char *url, const char *auth_header,
 		return false;
 	}
 
-	/* Check HTTP response code */
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+
 	if (response_code != 200)
 	{
 		*error_msg = psprintf("%s API returned HTTP %ld: %s",
 							  provider_name, response_code, response_out->data);
-		curl_slist_free_all(headers);
-		curl_easy_cleanup(curl);
 		return false;
 	}
 
-	curl_slist_free_all(headers);
-	curl_easy_cleanup(curl);
 	return true;
 }
 
@@ -345,95 +412,51 @@ provider_parse_openai_embedding_response(const char *json_response, int count,
 										 int *dim, char **error_msg)
 {
 	const char *p;
-	float **embeddings = NULL;
+	float **embeddings;
 	int embedding_idx = 0;
-	int value_idx;
-	char value_buf[32];
-	int value_pos;
 
-	/* Allocate array for embeddings */
 	embeddings = (float **) palloc0(sizeof(float *) * count);
 
-	/* Find "data" array */
 	p = strstr(json_response, "\"data\"");
 	if (p == NULL)
 	{
 		*error_msg = pstrdup("Invalid response: 'data' field not found");
-		goto error;
+		pfree(embeddings);
+		return NULL;
 	}
 
-	/* Find first embedding array */
 	p = strstr(p, "\"embedding\"");
 	if (p == NULL)
 	{
 		*error_msg = pstrdup("Invalid response: 'embedding' field not found");
-		goto error;
+		pfree(embeddings);
+		return NULL;
 	}
 
-	/* Process each embedding */
 	while (embedding_idx < count && p != NULL)
 	{
-		/* Find opening bracket */
+		int parsed;
+
 		p = strchr(p, '[');
 		if (p == NULL)
 			break;
 		p++;
 
-		/* Count dimensions if first embedding */
 		if (*dim == 0)
-		{
-			const char *temp = p;
-			int comma_count = 0;
-			while (*temp && *temp != ']')
-			{
-				if (*temp == ',')
-					comma_count++;
-				temp++;
-			}
-			*dim = comma_count + 1;
-		}
+			*dim = provider_count_array_dimensions(p);
 
-		/* Allocate array for this embedding */
 		embeddings[embedding_idx] = (float *) palloc(sizeof(float) * (*dim));
-		value_idx = 0;
+		parsed = provider_parse_float_array(&p, embeddings[embedding_idx], *dim);
 
-		/* Parse values */
-		while (value_idx < *dim && *p && *p != ']')
-		{
-			/* Skip whitespace and commas */
-			while (*p && (*p == ' ' || *p == ',' || *p == '\t' || *p == '\n'))
-				p++;
-
-			if (*p == ']')
-				break;
-
-			/* Read numeric value */
-			value_pos = 0;
-			while (*p && (isdigit(*p) || *p == '.' || *p == '-' || *p == '+' || *p == 'e' || *p == 'E'))
-			{
-				if (value_pos < sizeof(value_buf) - 1)
-					value_buf[value_pos++] = *p;
-				p++;
-			}
-			value_buf[value_pos] = '\0';
-
-			if (value_pos > 0)
-			{
-				embeddings[embedding_idx][value_idx] = atof(value_buf);
-				value_idx++;
-			}
-		}
-
-		if (value_idx != *dim)
+		if (parsed != *dim)
 		{
 			*error_msg = psprintf("Dimension mismatch: expected %d, got %d",
-								  *dim, value_idx);
-			goto error;
+								  *dim, parsed);
+			provider_free_embeddings(embeddings, embedding_idx + 1);
+			return NULL;
 		}
 
 		embedding_idx++;
-
-		/* Find next embedding */
 		p = strstr(p, "\"embedding\"");
 	}
 
@@ -441,20 +464,9 @@ provider_parse_openai_embedding_response(const char *json_response, int count,
 	{
 		*error_msg = psprintf("Expected %d embeddings, got %d",
 							  count, embedding_idx);
-		goto error;
+		provider_free_embeddings(embeddings, embedding_idx);
+		return NULL;
 	}
 
 	return embeddings;
-
-error:
-	if (embeddings != NULL)
-	{
-		for (int i = 0; i < embedding_idx; i++)
-		{
-			if (embeddings[i] != NULL)
-				pfree(embeddings[i]);
-		}
-		pfree(embeddings);
-	}
-	return NULL;
 }
