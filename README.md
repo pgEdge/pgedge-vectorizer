@@ -348,7 +348,8 @@ SELECT pgedge_vectorizer.tiktoken_count_tokens(
 
 To enable accurate tiktoken counting:
 
-1. Install `plpython3u` (e.g. `sudo apt-get install postgresql-plpython3-17`)
+1. Install `plpython3u` for your PostgreSQL version,
+   e.g. `sudo apt-get install postgresql-plpython3-<PG_MAJOR>` (replace `<PG_MAJOR>` with 14, 15, 16, or 17)
 2. Install the tiktoken Python package: `pip install tiktoken`
 3. Enable the GUC: `SET pgedge_vectorizer.use_tiktoken = on;`
 

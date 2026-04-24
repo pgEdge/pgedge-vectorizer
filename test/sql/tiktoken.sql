@@ -24,16 +24,16 @@ WHERE proname = 'count_tokens'
 ---------------------------------------------------------------------------
 
 -- 'hello world' = 11 chars, (11+3)/4 = 3
-SELECT pgedge_vectorizer.count_tokens('hello world', NULL) AS tokens;
+SELECT pgedge_vectorizer.count_tokens('hello world') AS tokens;
 
 -- empty string returns 0
-SELECT pgedge_vectorizer.count_tokens('', NULL) AS tokens;
+SELECT pgedge_vectorizer.count_tokens('') AS tokens;
 
 -- 'test' = 4 chars, (4+3)/4 = 1
-SELECT pgedge_vectorizer.count_tokens('test', NULL) AS tokens;
+SELECT pgedge_vectorizer.count_tokens('test') AS tokens;
 
--- NULL input returns NULL
-SELECT pgedge_vectorizer.count_tokens(NULL, NULL) IS NULL AS is_null;
+-- NULL input returns NULL (STRICT function)
+SELECT pgedge_vectorizer.count_tokens(NULL) IS NULL AS is_null;
 
 ---------------------------------------------------------------------------
 -- Test 4: tiktoken_count_tokens() PL/pgSQL wrapper is registered
@@ -81,10 +81,10 @@ SELECT pgedge_vectorizer.enable_vectorization(
     1536
 );
 
--- token_count column exists and holds a positive integer
-SELECT token_count > 0 AS token_count_positive
-FROM tiktoken_test_docs_content_chunks
-LIMIT 1;
+-- Verify at least one chunk exists and all have a positive token_count
+SELECT COUNT(*) > 0 AS chunks_exist,
+       COALESCE(BOOL_AND(token_count > 0), false) AS all_positive
+FROM tiktoken_test_docs_content_chunks;
 
 ---------------------------------------------------------------------------
 -- Cleanup

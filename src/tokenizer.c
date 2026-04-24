@@ -128,7 +128,7 @@ get_char_offset_for_tokens(const char *text, int target_tokens, const char *mode
  * SQL-callable wrapper for count_tokens
  *
  * Exposes the C token counting approximation to SQL as
- * pgedge_vectorizer.count_tokens(text, model).
+ * pgedge_vectorizer.count_tokens(text).
  */
 PG_FUNCTION_INFO_V1(pgedge_vectorizer_count_tokens_sql);
 
@@ -137,7 +137,6 @@ pgedge_vectorizer_count_tokens_sql(PG_FUNCTION_ARGS)
 {
 	text	   *input;
 	char	   *str;
-	char	   *model = NULL;
 	int			token_count;
 
 	if (PG_ARGISNULL(0))
@@ -145,14 +144,7 @@ pgedge_vectorizer_count_tokens_sql(PG_FUNCTION_ARGS)
 
 	input = PG_GETARG_TEXT_PP(0);
 	str = text_to_cstring(input);
-
-	if (!PG_ARGISNULL(1))
-	{
-		text *model_text = PG_GETARG_TEXT_PP(1);
-		model = text_to_cstring(model_text);
-	}
-
-	token_count = count_tokens(str, model);
+	token_count = count_tokens(str, NULL);
 	PG_RETURN_INT32(token_count);
 }
 

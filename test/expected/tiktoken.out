@@ -30,28 +30,28 @@ WHERE proname = 'count_tokens'
 -- Test 3: count_tokens() returns correct approximation values
 ---------------------------------------------------------------------------
 -- 'hello world' = 11 chars, (11+3)/4 = 3
-SELECT pgedge_vectorizer.count_tokens('hello world', NULL) AS tokens;
+SELECT pgedge_vectorizer.count_tokens('hello world') AS tokens;
  tokens 
 --------
       3
 (1 row)
 
 -- empty string returns 0
-SELECT pgedge_vectorizer.count_tokens('', NULL) AS tokens;
+SELECT pgedge_vectorizer.count_tokens('') AS tokens;
  tokens 
 --------
       0
 (1 row)
 
 -- 'test' = 4 chars, (4+3)/4 = 1
-SELECT pgedge_vectorizer.count_tokens('test', NULL) AS tokens;
+SELECT pgedge_vectorizer.count_tokens('test') AS tokens;
  tokens 
 --------
       1
 (1 row)
 
--- NULL input returns NULL
-SELECT pgedge_vectorizer.count_tokens(NULL, NULL) IS NULL AS is_null;
+-- NULL input returns NULL (STRICT function)
+SELECT pgedge_vectorizer.count_tokens(NULL) IS NULL AS is_null;
  is_null 
 ---------
  t
@@ -125,13 +125,13 @@ NOTICE:  Processed 1 existing rows
  
 (1 row)
 
--- token_count column exists and holds a positive integer
-SELECT token_count > 0 AS token_count_positive
-FROM tiktoken_test_docs_content_chunks
-LIMIT 1;
- token_count_positive 
-----------------------
- t
+-- Verify at least one chunk exists and all have a positive token_count
+SELECT COUNT(*) > 0 AS chunks_exist,
+       COALESCE(BOOL_AND(token_count > 0), false) AS all_positive
+FROM tiktoken_test_docs_content_chunks;
+ chunks_exist | all_positive 
+--------------+--------------
+ t            | t
 (1 row)
 
 ---------------------------------------------------------------------------
