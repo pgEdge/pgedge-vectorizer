@@ -252,6 +252,12 @@ All configuration parameters can be set in `postgresql.conf` or via `ALTER SYSTE
 |-----------|------|---------|-------------|
 | `pgedge_vectorizer.auto_cleanup_hours` | integer | `24` | Automatically delete completed queue items older than this many hours. Set to 0 to disable automatic cleanup. |
 
+### Tiktoken Configuration
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pgedge_vectorizer.use_tiktoken` | boolean | `false` | Use tiktoken via `plpython3u` for accurate token counting. Requires `plpython3u` and the `tiktoken` Python package. |
+
 ## SQL API Reference
 
 ### Functions
@@ -317,6 +323,36 @@ SELECT pgedge_vectorizer.clear_completed(
 ```
 
 **Note:** Workers automatically clean up completed items based on `pgedge_vectorizer.auto_cleanup_hours` (default 24 hours). Manual cleanup is only needed if you want to clean up more frequently or if automatic cleanup is disabled (set to 0).
+
+#### `count_tokens()`
+
+Count approximate tokens in text using the UTF-8 character-based approximation (~4 chars/token).
+
+```sql
+SELECT pgedge_vectorizer.count_tokens(
+    p_text  TEXT,
+    p_model TEXT DEFAULT NULL   -- reserved for future use
+) RETURNS INT;
+```
+
+#### `tiktoken_count_tokens()`
+
+Count tokens using [tiktoken](https://github.com/openai/tiktoken) when `use_tiktoken = on`, otherwise falls back to the character-based approximation.
+
+```sql
+SELECT pgedge_vectorizer.tiktoken_count_tokens(
+    p_text     TEXT,
+    p_encoding TEXT DEFAULT 'cl100k_base'
+) RETURNS INT;
+```
+
+To enable accurate tiktoken counting:
+
+1. Install `plpython3u` (e.g. `sudo apt-get install postgresql-plpython3-17`)
+2. Install the tiktoken Python package: `pip install tiktoken`
+3. Enable the GUC: `SET pgedge_vectorizer.use_tiktoken = on;`
+
+When `use_tiktoken = on` and `plpython3u`/`tiktoken` are unavailable, the function falls back to the approximation with a `NOTICE`.
 
 #### `show_config()`
 
@@ -495,7 +531,7 @@ SET client_min_messages = DEBUG1;
 - [ ] Semantic chunking strategy
 - [ ] Markdown-aware chunking
 - [ ] Sentence-based chunking
-- [ ] Integration with tiktoken for accurate token counting
+- [x] Integration with tiktoken for accurate token counting
 - [ ] Cost tracking and quotas
 - [ ] Multi-database support
 - [ ] Custom embedding dimensions

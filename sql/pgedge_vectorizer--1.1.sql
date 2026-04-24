@@ -129,6 +129,73 @@ LANGUAGE C STRICT;
 COMMENT ON FUNCTION pgedge_vectorizer.bm25_tokenize IS
 'Tokenize text and return the non-stopword terms (useful for testing)';
 
+-- UTF-8 aware approximate token counter (C implementation)
+CREATE FUNCTION pgedge_vectorizer.count_tokens(
+    p_text  TEXT,
+    p_model TEXT DEFAULT NULL
+) RETURNS INT
+AS 'MODULE_PATHNAME', 'pgedge_vectorizer_count_tokens_sql'
+LANGUAGE C STABLE;
+
+COMMENT ON FUNCTION pgedge_vectorizer.count_tokens IS
+'Approximate token count using UTF-8 character counting (~4 chars/token). '
+'The p_model parameter is reserved for future use.';
+
+-- Internal plpython3u implementation (created only if plpython3u is available)
+DO $tiktoken_init$
+BEGIN
+    CREATE FUNCTION pgedge_vectorizer._tiktoken_internal(
+        p_text     TEXT,
+        p_encoding TEXT DEFAULT 'cl100k_base'
+    ) RETURNS INT
+    LANGUAGE plpython3u STABLE STRICT
+    AS $py$
+        import tiktoken
+        enc = tiktoken.get_encoding(p_encoding)
+        return len(enc.encode(p_text))
+    $py$;
+EXCEPTION WHEN OTHERS THEN
+    NULL;  -- plpython3u not available, silently skip
+END;
+$tiktoken_init$;
+
+-- Tiktoken-based token counting with graceful fallback to approximation
+CREATE FUNCTION pgedge_vectorizer.tiktoken_count_tokens(
+    p_text     TEXT,
+    p_encoding TEXT DEFAULT 'cl100k_base'
+) RETURNS INT
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    result INT;
+BEGIN
+    IF p_text IS NULL OR p_text = '' THEN
+        RETURN 0;
+    END IF;
+
+    IF NOT COALESCE(
+        current_setting('pgedge_vectorizer.use_tiktoken', true),
+        'false'
+    )::BOOLEAN THEN
+        RETURN (length(p_text) + 3) / 4;
+    END IF;
+
+    -- use_tiktoken = on: delegate to plpython3u internal function
+    BEGIN
+        SELECT pgedge_vectorizer._tiktoken_internal(p_text, p_encoding) INTO result;
+        RETURN result;
+    EXCEPTION WHEN undefined_function THEN
+        RAISE NOTICE 'tiktoken: plpython3u or tiktoken not available, falling back to approximation';
+        RETURN (length(p_text) + 3) / 4;
+    END;
+END;
+$$;
+
+COMMENT ON FUNCTION pgedge_vectorizer.tiktoken_count_tokens IS
+'Count tokens using tiktoken when pgedge_vectorizer.use_tiktoken = on, '
+'otherwise returns a character-based approximation (~4 chars/token). '
+'Requires plpython3u and the tiktoken Python package when use_tiktoken is on.';
+
 ---------------------------------------------------------------------------
 -- SQL Functions
 ---------------------------------------------------------------------------
@@ -344,7 +411,7 @@ BEGIN
                               (sparse_embedding IS NULL) AS needs_sparse',
                     chunk_table, chunk_table, chunk_table, chunk_table, chunk_table)
                 USING row_record.pk_val, i, chunk_text,
-                      length(chunk_text) / 4  -- Approximate token count
+                      pgedge_vectorizer.count_tokens(chunk_text, NULL)  -- UTF-8 aware token approximation
                 INTO chunk_id, needs_embedding, needs_sparse;
 
                 -- Queue if dense or sparse work is needed.
@@ -661,7 +728,7 @@ BEGIN
             VALUES ($1::%s, $2, $3, $4)
             RETURNING id', chunk_table, pk_type)
         USING source_id_val, i, chunk_text,
-              length(chunk_text) / 4  -- Approximate token count
+              pgedge_vectorizer.count_tokens(chunk_text, NULL)  -- UTF-8 aware token approximation
         INTO chunk_id;
 
         -- Queue for embedding
@@ -956,7 +1023,7 @@ BEGIN
                     VALUES ($1::%s, $2, $3, $4)
                     RETURNING id', chunk_table_name, pk_type)
                 USING row_record.pk_val, i, chunk_text,
-                      length(chunk_text) / 4  -- Approximate token count
+                      pgedge_vectorizer.count_tokens(chunk_text, NULL)  -- UTF-8 aware token approximation
                 INTO chunk_id;
 
                 -- Queue for embedding
