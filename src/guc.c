@@ -52,6 +52,11 @@ double pgedge_vectorizer_bm25_k1       = 1.2;
 double pgedge_vectorizer_bm25_b        = 0.75;
 
 /*
+ * GUC Variables - Tiktoken configuration
+ */
+bool pgedge_vectorizer_use_tiktoken = false;
+
+/*
  * Initialize all GUC variables
  */
 void
@@ -256,6 +261,19 @@ pgedge_vectorizer_init_guc(void)
 		0.75,   /* default */
 		0.0,    /* min */
 		1.0,    /* max */
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
+
+	/* Tiktoken configuration */
+	DefineCustomBoolVariable(
+		"pgedge_vectorizer.use_tiktoken",
+		"Use tiktoken (via plpython3u) for accurate token counting",
+		"When enabled, tiktoken_count_tokens() calls the internal plpython3u function "
+		"instead of the character-based approximation. Requires plpython3u and the "
+		"tiktoken Python package.",
+		&pgedge_vectorizer_use_tiktoken,
+		false,
 		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);

@@ -129,6 +129,74 @@ LANGUAGE C STRICT;
 COMMENT ON FUNCTION pgedge_vectorizer.bm25_tokenize IS
 'Tokenize text and return the non-stopword terms (useful for testing)';
 
+-- UTF-8 aware approximate token counter (C implementation)
+CREATE OR REPLACE FUNCTION pgedge_vectorizer.count_tokens(
+    p_text TEXT
+) RETURNS INT
+AS 'MODULE_PATHNAME', 'pgedge_vectorizer_count_tokens_sql'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION pgedge_vectorizer.count_tokens IS
+'Approximate token count using UTF-8 character counting (~4 chars/token).';
+
+-- Internal plpython3u implementation (created only if plpython3u is available)
+DO $tiktoken_init$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_language WHERE lanname = 'plpython3u') THEN
+        CREATE OR REPLACE FUNCTION pgedge_vectorizer._tiktoken_internal(
+            p_text     TEXT,
+            p_encoding TEXT DEFAULT 'cl100k_base'
+        ) RETURNS INT
+        LANGUAGE plpython3u STABLE STRICT
+        AS $py$
+            """Return the exact token count for p_text using the given tiktoken encoding."""
+            import tiktoken
+            enc = tiktoken.get_encoding(p_encoding)
+            return len(enc.encode(p_text))
+        $py$;
+        COMMENT ON FUNCTION pgedge_vectorizer._tiktoken_internal IS
+        'Internal plpython3u helper used by tiktoken_count_tokens(); do not call directly.';
+    END IF;
+END;
+$tiktoken_init$;
+
+-- Tiktoken-based token counting with graceful fallback to approximation
+CREATE OR REPLACE FUNCTION pgedge_vectorizer.tiktoken_count_tokens(
+    p_text     TEXT,
+    p_encoding TEXT DEFAULT 'cl100k_base'
+) RETURNS INT
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    result INT;
+BEGIN
+    IF p_text IS NULL OR p_text = '' THEN
+        RETURN 0;
+    END IF;
+
+    IF NOT COALESCE(
+        current_setting('pgedge_vectorizer.use_tiktoken', true),
+        'false'
+    )::BOOLEAN THEN
+        RETURN pgedge_vectorizer.count_tokens(p_text);
+    END IF;
+
+    -- use_tiktoken = on: delegate to plpython3u internal function
+    BEGIN
+        SELECT pgedge_vectorizer._tiktoken_internal(p_text, p_encoding) INTO result;
+        RETURN result;
+    EXCEPTION WHEN undefined_function THEN
+        RAISE NOTICE 'tiktoken: plpython3u or tiktoken not available, falling back to approximation';
+        RETURN pgedge_vectorizer.count_tokens(p_text);
+    END;
+END;
+$$;
+
+COMMENT ON FUNCTION pgedge_vectorizer.tiktoken_count_tokens IS
+'Count tokens using tiktoken when pgedge_vectorizer.use_tiktoken = on, '
+'otherwise returns a character-based approximation via count_tokens(). '
+'Requires plpython3u and the tiktoken Python package when use_tiktoken is on.';
+
 ---------------------------------------------------------------------------
 -- SQL Functions
 ---------------------------------------------------------------------------
@@ -344,7 +412,7 @@ BEGIN
                               (sparse_embedding IS NULL) AS needs_sparse',
                     chunk_table, chunk_table, chunk_table, chunk_table, chunk_table)
                 USING row_record.pk_val, i, chunk_text,
-                      length(chunk_text) / 4  -- Approximate token count
+                      pgedge_vectorizer.count_tokens(chunk_text)  -- UTF-8 aware token approximation
                 INTO chunk_id, needs_embedding, needs_sparse;
 
                 -- Queue if dense or sparse work is needed.
@@ -661,7 +729,7 @@ BEGIN
             VALUES ($1::%s, $2, $3, $4)
             RETURNING id', chunk_table, pk_type)
         USING source_id_val, i, chunk_text,
-              length(chunk_text) / 4  -- Approximate token count
+              pgedge_vectorizer.count_tokens(chunk_text)  -- UTF-8 aware token approximation
         INTO chunk_id;
 
         -- Queue for embedding
@@ -956,7 +1024,7 @@ BEGIN
                     VALUES ($1::%s, $2, $3, $4)
                     RETURNING id', chunk_table_name, pk_type)
                 USING row_record.pk_val, i, chunk_text,
-                      length(chunk_text) / 4  -- Approximate token count
+                      pgedge_vectorizer.count_tokens(chunk_text)  -- UTF-8 aware token approximation
                 INTO chunk_id;
 
                 -- Queue for embedding

@@ -1,0 +1,149 @@
+-- tiktoken.sql
+-- Regression tests for tiktoken integration (accurate token counting).
+-- All assertions are deterministic regardless of plpython3u availability.
+---------------------------------------------------------------------------
+-- Test 1: GUC pgedge_vectorizer.use_tiktoken is registered
+---------------------------------------------------------------------------
+SELECT name
+FROM pg_settings
+WHERE name = 'pgedge_vectorizer.use_tiktoken';
+              name              
+--------------------------------
+ pgedge_vectorizer.use_tiktoken
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 2: count_tokens() C function is registered
+---------------------------------------------------------------------------
+SELECT proname
+FROM pg_proc
+WHERE proname = 'count_tokens'
+  AND pronamespace = (
+      SELECT oid FROM pg_namespace WHERE nspname = 'pgedge_vectorizer'
+  );
+   proname    
+--------------
+ count_tokens
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 3: count_tokens() returns correct approximation values
+---------------------------------------------------------------------------
+-- 'hello world' = 11 chars, (11+3)/4 = 3
+SELECT pgedge_vectorizer.count_tokens('hello world') AS tokens;
+ tokens 
+--------
+      3
+(1 row)
+
+-- empty string returns 0
+SELECT pgedge_vectorizer.count_tokens('') AS tokens;
+ tokens 
+--------
+      0
+(1 row)
+
+-- 'test' = 4 chars, (4+3)/4 = 1
+SELECT pgedge_vectorizer.count_tokens('test') AS tokens;
+ tokens 
+--------
+      1
+(1 row)
+
+-- NULL input returns NULL (STRICT function)
+SELECT pgedge_vectorizer.count_tokens(NULL) IS NULL AS is_null;
+ is_null 
+---------
+ t
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 4: tiktoken_count_tokens() PL/pgSQL wrapper is registered
+---------------------------------------------------------------------------
+SELECT proname
+FROM pg_proc
+WHERE proname = 'tiktoken_count_tokens'
+  AND pronamespace = (
+      SELECT oid FROM pg_namespace WHERE nspname = 'pgedge_vectorizer'
+  );
+        proname        
+-----------------------
+ tiktoken_count_tokens
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 5: tiktoken_count_tokens() with use_tiktoken=off uses approximation
+---------------------------------------------------------------------------
+SET pgedge_vectorizer.use_tiktoken = off;
+-- (11+3)/4 = 3
+SELECT pgedge_vectorizer.tiktoken_count_tokens('hello world', 'cl100k_base') AS tokens;
+ tokens 
+--------
+      3
+(1 row)
+
+-- empty string returns 0
+SELECT pgedge_vectorizer.tiktoken_count_tokens('', 'cl100k_base') AS tokens;
+ tokens 
+--------
+      0
+(1 row)
+
+-- NULL input returns 0
+SELECT pgedge_vectorizer.tiktoken_count_tokens(NULL, 'cl100k_base') AS tokens;
+ tokens 
+--------
+      0
+(1 row)
+
+RESET pgedge_vectorizer.use_tiktoken;
+---------------------------------------------------------------------------
+-- Test 6: Integration - chunk table token_count is populated
+---------------------------------------------------------------------------
+CREATE TABLE tiktoken_test_docs (
+    id      BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+INSERT INTO tiktoken_test_docs (content)
+VALUES ('This is a test document for token count verification.');
+SELECT pgedge_vectorizer.enable_vectorization(
+    'tiktoken_test_docs'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "tiktoken_test_docs_content_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: tiktoken_test_docs -> tiktoken_test_docs_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Verify at least one chunk exists and all have a positive token_count
+SELECT COUNT(*) > 0 AS chunks_exist,
+       COALESCE(BOOL_AND(token_count > 0), false) AS all_positive
+FROM tiktoken_test_docs_content_chunks;
+ chunks_exist | all_positive 
+--------------+--------------
+ t            | t
+(1 row)
+
+---------------------------------------------------------------------------
+-- Cleanup
+---------------------------------------------------------------------------
+SELECT pgedge_vectorizer.disable_vectorization(
+    'tiktoken_test_docs'::regclass, 'content', true
+);
+NOTICE:  Vectorization disabled and chunk table dropped: tiktoken_test_docs_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE tiktoken_test_docs;

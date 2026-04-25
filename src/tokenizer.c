@@ -125,6 +125,30 @@ get_char_offset_for_tokens(const char *text, int target_tokens, const char *mode
 }
 
 /*
+ * SQL-callable wrapper for count_tokens
+ *
+ * Exposes the C token counting approximation to SQL as
+ * pgedge_vectorizer.count_tokens(text).
+ */
+PG_FUNCTION_INFO_V1(pgedge_vectorizer_count_tokens_sql);
+
+Datum
+pgedge_vectorizer_count_tokens_sql(PG_FUNCTION_ARGS)
+{
+	text	   *input;
+	char	   *str;
+	int			token_count;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	input = PG_GETARG_TEXT_PP(0);
+	str = text_to_cstring(input);
+	token_count = count_tokens(str, NULL);
+	PG_RETURN_INT32(token_count);
+}
+
+/*
  * Find a good break point near the target position
  *
  * Tries to break at sentence or paragraph boundaries if possible.
