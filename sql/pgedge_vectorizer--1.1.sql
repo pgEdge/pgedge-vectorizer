@@ -149,10 +149,13 @@ BEGIN
         ) RETURNS INT
         LANGUAGE plpython3u STABLE STRICT
         AS $py$
+            """Return the exact token count for p_text using the given tiktoken encoding."""
             import tiktoken
             enc = tiktoken.get_encoding(p_encoding)
             return len(enc.encode(p_text))
         $py$;
+        COMMENT ON FUNCTION pgedge_vectorizer._tiktoken_internal IS
+        'Internal plpython3u helper used by tiktoken_count_tokens(); do not call directly.';
     END IF;
 END;
 $tiktoken_init$;
