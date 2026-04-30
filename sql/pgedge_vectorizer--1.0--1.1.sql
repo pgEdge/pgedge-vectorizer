@@ -185,7 +185,7 @@ BEGIN
     BEGIN
         SELECT pgedge_vectorizer._tiktoken_internal(p_text, p_encoding) INTO result;
         RETURN result;
-    EXCEPTION WHEN undefined_function THEN
+    EXCEPTION WHEN OTHERS THEN
         RAISE NOTICE 'tiktoken: plpython3u or tiktoken not available, falling back to approximation';
         RETURN pgedge_vectorizer.count_tokens(p_text);
     END;
@@ -195,7 +195,9 @@ $$;
 COMMENT ON FUNCTION pgedge_vectorizer.tiktoken_count_tokens IS
 'Count tokens using tiktoken when pgedge_vectorizer.use_tiktoken = on, '
 'otherwise returns a character-based approximation via count_tokens(). '
-'Requires plpython3u and the tiktoken Python package when use_tiktoken is on.';
+'Requires plpython3u and the tiktoken Python package when use_tiktoken is on. '
+'Used by enable_vectorization() and recreate_chunks() for stored token_count accuracy. '
+'The vectorization_trigger() always uses count_tokens() for hot-path performance.';
 
 ---------------------------------------------------------------------------
 -- SQL Functions
@@ -412,7 +414,7 @@ BEGIN
                               (sparse_embedding IS NULL) AS needs_sparse',
                     chunk_table, chunk_table, chunk_table, chunk_table, chunk_table)
                 USING row_record.pk_val, i, chunk_text,
-                      pgedge_vectorizer.count_tokens(chunk_text)  -- UTF-8 aware token approximation
+                      pgedge_vectorizer.tiktoken_count_tokens(chunk_text)  -- uses tiktoken when use_tiktoken=on
                 INTO chunk_id, needs_embedding, needs_sparse;
 
                 -- Queue if dense or sparse work is needed.
@@ -1024,7 +1026,7 @@ BEGIN
                     VALUES ($1::%s, $2, $3, $4)
                     RETURNING id', chunk_table_name, pk_type)
                 USING row_record.pk_val, i, chunk_text,
-                      pgedge_vectorizer.count_tokens(chunk_text)  -- UTF-8 aware token approximation
+                      pgedge_vectorizer.tiktoken_count_tokens(chunk_text)  -- uses tiktoken when use_tiktoken=on
                 INTO chunk_id;
 
                 -- Queue for embedding
@@ -1043,6 +1045,33 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.recreate_chunks IS
 'Delete all chunks and recreate from source table (complete rebuild)';
+
+---------------------------------------------------------------------------
+-- refresh_token_counts() — recompute stored token_count for existing chunks
+---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION pgedge_vectorizer.refresh_token_counts(
+    p_chunk_table REGCLASS
+) RETURNS BIGINT AS $$
+DECLARE
+    rows_updated BIGINT;
+BEGIN
+    EXECUTE format(
+        'UPDATE %I SET token_count = pgedge_vectorizer.tiktoken_count_tokens(content)',
+        p_chunk_table::TEXT
+    );
+    GET DIAGNOSTICS rows_updated = ROW_COUNT;
+    RAISE NOTICE 'refresh_token_counts: updated % rows in %',
+        rows_updated, p_chunk_table::TEXT;
+    RETURN rows_updated;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.refresh_token_counts IS
+'Recompute token_count for every row in the given chunk table using the current '
+'tiktoken_count_tokens() setting. Useful after enabling use_tiktoken = on to '
+'back-fill accurate counts without a full recreate_chunks() rebuild. The '
+'vectorization_trigger() always uses count_tokens() for performance; call this '
+'function to align pre-existing rows.';
 
 -- Get configuration summary
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.show_config()
@@ -1258,6 +1287,10 @@ COMMENT ON FUNCTION pgedge_vectorizer.hybrid_search_simple IS
 ---------------------------------------------------------------------------
 -- Upgrade backfill for existing 1.0 vectorizers/chunk tables
 ---------------------------------------------------------------------------
+-- NOTE: Existing 1.0 chunk rows keep their approximation-based token_count.
+-- To refresh them after enabling use_tiktoken=on, run:
+--   SELECT pgedge_vectorizer.refresh_token_counts('<chunk_table>'::regclass);
+-- Not done automatically to avoid a full table rewrite during ALTER EXTENSION.
 DO $$
 DECLARE
     rec     RECORD;

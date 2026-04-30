@@ -62,6 +62,53 @@ SELECT pgedge_vectorizer.tiktoken_count_tokens(NULL, 'cl100k_base') AS tokens;
 RESET pgedge_vectorizer.use_tiktoken;
 
 ---------------------------------------------------------------------------
+-- Test 7: tiktoken_count_tokens() falls back on any exception (WHEN OTHERS)
+-- Simulates 'tiktoken package missing at runtime' by replacing _tiktoken_internal
+-- with a plpgsql stub that raises SQLSTATE 38000, then restoring it.
+-- Both DO blocks are no-ops when plpython3u is absent.
+---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_language WHERE lanname = 'plpython3u') THEN
+        EXECUTE $f$
+            CREATE OR REPLACE FUNCTION pgedge_vectorizer._tiktoken_internal(
+                p_text TEXT, p_encoding TEXT DEFAULT 'cl100k_base'
+            ) RETURNS INT LANGUAGE plpgsql AS $body$
+            BEGIN
+                RAISE EXCEPTION USING ERRCODE = '38000',
+                    MESSAGE = 'simulated tiktoken import error';
+            END;
+            $body$
+        $f$;
+    END IF;
+END;
+$$;
+
+SET pgedge_vectorizer.use_tiktoken = on;
+
+-- Should fall back gracefully and return a non-negative value
+SELECT pgedge_vectorizer.tiktoken_count_tokens('hello world') >= 0 AS fallback_works;
+
+RESET pgedge_vectorizer.use_tiktoken;
+
+-- Restore original _tiktoken_internal (no-op if plpython3u is absent)
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_language WHERE lanname = 'plpython3u') THEN
+        EXECUTE $f$
+            CREATE OR REPLACE FUNCTION pgedge_vectorizer._tiktoken_internal(
+                p_text TEXT, p_encoding TEXT DEFAULT 'cl100k_base'
+            ) RETURNS INT LANGUAGE plpython3u STABLE STRICT AS $py$
+                import tiktoken
+                enc = tiktoken.get_encoding(p_encoding)
+                return len(enc.encode(p_text))
+            $py$
+        $f$;
+    END IF;
+END;
+$$;
+
+---------------------------------------------------------------------------
 -- Test 6: Integration - chunk table token_count is populated
 ---------------------------------------------------------------------------
 CREATE TABLE tiktoken_test_docs (
@@ -85,6 +132,59 @@ SELECT pgedge_vectorizer.enable_vectorization(
 SELECT COUNT(*) > 0 AS chunks_exist,
        COALESCE(BOOL_AND(token_count > 0), false) AS all_positive
 FROM tiktoken_test_docs_content_chunks;
+
+---------------------------------------------------------------------------
+-- Test 8: refresh_token_counts() is registered
+---------------------------------------------------------------------------
+SELECT proname
+FROM pg_proc
+WHERE proname = 'refresh_token_counts'
+  AND pronamespace = (
+      SELECT oid FROM pg_namespace WHERE nspname = 'pgedge_vectorizer'
+  );
+
+---------------------------------------------------------------------------
+-- Test 9: refresh_token_counts() updates all rows and returns row count
+---------------------------------------------------------------------------
+CREATE TABLE tiktoken_refresh_test (
+    id      BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+
+INSERT INTO tiktoken_refresh_test (content)
+VALUES ('Refresh test document one.'),
+       ('Refresh test document two.');
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'tiktoken_refresh_test'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+
+-- Force all token_counts to 0 to simulate stale values
+UPDATE tiktoken_refresh_test_content_chunks SET token_count = 0;
+
+SELECT COUNT(*) AS zeroed
+FROM tiktoken_refresh_test_content_chunks
+WHERE token_count = 0;
+
+-- refresh_token_counts() should update all rows and return the count
+SELECT pgedge_vectorizer.refresh_token_counts(
+    'tiktoken_refresh_test_content_chunks'::regclass
+) >= 1 AS refresh_returned_count;
+
+-- Verify all token_counts are now positive
+SELECT COALESCE(BOOL_AND(token_count > 0), false) AS all_refreshed
+FROM tiktoken_refresh_test_content_chunks;
+
+-- Cleanup test 9
+SELECT pgedge_vectorizer.disable_vectorization(
+    'tiktoken_refresh_test'::regclass, 'content', true
+);
+DROP TABLE tiktoken_refresh_test;
 
 ---------------------------------------------------------------------------
 -- Cleanup

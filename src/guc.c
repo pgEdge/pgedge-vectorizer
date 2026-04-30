@@ -268,10 +268,13 @@ pgedge_vectorizer_init_guc(void)
 	/* Tiktoken configuration */
 	DefineCustomBoolVariable(
 		"pgedge_vectorizer.use_tiktoken",
-		"Use tiktoken (via plpython3u) for accurate token counting",
+		"Use tiktoken (via plpython3u) for accurate token counting in bulk operations",
 		"When enabled, tiktoken_count_tokens() calls the internal plpython3u function "
 		"instead of the character-based approximation. Requires plpython3u and the "
-		"tiktoken Python package.",
+		"tiktoken Python package. "
+		"Affects stored token_count in enable_vectorization() and recreate_chunks() "
+		"(bulk/backfill paths). The vectorization_trigger() always uses count_tokens() "
+		"for hot-path performance regardless of this setting.",
 		&pgedge_vectorizer_use_tiktoken,
 		false,
 		PGC_USERSET,
