@@ -233,7 +233,6 @@ BEGIN
         SELECT pgedge_vectorizer._tiktoken_internal(p_text, p_encoding) INTO result;
         RETURN result;
     EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE 'tiktoken: plpython3u or tiktoken not available, falling back to approximation';
         RETURN pgedge_vectorizer.count_tokens(p_text);
     END;
 END;
