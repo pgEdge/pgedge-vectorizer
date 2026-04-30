@@ -160,6 +160,46 @@ BEGIN
 END;
 $tiktoken_init$;
 
+-- Recovery path: (re)creates _tiktoken_internal when plpython3u is installed
+-- after the extension was first loaded.  Call via enable_tiktoken_support().
+CREATE FUNCTION pgedge_vectorizer.enable_tiktoken_support()
+RETURNS TEXT
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_language WHERE lanname = 'plpython3u') THEN
+        RETURN 'plpython3u is not available; install the postgresql-plpython3 '
+               'package for your PostgreSQL version and retry';
+    END IF;
+
+    EXECUTE $inner$
+        CREATE OR REPLACE FUNCTION pgedge_vectorizer._tiktoken_internal(
+            p_text     TEXT,
+            p_encoding TEXT DEFAULT 'cl100k_base'
+        ) RETURNS INT
+        LANGUAGE plpython3u STABLE STRICT
+        AS $py$
+            import tiktoken
+            enc = tiktoken.get_encoding(p_encoding)
+            return len(enc.encode(p_text))
+        $py$
+    $inner$;
+
+    EXECUTE $inner$
+        COMMENT ON FUNCTION pgedge_vectorizer._tiktoken_internal(TEXT, TEXT) IS
+        'Internal plpython3u helper used by tiktoken_count_tokens(); do not call directly.'
+    $inner$;
+
+    RETURN 'ok';
+END;
+$$;
+
+COMMENT ON FUNCTION pgedge_vectorizer.enable_tiktoken_support IS
+'Creates or recreates the _tiktoken_internal plpython3u helper. Call this '
+'after installing plpython3u (postgresql-plpython3-XX) and the tiktoken '
+'Python package when the extension was originally installed without plpython3u. '
+'Returns ''ok'' on success or a message describing what is missing.';
+
 -- Tiktoken-based token counting with graceful fallback to approximation
 CREATE FUNCTION pgedge_vectorizer.tiktoken_count_tokens(
     p_text     TEXT,
@@ -1056,8 +1096,8 @@ DECLARE
     rows_updated BIGINT;
 BEGIN
     EXECUTE format(
-        'UPDATE %I SET token_count = pgedge_vectorizer.tiktoken_count_tokens(content)',
-        p_chunk_table::TEXT
+        'UPDATE %s SET token_count = pgedge_vectorizer.tiktoken_count_tokens(content)',
+        p_chunk_table
     );
     GET DIAGNOSTICS rows_updated = ROW_COUNT;
     RAISE NOTICE 'refresh_token_counts: updated % rows in %',

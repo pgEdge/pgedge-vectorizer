@@ -86,8 +86,9 @@ $$;
 
 SET pgedge_vectorizer.use_tiktoken = on;
 
--- Should fall back gracefully and return a non-negative value
-SELECT pgedge_vectorizer.tiktoken_count_tokens('hello world') >= 0 AS fallback_works;
+-- Should fall back to count_tokens() approximation
+SELECT pgedge_vectorizer.tiktoken_count_tokens('hello world')
+     = pgedge_vectorizer.count_tokens('hello world') AS fallback_works;
 
 RESET pgedge_vectorizer.use_tiktoken;
 
