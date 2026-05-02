@@ -146,7 +146,7 @@ BEGIN
             ) RETURNS INT LANGUAGE plpython3u STABLE STRICT AS $py$
                 import tiktoken
                 enc = tiktoken.get_encoding(p_encoding)
-                return len(enc.encode(p_text))
+                return len(enc.encode(p_text, disallowed_special=()))
             $py$
         $f$;
     END IF;

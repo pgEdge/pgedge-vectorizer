@@ -152,7 +152,7 @@ BEGIN
             """Return the exact token count for p_text using the given tiktoken encoding."""
             import tiktoken
             enc = tiktoken.get_encoding(p_encoding)
-            return len(enc.encode(p_text))
+            return len(enc.encode(p_text, disallowed_special=()))
         $py$;
         COMMENT ON FUNCTION pgedge_vectorizer._tiktoken_internal IS
         'Internal plpython3u helper used by tiktoken_count_tokens(); do not call directly.';
@@ -181,9 +181,20 @@ BEGIN
         AS $py$
             import tiktoken
             enc = tiktoken.get_encoding(p_encoding)
-            return len(enc.encode(p_text))
+            return len(enc.encode(p_text, disallowed_special=()))
         $py$
     $inner$;
+
+    -- Register with the extension; silently skip if already a member
+    -- (happens when plpython3u was available at CREATE EXTENSION time).
+    BEGIN
+        EXECUTE $inner$
+            ALTER EXTENSION pgedge_vectorizer ADD FUNCTION
+                pgedge_vectorizer._tiktoken_internal(TEXT, TEXT)
+        $inner$;
+    EXCEPTION WHEN OTHERS THEN
+        NULL;
+    END;
 
     EXECUTE $inner$
         COMMENT ON FUNCTION pgedge_vectorizer._tiktoken_internal(TEXT, TEXT) IS
