@@ -1,0 +1,328 @@
+-- tiktoken.sql
+-- Regression tests for tiktoken integration (accurate token counting).
+-- All assertions are deterministic regardless of plpython3u availability.
+---------------------------------------------------------------------------
+-- Test 1: GUC pgedge_vectorizer.use_tiktoken is registered
+---------------------------------------------------------------------------
+SELECT name
+FROM pg_settings
+WHERE name = 'pgedge_vectorizer.use_tiktoken';
+              name              
+--------------------------------
+ pgedge_vectorizer.use_tiktoken
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 2: count_tokens() C function is registered
+---------------------------------------------------------------------------
+SELECT proname
+FROM pg_proc
+WHERE proname = 'count_tokens'
+  AND pronamespace = (
+      SELECT oid FROM pg_namespace WHERE nspname = 'pgedge_vectorizer'
+  );
+   proname    
+--------------
+ count_tokens
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 3: count_tokens() returns correct approximation values
+---------------------------------------------------------------------------
+-- 'hello world' = 11 chars, (11+3)/4 = 3
+SELECT pgedge_vectorizer.count_tokens('hello world') AS tokens;
+ tokens 
+--------
+      3
+(1 row)
+
+-- empty string returns 0
+SELECT pgedge_vectorizer.count_tokens('') AS tokens;
+ tokens 
+--------
+      0
+(1 row)
+
+-- 'test' = 4 chars, (4+3)/4 = 1
+SELECT pgedge_vectorizer.count_tokens('test') AS tokens;
+ tokens 
+--------
+      1
+(1 row)
+
+-- NULL input returns NULL (STRICT function)
+SELECT pgedge_vectorizer.count_tokens(NULL) IS NULL AS is_null;
+ is_null 
+---------
+ t
+(1 row)
+
+-- '你好世界' = 4 UTF-8 characters, not 12 bytes; (4+3)/4 = 1
+SELECT pgedge_vectorizer.count_tokens('你好世界') AS tokens;
+ tokens 
+--------
+      1
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 4: tiktoken_count_tokens() PL/pgSQL wrapper is registered
+---------------------------------------------------------------------------
+SELECT proname
+FROM pg_proc
+WHERE proname = 'tiktoken_count_tokens'
+  AND pronamespace = (
+      SELECT oid FROM pg_namespace WHERE nspname = 'pgedge_vectorizer'
+  );
+        proname        
+-----------------------
+ tiktoken_count_tokens
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 5: tiktoken_count_tokens() with use_tiktoken=off uses approximation
+---------------------------------------------------------------------------
+SET pgedge_vectorizer.use_tiktoken = off;
+-- (11+3)/4 = 3
+SELECT pgedge_vectorizer.tiktoken_count_tokens('hello world', 'cl100k_base') AS tokens;
+ tokens 
+--------
+      3
+(1 row)
+
+-- empty string returns 0
+SELECT pgedge_vectorizer.tiktoken_count_tokens('', 'cl100k_base') AS tokens;
+ tokens 
+--------
+      0
+(1 row)
+
+-- NULL input returns 0
+SELECT pgedge_vectorizer.tiktoken_count_tokens(NULL, 'cl100k_base') AS tokens;
+ tokens 
+--------
+      0
+(1 row)
+
+RESET pgedge_vectorizer.use_tiktoken;
+---------------------------------------------------------------------------
+-- Test 7: tiktoken_count_tokens() falls back on any exception (WHEN OTHERS)
+-- Simulates 'tiktoken package missing at runtime' by replacing _tiktoken_internal
+-- with a plpgsql stub that raises SQLSTATE 38000, then restoring it.
+-- Both DO blocks are no-ops when plpython3u is absent.
+---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_language WHERE lanname = 'plpython3u') THEN
+        EXECUTE $f$
+            CREATE OR REPLACE FUNCTION pgedge_vectorizer._tiktoken_internal(
+                p_text TEXT, p_encoding TEXT DEFAULT 'cl100k_base'
+            ) RETURNS INT LANGUAGE plpgsql AS $body$
+            BEGIN
+                RAISE EXCEPTION USING ERRCODE = '38000',
+                    MESSAGE = 'simulated tiktoken import error';
+            END;
+            $body$
+        $f$;
+    END IF;
+END;
+$$;
+SET pgedge_vectorizer.use_tiktoken = on;
+-- Should fall back to count_tokens() approximation
+SELECT pgedge_vectorizer.tiktoken_count_tokens('hello world')
+     = pgedge_vectorizer.count_tokens('hello world') AS fallback_works;
+ fallback_works 
+----------------
+ t
+(1 row)
+
+RESET pgedge_vectorizer.use_tiktoken;
+-- Restore original _tiktoken_internal (no-op if plpython3u is absent)
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_language WHERE lanname = 'plpython3u') THEN
+        EXECUTE $f$
+            CREATE OR REPLACE FUNCTION pgedge_vectorizer._tiktoken_internal(
+                p_text TEXT, p_encoding TEXT DEFAULT 'cl100k_base'
+            ) RETURNS INT LANGUAGE plpython3u STABLE STRICT AS $py$
+                import tiktoken
+                enc = tiktoken.get_encoding(p_encoding)
+                return len(enc.encode(p_text, disallowed_special=()))
+            $py$
+        $f$;
+    END IF;
+END;
+$$;
+---------------------------------------------------------------------------
+-- Test 6: Integration - chunk table token_count is populated
+---------------------------------------------------------------------------
+CREATE TABLE tiktoken_test_docs (
+    id      BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+INSERT INTO tiktoken_test_docs (content)
+VALUES ('This is a test document for token count verification.');
+SELECT pgedge_vectorizer.enable_vectorization(
+    'tiktoken_test_docs'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "tiktoken_test_docs_content_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: tiktoken_test_docs -> tiktoken_test_docs_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Verify at least one chunk exists and all have a positive token_count
+SELECT COUNT(*) > 0 AS chunks_exist,
+       COALESCE(BOOL_AND(token_count > 0), false) AS all_positive
+FROM tiktoken_test_docs_content_chunks;
+ chunks_exist | all_positive 
+--------------+--------------
+ t            | t
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 8: refresh_token_counts() is registered
+---------------------------------------------------------------------------
+SELECT proname
+FROM pg_proc
+WHERE proname = 'refresh_token_counts'
+  AND pronamespace = (
+      SELECT oid FROM pg_namespace WHERE nspname = 'pgedge_vectorizer'
+  );
+       proname        
+----------------------
+ refresh_token_counts
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 9: refresh_token_counts() updates all rows and returns row count
+---------------------------------------------------------------------------
+CREATE TABLE tiktoken_refresh_test (
+    id      BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+INSERT INTO tiktoken_refresh_test (content)
+VALUES ('Refresh test document one.'),
+       ('Refresh test document two.');
+SELECT pgedge_vectorizer.enable_vectorization(
+    'tiktoken_refresh_test'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "tiktoken_refresh_test_content_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: tiktoken_refresh_test -> tiktoken_refresh_test_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 2 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Force all token_counts to 0 to simulate stale values
+UPDATE tiktoken_refresh_test_content_chunks SET token_count = 0;
+SELECT COUNT(*) AS zeroed
+FROM tiktoken_refresh_test_content_chunks
+WHERE token_count = 0;
+ zeroed 
+--------
+      2
+(1 row)
+
+-- refresh_token_counts() should update all rows and return the count
+SELECT pgedge_vectorizer.refresh_token_counts(
+    'tiktoken_refresh_test_content_chunks'::regclass
+) >= 1 AS refresh_returned_count;
+NOTICE:  refresh_token_counts: updated 2 rows in tiktoken_refresh_test_content_chunks
+ refresh_returned_count 
+------------------------
+ t
+(1 row)
+
+-- Verify all token_counts are now positive
+SELECT COALESCE(BOOL_AND(token_count > 0), false) AS all_refreshed
+FROM tiktoken_refresh_test_content_chunks;
+ all_refreshed 
+---------------
+ t
+(1 row)
+
+-- Cleanup test 9
+SELECT pgedge_vectorizer.disable_vectorization(
+    'tiktoken_refresh_test'::regclass, 'content', true
+);
+NOTICE:  Vectorization disabled and chunk table dropped: tiktoken_refresh_test_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE tiktoken_refresh_test;
+---------------------------------------------------------------------------
+-- Test 10: refresh_token_counts() works with a schema-qualified chunk table
+-- Exercises the %s/REGCLASS fix to ensure non-default schemas are handled.
+---------------------------------------------------------------------------
+CREATE SCHEMA tiktoken_ns_test;
+CREATE TABLE tiktoken_ns_test.ns_chunks (
+    id          BIGSERIAL PRIMARY KEY,
+    source_id   BIGINT    NOT NULL DEFAULT 1,
+    content     TEXT      NOT NULL,
+    token_count INT
+);
+INSERT INTO tiktoken_ns_test.ns_chunks (content)
+VALUES ('Schema-qualified refresh test.'),
+       ('Another row for schema test.');
+UPDATE tiktoken_ns_test.ns_chunks SET token_count = 0;
+SELECT COUNT(*) AS zeroed
+FROM tiktoken_ns_test.ns_chunks
+WHERE token_count = 0;
+ zeroed 
+--------
+      2
+(1 row)
+
+SELECT pgedge_vectorizer.refresh_token_counts(
+    'tiktoken_ns_test.ns_chunks'::regclass
+) >= 1 AS refresh_returned_count;
+NOTICE:  refresh_token_counts: updated 2 rows in tiktoken_ns_test.ns_chunks
+ refresh_returned_count 
+------------------------
+ t
+(1 row)
+
+SELECT COALESCE(BOOL_AND(token_count > 0), false) AS all_refreshed
+FROM tiktoken_ns_test.ns_chunks;
+ all_refreshed 
+---------------
+ t
+(1 row)
+
+-- Cleanup test 10
+DROP TABLE tiktoken_ns_test.ns_chunks;
+DROP SCHEMA tiktoken_ns_test;
+---------------------------------------------------------------------------
+-- Cleanup
+---------------------------------------------------------------------------
+SELECT pgedge_vectorizer.disable_vectorization(
+    'tiktoken_test_docs'::regclass, 'content', true
+);
+NOTICE:  Vectorization disabled and chunk table dropped: tiktoken_test_docs_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE tiktoken_test_docs;

@@ -4,6 +4,22 @@ All notable changes to pgEdge Vectorizer will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1] - 2026-05-01
+
+### Added
+
+- Tiktoken integration for accurate token counting
+    - New `pgedge_vectorizer.use_tiktoken` GUC (default `off`) — set to `on` to use tiktoken via plpython3u
+    - `tiktoken_count_tokens(text, encoding)` — counts tokens via tiktoken when enabled, falls back to approximation with a NOTICE on any error
+    - `enable_tiktoken_support()` — creates the plpython3u helper after plpython3u/tiktoken are installed post-extension-load; returns `'ok'` on success or a descriptive error if tiktoken cannot be imported at runtime
+    - `refresh_token_counts(chunk_table regclass)` — recomputes `token_count` for all rows in a chunk table using the current token-counting setting; useful for backfilling accurate counts after enabling `use_tiktoken = on`
+- BM25 sparse vector support for hybrid (dense + sparse) search
+- `hybrid_search()` function combining dense cosine similarity and BM25 sparse scoring via Reciprocal Rank Fusion
+
+### Fixed
+
+- `refresh_token_counts()` now correctly handles schema-qualified chunk tables via `REGCLASS` parameter
+
 ## [1.0] - 2026-03-13
 
 ### Added

@@ -156,6 +156,9 @@ RESET pgedge_vectorizer.enable_hybrid;
 -- Test 13: hybrid_search raises when enable_hybrid is false
 ---------------------------------------------------------------------------
 
+-- Explicitly disable hybrid search regardless of postgresql.conf value
+SET pgedge_vectorizer.enable_hybrid = false;
+
 DO $$
 BEGIN
     PERFORM pgedge_vectorizer.hybrid_search(
@@ -171,6 +174,8 @@ EXCEPTION
         END IF;
 END;
 $$;
+
+RESET pgedge_vectorizer.enable_hybrid;
 
 ---------------------------------------------------------------------------
 -- Test 14: bm25_query_vector returns a non-null sparsevec

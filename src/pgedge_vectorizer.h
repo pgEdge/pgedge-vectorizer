@@ -73,6 +73,11 @@ extern double pgedge_vectorizer_bm25_k1;
 extern double pgedge_vectorizer_bm25_b;
 
 /*
+ * GUC Variables - Tiktoken configuration
+ */
+extern bool pgedge_vectorizer_use_tiktoken;
+
+/*
  * Chunking strategy enumeration
  */
 typedef enum
