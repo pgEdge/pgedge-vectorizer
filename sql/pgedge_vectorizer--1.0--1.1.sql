@@ -355,7 +355,7 @@ BEGIN
                               (sparse_embedding IS NULL) AS needs_sparse',
                     chunk_table, chunk_table, chunk_table, chunk_table, chunk_table)
                 USING row_record.pk_val, i, chunk_text,
-                      length(chunk_text) / 4  -- Approximate token count
+                      pgedge_vectorizer.count_tokens(chunk_text)
                 INTO chunk_id, needs_embedding, needs_sparse;
 
                 -- Queue if dense or sparse work is needed.
@@ -672,7 +672,7 @@ BEGIN
             VALUES ($1::%s, $2, $3, $4)
             RETURNING id', chunk_table, pk_type)
         USING source_id_val, i, chunk_text,
-              length(chunk_text) / 4  -- Approximate token count
+              pgedge_vectorizer.count_tokens(chunk_text)
         INTO chunk_id;
 
         -- Queue for embedding
@@ -967,7 +967,7 @@ BEGIN
                     VALUES ($1::%s, $2, $3, $4)
                     RETURNING id', chunk_table_name, pk_type)
                 USING row_record.pk_val, i, chunk_text,
-                      length(chunk_text) / 4  -- Approximate token count
+                      pgedge_vectorizer.count_tokens(chunk_text)
                 INTO chunk_id;
 
                 -- Queue for embedding
