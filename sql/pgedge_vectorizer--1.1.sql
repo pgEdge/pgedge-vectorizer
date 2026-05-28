@@ -129,6 +129,17 @@ LANGUAGE C STRICT;
 COMMENT ON FUNCTION pgedge_vectorizer.bm25_tokenize IS
 'Tokenize text and return the non-stopword terms (useful for testing)';
 
+-- UTF-8 aware approximate token counter (C implementation)
+CREATE FUNCTION pgedge_vectorizer.count_tokens(
+    p_text TEXT
+) RETURNS INT
+AS 'MODULE_PATHNAME', 'pgedge_vectorizer_count_tokens_sql'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION pgedge_vectorizer.count_tokens IS
+'Approximate token count using UTF-8 character counting (~4 chars/token). '
+'Used internally by the chunking engine and for stored token_count values.';
+
 ---------------------------------------------------------------------------
 -- SQL Functions
 ---------------------------------------------------------------------------
@@ -975,6 +986,33 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.recreate_chunks IS
 'Delete all chunks and recreate from source table (complete rebuild)';
+
+---------------------------------------------------------------------------
+-- refresh_token_counts() — recompute stored token_count for existing chunks
+---------------------------------------------------------------------------
+
+CREATE FUNCTION pgedge_vectorizer.refresh_token_counts(
+    p_chunk_table REGCLASS
+) RETURNS BIGINT AS $$
+DECLARE
+    rows_updated BIGINT;
+BEGIN
+    EXECUTE format(
+        'UPDATE %s SET token_count = pgedge_vectorizer.count_tokens(content)',
+        p_chunk_table
+    );
+    GET DIAGNOSTICS rows_updated = ROW_COUNT;
+    RAISE NOTICE 'refresh_token_counts: updated % rows in %',
+        rows_updated, p_chunk_table::TEXT;
+    RETURN rows_updated;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.refresh_token_counts IS
+'Recompute token_count for every row in the given chunk table using '
+'count_tokens(). Useful for back-filling accurate counts after adding '
+'new rows outside the normal trigger path, or after a schema change. '
+'Returns the number of rows updated.';
 
 -- Get configuration summary
 CREATE FUNCTION pgedge_vectorizer.show_config()
