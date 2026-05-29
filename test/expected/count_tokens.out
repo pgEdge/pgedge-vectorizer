@@ -105,10 +105,12 @@ WHERE token_count = 0;
       2
 (1 row)
 
--- refresh_token_counts() should update all rows and return the count
+-- refresh_token_counts() should update all rows and return the exact count
 SELECT pgedge_vectorizer.refresh_token_counts(
     'count_tokens_refresh_test_content_chunks'::regclass
-) >= 1 AS refresh_returned_count;
+) = (
+    SELECT COUNT(*) FROM count_tokens_refresh_test_content_chunks
+) AS refresh_returned_count;
 NOTICE:  refresh_token_counts: updated 2 rows in count_tokens_refresh_test_content_chunks
  refresh_returned_count 
 ------------------------
@@ -158,7 +160,9 @@ WHERE token_count = 0;
 
 SELECT pgedge_vectorizer.refresh_token_counts(
     'count_tokens_ns_test.ns_chunks'::regclass
-) >= 1 AS refresh_returned_count;
+) = (
+    SELECT COUNT(*) FROM count_tokens_ns_test.ns_chunks
+) AS refresh_returned_count;
 NOTICE:  refresh_token_counts: updated 2 rows in count_tokens_ns_test.ns_chunks
  refresh_returned_count 
 ------------------------

@@ -998,7 +998,9 @@ DECLARE
     rows_updated BIGINT;
 BEGIN
     EXECUTE format(
-        'UPDATE %s SET token_count = pgedge_vectorizer.count_tokens(content)',
+        'UPDATE %s
+         SET    token_count = pgedge_vectorizer.count_tokens(content)
+         WHERE  token_count IS DISTINCT FROM pgedge_vectorizer.count_tokens(content)',
         p_chunk_table
     );
     GET DIAGNOSTICS rows_updated = ROW_COUNT;
