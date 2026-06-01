@@ -82,6 +82,16 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		return NULL;
 	}
 
+	/* Bound the read to guard against a misconfigured path (CWE-20) */
+	if (st.st_size > MAX_API_KEY_FILE_SIZE)
+	{
+		*error_msg = psprintf("API key file %s is too large (%lld bytes; limit %d)",
+							  expanded_path, (long long) st.st_size,
+							  MAX_API_KEY_FILE_SIZE);
+		pfree(expanded_path);
+		return NULL;
+	}
+
 	if (st.st_mode & (S_IRWXG | S_IRWXO))
 		elog(WARNING, "API key file %s has permissive permissions (should be 0600)",
 			 expanded_path);
