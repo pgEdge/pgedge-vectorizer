@@ -26,11 +26,8 @@ provider_write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 	size_t realsize = size * nmemb;
 	ResponseBuffer *mem = (ResponseBuffer *) userp;
 
-	char *ptr = repalloc(mem->data, mem->size + realsize + 1);
-	if (!ptr)
-		return 0;  /* Out of memory */
-
-	mem->data = ptr;
+	/* repalloc never returns NULL - it throws on allocation failure */
+	mem->data = repalloc(mem->data, mem->size + realsize + 1);
 	/* flawfinder: ignore - buffer was realloced to mem->size + realsize + 1 */
 	memcpy(&(mem->data[mem->size]), contents, realsize);  /* nosemgrep */
 	mem->size += realsize;
@@ -240,7 +237,7 @@ provider_parse_float_array(const char **pos, float *output, int dim)
 
 		/* Read numeric value */
 		value_pos = 0;
-		while (*p && (isdigit(*p) || *p == '.' || *p == '-' ||
+		while (*p && (isdigit((unsigned char) *p) || *p == '.' || *p == '-' ||
 					  *p == '+' || *p == 'e' || *p == 'E'))
 		{
 			if (value_pos < (int) sizeof(value_buf) - 1)
