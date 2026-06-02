@@ -4,6 +4,25 @@ All notable changes to pgEdge Vectorizer will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+
+- Hardened API key file loading in OpenAI and Voyage providers (#17)
+    - Reject API key files larger than 4096 bytes (`MAX_API_KEY_FILE_SIZE`) before
+      reading, preventing unbounded memory allocation (CWE-20 / CWE-120)
+    - Replaced the `stat()`-then-`fopen()` pattern with `open(O_RDONLY|O_CLOEXEC)`
+      + `fstat()` + `fdopen()` to close a TOCTOU race where the file could be
+      swapped between check and open
+    - Added an `S_ISREG()` check to reject non-regular files (devices, FIFOs,
+      directories) and a runtime byte counter that aborts the read if the file
+      grows past the limit mid-read
+- Stopped trusting the `HOME` environment variable when expanding `~` in API key
+  paths; `expand_tilde()` now uses `getpwuid(geteuid())` so an attacker-controlled
+  environment cannot redirect the path (CWE-807)
+- Replaced `strncpy` + manual null-termination in the background worker with
+  `strlcpy`, guaranteeing null termination of the database name buffer (CWE-120)
+
 ## [1.0] - 2026-03-13
 
 ### Added
