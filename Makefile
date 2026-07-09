@@ -63,13 +63,17 @@ endif
 include $(PGXS)
 
 # Version compatibility check
-pg_version_num := $(shell $(PG_CONFIG) --version | sed 's/^PostgreSQL *//' | \
-	sed 's/\([0-9]*\)\.\([0-9]*\).*/\1\2/')
+# Extract only the leading major version integer. This must cope with
+# pre-release strings such as "PostgreSQL 19beta1 (Ubuntu 19~beta1-1.noble)"
+# where there is no MAJOR.MINOR dot; a dotted regex would leave the whole
+# descriptive string (including the "(...)" suffix) in place and break the
+# shell test below under dash (/bin/sh on Debian/Ubuntu).
+pg_version_num := $(shell $(PG_CONFIG) --version | sed -E 's/^PostgreSQL ([0-9]+).*/\1/')
 
 # Ensure we're building for PostgreSQL 14+
 check-pg-version:
 	@echo "Building for PostgreSQL version: $(shell $(PG_CONFIG) --version)"
-	@if [ $(pg_version_num) -lt 14 ]; then \
+	@if [ "$(pg_version_num)" -lt 14 ]; then \
 		echo "Error: PostgreSQL 14 or later is required"; \
 		exit 1; \
 	fi
