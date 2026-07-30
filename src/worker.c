@@ -132,6 +132,7 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	char *db_list;
 	char *db_name;
 	char *db_copy;
+	char *db_saveptr;
 	int db_count = 0;
 	bool extension_exists = false;
 	int ext_retry_interval = 5000;	/* Start at 5s, doubles up to max */
@@ -185,8 +186,12 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	db_list = pstrdup(pgedge_vectorizer_databases);
 	db_copy = db_list;
 
-	/* Count databases */
-	while ((db_name = strtok(db_copy, ",")) != NULL)
+	/*
+	 * Count databases.  Use strtok_r() rather than strtok(): the latter keeps
+	 * its parsing position in a single process-wide static, so any other
+	 * strtok() caller reached from this loop would silently corrupt it.
+	 */
+	while ((db_name = strtok_r(db_copy, ",", &db_saveptr)) != NULL)
 	{
 		db_copy = NULL;
 		db_count++;
@@ -206,9 +211,15 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 
 	for (int i = 0; i <= (worker_id % db_count); i++)
 	{
-		db_name = strtok(db_copy, ",");
+		db_name = strtok_r(db_copy, ",", &db_saveptr);
 		db_copy = NULL;
 	}
+
+	/*
+	 * The count pass found db_count tokens and worker_id % db_count is less
+	 * than that, so the loop above cannot have run off the end of the list.
+	 */
+	Assert(db_name != NULL);
 
 	/* Trim whitespace */
 	while (*db_name == ' ' || *db_name == '\t')
