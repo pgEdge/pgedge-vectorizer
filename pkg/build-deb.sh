@@ -40,11 +40,17 @@ build() {
   DISTRO=$(lsb_release -cs)
   # PGEDGE_VECTORIZER_DEB_VERSION carries the '~<pretag>' form for pre-releases
   # so they sort below stable; it equals PGEDGE_VECTORIZER_VERSION for a GA build.
+  # A Debian changelog entry needs a blank line after the header and before the
+  # maintainer trailer. Written in final form, so no dch pass is needed — dch
+  # with this same version appended a duplicate entry instead of editing.
   rm -rf debian/changelog
-  echo "pgedge-vectorizer (${PGEDGE_VECTORIZER_DEB_VERSION}-${PGEDGE_VECTORIZER_BUILDNUM}.${DISTRO}) unstable; urgency=low" >> debian/changelog
-  echo "  * Update Release." >> debian/changelog
-  echo " -- pgEdge Build Team <support@pgedge.com>  $(date -R)" >> debian/changelog
-  dch -D "$DISTRO" --force-distribution -v "${PGEDGE_VECTORIZER_DEB_VERSION}-${PGEDGE_VECTORIZER_BUILDNUM}.${DISTRO}" "pgEdge pgedge-vectorizer $PGEDGE_VECTORIZER_DEB_VERSION for $DISTRO"
+  {
+      echo "pgedge-vectorizer (${PGEDGE_VECTORIZER_DEB_VERSION}-${PGEDGE_VECTORIZER_BUILDNUM}.${DISTRO}) ${DISTRO}; urgency=low"
+      echo ""
+      echo "  * Update Release."
+      echo ""
+      echo " -- pgEdge Build Team <support@pgedge.com>  $(date -R)"
+  } > debian/changelog
 
   PATH=/usr/lib/postgresql/${PG_MAJOR_VERSION}/bin:$PATH dpkg-buildpackage -us -uc -b
 }

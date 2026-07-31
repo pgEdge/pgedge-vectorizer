@@ -6,7 +6,7 @@ RHEL="$(rpm --eval %rhel)"
 prepare() {
   setup_dnf_build_env
   echo "Copying packaging files..."
-  cp ${COMPONENT_NAME}/rpm/pgedge_vectorizer.spec ~/rpmbuild/SPECS/
+  cp "${COMPONENT_DIR}/rpm/pgedge_vectorizer.spec" ~/rpmbuild/SPECS/
 
   # The spec's Source0 basename is v<version>.tar.gz, while %setup expects the
   # pgedge-vectorizer-<version>/ directory inside it — which is what
