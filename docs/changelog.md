@@ -22,6 +22,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   environment cannot redirect the path (CWE-807)
 - Replaced `strncpy` + manual null-termination in the background worker with
   `strlcpy`, guaranteeing null termination of the database name buffer (CWE-120)
+- Pinned all GitHub Actions in the CI workflow to full commit SHAs rather than
+  mutable `@v4` tags, so a repointed tag in an upstream action cannot silently
+  change what runs in CI (CWE-1357)
+- Replaced `strtok()` with `strtok_r()` when parsing
+  `pgedge_vectorizer.databases` in the background worker; `strtok()` keeps its
+  parsing position in a single process-wide static, which any other `strtok()`
+  caller reached from the same loop would corrupt (CWE-676)
 
 ## [1.0] - 2026-03-13
 
