@@ -1,0 +1,31 @@
+Source: pgedge-vectorizer
+Section: database
+Priority: optional
+Maintainer: pgEdge Build Team <support@pgedge.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ pgedge-postgresql-all <!nocheck>,
+ pgedge-postgresql-server-dev-PG_MAJOR_VERSION,
+ pgedge-postgresql-server-dev-all,
+ libcurl4-openssl-dev,
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/pgEdge/pgedge-vectorizer
+
+Package: pgedge-postgresql-PG_MAJOR_VERSION-vectorizer
+Architecture: any
+Depends:
+ ${misc:Depends},
+ pgedge-postgresql-PG_MAJOR_VERSION,
+ pgedge-postgresql-PG_MAJOR_VERSION-pgvector,
+ libcurl4,
+ ${shlibs:Depends},
+Conflicts:
+ postgresql-PG_MAJOR_VERSION-vectorizer,
+Provides:
+ postgresql-PG_MAJOR_VERSION-vectorizer,
+Replaces:
+ postgresql-PG_MAJOR_VERSION-vectorizer,
+Breaks:
+ postgresql-PG_MAJOR_VERSION-vectorizer,
+Description: A PostgreSQL extension to create chunk tables for existing text data, and populate them with embeddings using your favourite LLM
