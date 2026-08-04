@@ -17,11 +17,13 @@
 
 #include "commands/dbcommands.h"
 #include "pgstat.h"
+#include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "storage/proc.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/timestamp.h"
 
 /* Signal flags */
 static volatile sig_atomic_t got_sigterm = false;
@@ -30,13 +32,59 @@ static volatile sig_atomic_t got_sighup = false;
 /* Last cleanup timestamp */
 static time_t last_cleanup_time = 0;
 
+/*
+ * Launcher state
+ *
+ * All of this is process-local: there is deliberately no shared memory
+ * segment, which avoids RequestAddinShmemSpace() and the shmem_request_hook
+ * that does not exist before PostgreSQL 15.
+ *
+ * The cost is that a restarted launcher cannot rediscover workers started by
+ * its predecessor, so a launcher crash may briefly leave two workers on one
+ * database. That is harmless: queue rows are claimed with FOR UPDATE SKIP
+ * LOCKED, so concurrent workers simply take disjoint rows.
+ */
+typedef struct LauncherSlot
+{
+	char		dbname[NAMEDATALEN];
+	BackgroundWorkerHandle *handle;
+	bool		terminating;	/* asked to stop; awaiting confirmation */
+} LauncherSlot;
+
+static LauncherSlot launcher_slots[PGEDGE_VECTORIZER_MAX_WORKERS];
+static int	launcher_nslots = 0;
+static int	launcher_cursor = 0;	/* round-robin position in the database list */
+
+/*
+ * Sweep intervals.
+ *
+ * Workers are registered with bgw_notify_pid set to the launcher, but that
+ * notification was observed not to wake a launcher holding no database
+ * connection, so the sweep interval rather than the notification is what
+ * bounds how quickly a freed slot is refilled. Do not rely on the latch being
+ * set when a worker exits.
+ *
+ * When there are more databases than slots, databases are queued waiting for a
+ * turn and refill latency directly limits throughput, so sweep briskly. When
+ * every database has its own worker there is nothing to refill and the sweep
+ * only needs to notice configuration changes, so sweep rarely.
+ */
+#define LAUNCHER_SWEEP_INTERVAL_ROTATING_MS		1000
+#define LAUNCHER_SWEEP_INTERVAL_IDLE_MS			60000
+
 /* Forward declarations */
 static void worker_sigterm(SIGNAL_ARGS);
 static void worker_sighup(SIGNAL_ARGS);
-static void process_queue_batch(int worker_id);
-static void cleanup_completed_items(int worker_id);
+static void process_queue_batch(const char *dbname);
+static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
 							 const float *embedding, int dim);
+static int	parse_database_list(char ***names);
+static BackgroundWorkerHandle *launch_worker_for_database(const char *dbname,
+														  int quantum_secs);
+static void launcher_reap_workers(void);
+static bool database_has_worker(const char *dbname);
+static void launcher_sweep(char **db_names, int db_count);
 
 /*
  * Signal handler for SIGTERM
@@ -72,26 +120,402 @@ register_background_workers(void)
 {
 	BackgroundWorker worker;
 
-	for (int i = 0; i < pgedge_vectorizer_num_workers; i++)
+	memset(&worker, 0, sizeof(BackgroundWorker));
+
+	/*
+	 * The launcher needs shared memory access so that it can register dynamic
+	 * workers, but deliberately takes no database connection: the database
+	 * list comes from a GUC rather than the catalogue, so it needs neither SPI
+	 * nor a backend. That keeps its crash surface very small.
+	 */
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	worker.bgw_restart_time = 10;  /* Restart after 10 seconds if it crashes */
+
+	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgedge_vectorizer");
+	snprintf(worker.bgw_function_name, BGW_MAXLEN,
+			 "pgedge_vectorizer_launcher_main");
+	snprintf(worker.bgw_name, BGW_MAXLEN, "pgedge_vectorizer launcher");
+	snprintf(worker.bgw_type, BGW_MAXLEN, "pgedge_vectorizer");
+
+	worker.bgw_main_arg = (Datum) 0;
+	worker.bgw_notify_pid = 0;
+
+	RegisterBackgroundWorker(&worker);
+}
+
+/*
+ * Parse pgedge_vectorizer.databases into a palloc'd array of trimmed names.
+ *
+ * Returns the number of names found, with *names set to a palloc'd array of
+ * palloc'd strings. Returns 0 with *names set to NULL when nothing is
+ * configured. Empty entries produced by stray commas are skipped.
+ */
+static int
+parse_database_list(char ***names)
+{
+	char	   *list;
+	char	   *tok;
+	char	   *saveptr = NULL;
+	char	  **result;
+	int			count = 0;
+	int			capacity = 8;
+
+	if (pgedge_vectorizer_databases == NULL ||
+		pgedge_vectorizer_databases[0] == '\0')
 	{
-		memset(&worker, 0, sizeof(BackgroundWorker));
-
-		/* Set worker properties */
-		worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
-						   BGWORKER_BACKEND_DATABASE_CONNECTION;
-		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-		worker.bgw_restart_time = 10;  /* Restart after 10 seconds if crashes */
-
-		snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgedge_vectorizer");
-		snprintf(worker.bgw_function_name, BGW_MAXLEN, "pgedge_vectorizer_worker_main");
-		snprintf(worker.bgw_name, BGW_MAXLEN, "pgedge_vectorizer worker %d", i + 1);
-		snprintf(worker.bgw_type, BGW_MAXLEN, "pgedge_vectorizer");
-
-		worker.bgw_main_arg = Int32GetDatum(i);
-		worker.bgw_notify_pid = 0;
-
-		RegisterBackgroundWorker(&worker);
+		*names = NULL;
+		return 0;
 	}
+
+	result = palloc(capacity * sizeof(char *));
+	list = pstrdup(pgedge_vectorizer_databases);
+
+	/*
+	 * Use strtok_r() rather than strtok(): the latter keeps its parsing
+	 * position in a single process-wide static, so any other strtok() caller
+	 * reached from this loop would silently corrupt it.
+	 */
+	for (tok = strtok_r(list, ",", &saveptr); tok != NULL;
+		 tok = strtok_r(NULL, ",", &saveptr))
+	{
+		char	   *name = tok;
+		int			len;
+
+		/* Trim leading whitespace */
+		while (*name == ' ' || *name == '\t')
+			name++;
+
+		/* Trim trailing whitespace */
+		len = strlen(name);
+		while (len > 0 && (name[len - 1] == ' ' || name[len - 1] == '\t'))
+			name[--len] = '\0';
+
+		if (len == 0)
+			continue;
+
+		if (count == capacity)
+		{
+			capacity *= 2;
+			result = repalloc(result, capacity * sizeof(char *));
+		}
+
+		result[count++] = pstrdup(name);
+	}
+
+	pfree(list);
+	*names = result;
+	return count;
+}
+
+/*
+ * Spawn a worker for one database.
+ *
+ * Returns the handle, or NULL when no worker slot could be obtained, which
+ * normally means max_worker_processes is exhausted.
+ */
+static BackgroundWorkerHandle *
+launch_worker_for_database(const char *dbname, int quantum_secs)
+{
+	BackgroundWorker worker;
+	BackgroundWorkerHandle *handle;
+
+	memset(&worker, 0, sizeof(BackgroundWorker));
+
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS |
+					   BGWORKER_BACKEND_DATABASE_CONNECTION;
+	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+
+	/*
+	 * The launcher owns respawn, so the postmaster must not resurrect a worker
+	 * for a database that has since been removed from the configuration.
+	 */
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+
+	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pgedge_vectorizer");
+	snprintf(worker.bgw_function_name, BGW_MAXLEN,
+			 "pgedge_vectorizer_worker_main");
+	snprintf(worker.bgw_name, BGW_MAXLEN,
+			 "pgedge_vectorizer worker (%s)", dbname);
+	snprintf(worker.bgw_type, BGW_MAXLEN, "pgedge_vectorizer");
+
+	/*
+	 * bgw_main_arg is a single Datum and cannot carry a string, so the target
+	 * database name travels in bgw_extra. That leaves the Datum free for the
+	 * service quantum, which only the launcher can compute because only it
+	 * knows whether we are oversubscribed.
+	 */
+	worker.bgw_main_arg = Int32GetDatum(quantum_secs);
+	strlcpy(worker.bgw_extra, dbname, NAMEDATALEN);
+
+	/* Be signalled when this worker starts or stops */
+	worker.bgw_notify_pid = MyProcPid;
+
+	if (!RegisterDynamicBackgroundWorker(&worker, &handle))
+		return NULL;
+
+	return handle;
+}
+
+/*
+ * Drop tracking entries for workers that have exited.
+ */
+static void
+launcher_reap_workers(void)
+{
+	int			i = 0;
+
+	while (i < launcher_nslots)
+	{
+		pid_t		pid;
+
+		if (GetBackgroundWorkerPid(launcher_slots[i].handle, &pid) == BGWH_STOPPED)
+		{
+			pfree(launcher_slots[i].handle);
+
+			/* Compact the array by moving the final entry into the hole */
+			launcher_slots[i] = launcher_slots[launcher_nslots - 1];
+			launcher_nslots--;
+		}
+		else
+			i++;
+	}
+}
+
+/*
+ * Is this database already covered?
+ *
+ * Workers that have been asked to stop still count, so that we do not spawn a
+ * replacement alongside one that is still shutting down.
+ */
+static bool
+database_has_worker(const char *dbname)
+{
+	for (int i = 0; i < launcher_nslots; i++)
+	{
+		if (strcmp(launcher_slots[i].dbname, dbname) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * One pass over the database list, spawning workers where they are missing.
+ *
+ * Databases are visited from a persistent cursor rather than always from the
+ * head of the list. Combined with the service quantum that makes busy workers
+ * relinquish their slots, this is what guarantees that every database is
+ * eventually serviced when there are more databases than slots.
+ */
+static void
+launcher_sweep(char **db_names, int db_count)
+{
+	int			quantum;
+	int			visited;
+	int			live = 0;
+	bool		warned = false;
+
+	if (db_count == 0)
+		return;
+
+	/*
+	 * A quantum is only meaningful when we cannot give every database its own
+	 * worker. When we can, workers stay resident and there is no churn at all,
+	 * which keeps the common case behaving as it did before.
+	 */
+	quantum = (db_count > pgedge_vectorizer_num_workers)
+		? pgedge_vectorizer_worker_service_quantum
+		: 0;
+
+	/* If the cap was lowered at runtime, retire the surplus */
+	for (int i = 0; i < launcher_nslots; i++)
+	{
+		if (!launcher_slots[i].terminating)
+			live++;
+	}
+
+	for (int i = launcher_nslots - 1;
+		 i >= 0 && live > pgedge_vectorizer_num_workers; i--)
+	{
+		if (launcher_slots[i].terminating)
+			continue;
+
+		elog(LOG, "pgedge_vectorizer launcher: retiring worker for database "
+			 "\"%s\" after num_workers was lowered",
+			 launcher_slots[i].dbname);
+		TerminateBackgroundWorker(launcher_slots[i].handle);
+		launcher_slots[i].terminating = true;
+		live--;
+	}
+
+	for (visited = 0; visited < db_count; visited++)
+	{
+		int			idx = (launcher_cursor + visited) % db_count;
+		const char *dbname = db_names[idx];
+		BackgroundWorkerHandle *handle;
+
+		if (launcher_nslots >= pgedge_vectorizer_num_workers)
+			break;
+
+		if (database_has_worker(dbname))
+			continue;
+
+		handle = launch_worker_for_database(dbname, quantum);
+		if (handle == NULL)
+		{
+			if (!warned)
+			{
+				elog(LOG, "pgedge_vectorizer launcher: could not register a "
+					 "worker for database \"%s\"; max_worker_processes may be "
+					 "exhausted, will retry", dbname);
+				warned = true;
+			}
+			break;
+		}
+
+		strlcpy(launcher_slots[launcher_nslots].dbname, dbname, NAMEDATALEN);
+		launcher_slots[launcher_nslots].handle = handle;
+		launcher_slots[launcher_nslots].terminating = false;
+		launcher_nslots++;
+	}
+
+	/* Start the next sweep further along, so every database gets a turn */
+	launcher_cursor = (launcher_cursor + visited) % db_count;
+}
+
+/*
+ * Launcher main entry point
+ *
+ * Spawns one dynamic worker per configured database, up to num_workers at a
+ * time, and keeps doing so as workers exit and the configuration changes.
+ *
+ * Note: this process has no database connection and therefore no
+ * PgBackendStatus entry, because that is allocated by InitPostgres() via
+ * BackgroundWorkerInitializeConnection(). It must not call any pgstat_report_*
+ * function.
+ */
+PGDLLEXPORT void
+pgedge_vectorizer_launcher_main(Datum main_arg)
+{
+	char	  **db_names = NULL;
+	int			db_count = 0;
+	bool		reload_list = true;
+	bool		logged_empty = false;
+
+	/* Setup signal handlers */
+	pqsignal(SIGTERM, worker_sigterm);
+	pqsignal(SIGHUP, worker_sighup);
+
+	/* We're now ready to receive signals */
+	BackgroundWorkerUnblockSignals();
+
+	elog(LOG, "pgedge_vectorizer launcher started");
+
+	while (!got_sigterm)
+	{
+		int			rc;
+		long		sweep_interval;
+
+		/* Reload configuration if SIGHUP received */
+		if (got_sighup)
+		{
+			got_sighup = false;
+			ProcessConfigFile(PGC_SIGHUP);
+			reload_list = true;
+		}
+
+		if (reload_list)
+		{
+			if (db_names != NULL)
+			{
+				for (int i = 0; i < db_count; i++)
+					pfree(db_names[i]);
+				pfree(db_names);
+				db_names = NULL;
+			}
+
+			db_count = parse_database_list(&db_names);
+			reload_list = false;
+
+			if (db_count == 0)
+			{
+				if (!logged_empty)
+				{
+					elog(LOG, "pgedge_vectorizer launcher: no databases "
+						 "configured in pgedge_vectorizer.databases, waiting");
+					logged_empty = true;
+				}
+			}
+			else
+			{
+				logged_empty = false;
+
+				if (db_count > pgedge_vectorizer_num_workers)
+					elog(LOG, "pgedge_vectorizer launcher: %d databases "
+						 "configured with num_workers = %d, databases will be "
+						 "serviced in rotation",
+						 db_count, pgedge_vectorizer_num_workers);
+			}
+		}
+
+		/*
+		 * Retire workers whose database is no longer configured, so that
+		 * removing a database from the list actually releases it.
+		 */
+		for (int i = 0; i < launcher_nslots; i++)
+		{
+			bool		still_configured = false;
+
+			if (launcher_slots[i].terminating)
+				continue;
+
+			for (int j = 0; j < db_count; j++)
+			{
+				if (strcmp(launcher_slots[i].dbname, db_names[j]) == 0)
+				{
+					still_configured = true;
+					break;
+				}
+			}
+
+			if (!still_configured)
+			{
+				elog(LOG, "pgedge_vectorizer launcher: stopping worker for "
+					 "database \"%s\", no longer configured",
+					 launcher_slots[i].dbname);
+				TerminateBackgroundWorker(launcher_slots[i].handle);
+				launcher_slots[i].terminating = true;
+			}
+		}
+
+		launcher_reap_workers();
+		launcher_sweep(db_names, db_count);
+
+		/*
+		 * Sweep briskly whilst databases are queued waiting for a slot, and
+		 * rarely once every database has its own resident worker.
+		 */
+		sweep_interval = (db_count > pgedge_vectorizer_num_workers)
+			? LAUNCHER_SWEEP_INTERVAL_ROTATING_MS
+			: LAUNCHER_SWEEP_INTERVAL_IDLE_MS;
+
+		rc = WaitLatch(MyLatch,
+					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+					   sweep_interval,
+					   PG_WAIT_EXTENSION);
+
+		ResetLatch(MyLatch);
+
+		/* Emergency bailout if postmaster has died */
+		if (rc & WL_POSTMASTER_DEATH)
+			proc_exit(1);
+	}
+
+	elog(LOG, "pgedge_vectorizer launcher shutting down");
+
+	/* Workers are BGW_NEVER_RESTART and exit with the postmaster */
+	proc_exit(0);
 }
 
 /*
@@ -127,13 +551,9 @@ extension_installed(void)
 PGDLLEXPORT void
 pgedge_vectorizer_worker_main(Datum main_arg)
 {
-	int worker_id = DatumGetInt32(main_arg);
+	int quantum_secs = DatumGetInt32(main_arg);
 	char dbname[NAMEDATALEN];
-	char *db_list;
-	char *db_name;
-	char *db_copy;
-	char *db_saveptr;
-	int db_count = 0;
+	TimestampTz start_time;
 	bool extension_exists = false;
 	int ext_retry_interval = 5000;	/* Start at 5s, doubles up to max */
 	bool first_ext_check = true;
@@ -146,101 +566,31 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
 
-	/* Check if databases are configured */
-	if (pgedge_vectorizer_databases == NULL || pgedge_vectorizer_databases[0] == '\0')
-	{
-		elog(LOG, "pgedge_vectorizer worker %d: no databases configured in pgedge_vectorizer.databases, sleeping",
-			 worker_id + 1);
-
-		/* Sleep indefinitely, checking periodically for config changes */
-		while (!got_sigterm)
-		{
-			int rc;
-
-			if (got_sighup)
-			{
-				got_sighup = false;
-				ProcessConfigFile(PGC_SIGHUP);
-
-				/* Check if databases were configured */
-				if (pgedge_vectorizer_databases != NULL && pgedge_vectorizer_databases[0] != '\0')
-					break;
-			}
-
-			rc = WaitLatch(MyLatch,
-						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-						   60000L, /* Check every minute */
-						   PG_WAIT_EXTENSION);
-
-			ResetLatch(MyLatch);
-
-			if (rc & WL_POSTMASTER_DEATH)
-				proc_exit(1);
-		}
-
-		if (got_sigterm)
-			proc_exit(0);
-	}
-
-	/* Parse database list and select one for this worker */
-	db_list = pstrdup(pgedge_vectorizer_databases);
-	db_copy = db_list;
-
 	/*
-	 * Count databases.  Use strtok_r() rather than strtok(): the latter keeps
-	 * its parsing position in a single process-wide static, so any other
-	 * strtok() caller reached from this loop would silently corrupt it.
+	 * The launcher passes our target database in bgw_extra, because
+	 * bgw_main_arg is a single Datum and cannot carry a string. The Datum
+	 * carries our service quantum instead, where 0 means stay resident.
+	 *
+	 * Deciding which databases are covered is the launcher's job, so there is
+	 * no database list parsing here any more.
 	 */
-	while ((db_name = strtok_r(db_copy, ",", &db_saveptr)) != NULL)
-	{
-		db_copy = NULL;
-		db_count++;
-	}
+	strlcpy(dbname, MyBgworkerEntry->bgw_extra, NAMEDATALEN);
 
-	if (db_count == 0)
+	if (dbname[0] == '\0')
 	{
-		elog(LOG, "pgedge_vectorizer worker %d: empty database list, exiting",
-			 worker_id + 1);
+		elog(LOG, "pgedge_vectorizer worker started without a database name, exiting");
 		proc_exit(0);
 	}
 
-	/* Select database for this worker (round-robin) */
-	pfree(db_list);
-	db_list = pstrdup(pgedge_vectorizer_databases);
-	db_copy = db_list;
+	start_time = GetCurrentTimestamp();
 
-	for (int i = 0; i <= (worker_id % db_count); i++)
-	{
-		db_name = strtok_r(db_copy, ",", &db_saveptr);
-		db_copy = NULL;
-	}
-
-	/*
-	 * The count pass found db_count tokens and worker_id % db_count is less
-	 * than that, so the loop above cannot have run off the end of the list.
-	 */
-	Assert(db_name != NULL);
-
-	/* Trim whitespace */
-	while (*db_name == ' ' || *db_name == '\t')
-		db_name++;
-
-	strlcpy(dbname, db_name, NAMEDATALEN);
-
-	/* Remove trailing whitespace */
-	for (int i = strlen(dbname) - 1; i >= 0 && (dbname[i] == ' ' || dbname[i] == '\t'); i--)
-		dbname[i] = '\0';
-
-	pfree(db_list);
-
-	/* Connect to the selected database */
+	/* Connect to the database the launcher assigned us */
 	BackgroundWorkerInitializeConnection(dbname, NULL, 0);
 
-	elog(LOG, "pgedge_vectorizer worker %d started (database: %s)",
-		 worker_id + 1, dbname);
+	elog(LOG, "pgedge_vectorizer worker started (database: %s)", dbname);
 
 	/* Set process display */
-	pgstat_report_appname(psprintf("pgedge_vectorizer worker %d", worker_id + 1));
+	pgstat_report_appname(psprintf("pgedge_vectorizer worker (%s)", dbname));
 
 	/* Main work loop */
 	while (!got_sigterm)
@@ -268,22 +618,22 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 				{
 					if (first_ext_check)
 					{
-						elog(LOG, "pgedge_vectorizer worker %d: extension not installed in database '%s', "
+						elog(LOG, "pgedge_vectorizer worker: extension not installed in database '%s', "
 							 "will check again in %ds (hint: run CREATE EXTENSION pgedge_vectorizer)",
-							 worker_id + 1, dbname, ext_retry_interval / 1000);
+							 dbname, ext_retry_interval / 1000);
 						first_ext_check = false;
 					}
 					else if (ext_retry_interval >= EXT_RETRY_MAX)
 					{
-						elog(LOG, "pgedge_vectorizer worker %d: extension still not installed in database '%s', "
+						elog(LOG, "pgedge_vectorizer worker: extension still not installed in database '%s', "
 							 "next check in %ds",
-							 worker_id + 1, dbname, ext_retry_interval / 1000);
+							 dbname, ext_retry_interval / 1000);
 					}
 				}
 				else
 				{
-					elog(LOG, "pgedge_vectorizer worker %d: extension found in database '%s', starting to process queue",
-						 worker_id + 1, dbname);
+					elog(LOG, "pgedge_vectorizer worker: extension found in database '%s', starting to process queue",
+						 dbname);
 					ext_retry_interval = 5000;
 					first_ext_check = true;
 				}
@@ -316,6 +666,26 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		if (rc & WL_POSTMASTER_DEATH)
 			proc_exit(1);
 
+		/*
+		 * Yield our slot once the service quantum expires, so that the
+		 * launcher can hand it to the next database in the rotation. A worker
+		 * that always has work would otherwise keep its slot indefinitely and
+		 * starve the databases behind it.
+		 *
+		 * A quantum of zero means the launcher is not oversubscribed and every
+		 * configured database can have its own worker, so we stay resident.
+		 * That is the common case and involves no process churn at all.
+		 */
+		if (quantum_secs > 0 &&
+			TimestampDifferenceExceeds(start_time, GetCurrentTimestamp(),
+									   quantum_secs * 1000))
+		{
+			elog(LOG, "pgedge_vectorizer worker for database \"%s\" yielding its "
+				 "slot after %d seconds so that another database can be serviced",
+				 dbname, quantum_secs);
+			break;
+		}
+
 		/* Only process queue if extension is installed */
 		if (!extension_exists)
 		{
@@ -328,10 +698,10 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 
 		PG_TRY();
 		{
-			process_queue_batch(worker_id);
+			process_queue_batch(dbname);
 
 			/* Perform automatic cleanup if enabled */
-			cleanup_completed_items(worker_id);
+			cleanup_completed_items(dbname);
 		}
 		PG_CATCH();
 		{
@@ -339,8 +709,8 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 			FlushErrorState();
 
 			/* Don't exit on errors - log and continue */
-			elog(LOG, "pgedge_vectorizer worker %d: error in processing, continuing",
-				 worker_id + 1);
+			elog(LOG, "pgedge_vectorizer worker for database \"%s\": error in "
+				 "processing, continuing", dbname);
 
 			/* Abort any transaction */
 			AbortCurrentTransaction();
@@ -352,7 +722,7 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	}
 
 	/* Cleanup before exit */
-	elog(LOG, "pgedge_vectorizer worker %d shutting down", worker_id + 1);
+	elog(LOG, "pgedge_vectorizer worker for database \"%s\" shutting down", dbname);
 	proc_exit(0);
 }
 
@@ -360,7 +730,7 @@ pgedge_vectorizer_worker_main(Datum main_arg)
  * Process a batch of queue items
  */
 static void
-process_queue_batch(int worker_id)
+process_queue_batch(const char *dbname)
 {
 	int ret;
 	int batch_size = pgedge_vectorizer_batch_size;
@@ -403,7 +773,8 @@ process_queue_batch(int worker_id)
 		bool has_sparse_only = false;
 		int effective_batch_size = n_items;
 
-		elog(DEBUG1, "Worker %d processing %d queue items", worker_id + 1, n_items);
+		elog(DEBUG1, "Worker for database \"%s\" processing %d queue items",
+			 dbname, n_items);
 
 		/* Extract data from result */
 		for (int i = 0; i < n_items; i++)
@@ -465,12 +836,14 @@ process_queue_batch(int worker_id)
 		if (has_retries && n_items > 1)
 		{
 			effective_batch_size = 1;
-			elog(DEBUG1, "Worker %d: found retried items, processing individually", worker_id + 1);
+			elog(DEBUG1, "Worker for database \"%s\": found retried items, "
+				 "processing individually", dbname);
 		}
 		else if (has_sparse_only && n_items > 1)
 		{
 			effective_batch_size = 1;
-			elog(DEBUG1, "Worker %d: found sparse-only items, processing individually", worker_id + 1);
+			elog(DEBUG1, "Worker for database \"%s\": found sparse-only items, "
+				 "processing individually", dbname);
 		}
 
 		/* Mark all as processing */
@@ -881,7 +1254,7 @@ update_embedding(int64 chunk_id, const char *chunk_table, const float *embedding
  * Clean up completed queue items older than auto_cleanup_hours
  */
 static void
-cleanup_completed_items(int worker_id)
+cleanup_completed_items(const char *dbname)
 {
 	int ret;
 	int rows_deleted = 0;
@@ -916,8 +1289,9 @@ cleanup_completed_items(int worker_id)
 		rows_deleted = SPI_processed;
 		if (rows_deleted > 0)
 		{
-			elog(LOG, "pgedge_vectorizer worker %d: cleaned up %d completed queue items older than %d hours",
-				 worker_id + 1, rows_deleted, pgedge_vectorizer_auto_cleanup_hours);
+			elog(LOG, "pgedge_vectorizer worker for database \"%s\": cleaned up %d "
+				 "completed queue items older than %d hours",
+				 dbname, rows_deleted, pgedge_vectorizer_auto_cleanup_hours);
 		}
 	}
 

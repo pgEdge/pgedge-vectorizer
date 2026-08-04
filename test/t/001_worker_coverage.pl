@@ -32,6 +32,7 @@ shared_preload_libraries = 'pgedge_vectorizer'
 pgedge_vectorizer.databases = '@{[ join ',', @dbs ]}'
 pgedge_vectorizer.num_workers = 2
 pgedge_vectorizer.worker_poll_interval = 200
+pgedge_vectorizer.worker_service_quantum = 5
 max_worker_processes = 16
 ));
 $node->start;
