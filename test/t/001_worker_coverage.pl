@@ -54,6 +54,50 @@ my @unserviced = wait_for_all_databases_serviced($node, \@dbs, 120);
 is_deeply(\@unserviced, [],
 	'every configured database is serviced with num_workers below the database count');
 
+# Coverage alone is not enough: a worker that always has work must still give
+# up its slot, or the databases at the tail of the list would starve exactly as
+# they did before the launcher existed. Confirm each database is serviced more
+# than once, which can only happen if slots genuinely rotate.
+my %service_counts;
+my $rotate_deadline = time() + 120;
+
+while (time() < $rotate_deadline)
+{
+	my $log = slurp_file($node->logfile);
+
+	for my $db (@dbs)
+	{
+		my @hits = ($log =~ /worker started \(database: \Q$db\E\)/g);
+		$service_counts{$db} = scalar(@hits);
+	}
+
+	last if !grep { ($service_counts{$_} // 0) < 2 } @dbs;
+	sleep 1;
+}
+
+my @not_rotated = grep { ($service_counts{$_} // 0) < 2 } @dbs;
+
+is_deeply(\@not_rotated, [],
+	'every database is serviced repeatedly, so worker slots rotate');
+
+# A database added at runtime must be picked up on reload, without a restart.
+$node->safe_psql('postgres', 'CREATE DATABASE vecdb6');
+$node->safe_psql('vecdb6',   'CREATE EXTENSION pgedge_vectorizer CASCADE');
+$node->safe_psql('postgres',
+	"ALTER SYSTEM SET pgedge_vectorizer.databases = '"
+	  . join(',', @dbs, 'vecdb6') . "'");
+$node->reload;
+
+my @added = wait_for_all_databases_serviced($node, ['vecdb6'], 120);
+is_deeply(\@added, [], 'a database added by SIGHUP is picked up');
+
+# num_workers is PGC_SIGHUP now, so raising it must not need a restart.
+$node->safe_psql('postgres', 'ALTER SYSTEM SET pgedge_vectorizer.num_workers = 4');
+$node->reload;
+
+my $shown = $node->safe_psql('postgres', 'SHOW pgedge_vectorizer.num_workers');
+is($shown, '4', 'num_workers can be changed by reload without a restart');
+
 $node->stop;
 done_testing();
 
