@@ -79,8 +79,13 @@ static void process_queue_batch(const char *dbname);
 static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
 							 const float *embedding, int dim);
+static char *trim_whitespace(char *str);
 static int	parse_database_list(char ***names);
 static int	worker_quantum_secs(void);
+static void launcher_retire_surplus(void);
+static void launcher_retire_unconfigured(char **db_names, int db_count);
+static int	launcher_reload_databases(char ***db_names, int old_count,
+									  bool *logged_empty);
 static BackgroundWorkerHandle *launch_worker_for_database(const char *dbname);
 static void launcher_reap_workers(void);
 static bool database_has_worker(const char *dbname);
@@ -145,6 +150,31 @@ register_background_workers(void)
 }
 
 /*
+ * Trim leading and trailing spaces and tabs from a token, returning a pointer
+ * into the original buffer.
+ *
+ * The length is measured with strnlen() bounded by NAMEDATALEN rather than with
+ * strlen(). A database name longer than that cannot be valid and would be
+ * truncated by strlcpy() when we come to use it, and the bound means we cannot
+ * over-read even if handed a buffer that is somehow not NUL-terminated
+ * (CWE-126).
+ */
+static char *
+trim_whitespace(char *str)
+{
+	size_t		len;
+
+	while (*str == ' ' || *str == '\t')
+		str++;
+
+	len = strnlen(str, NAMEDATALEN);
+	while (len > 0 && (str[len - 1] == ' ' || str[len - 1] == '\t'))
+		str[--len] = '\0';
+
+	return str;
+}
+
+/*
  * Parse pgedge_vectorizer.databases into a palloc'd array of trimmed names.
  *
  * Returns the number of names found, with *names set to a palloc'd array of
@@ -179,19 +209,9 @@ parse_database_list(char ***names)
 	for (tok = strtok_r(list, ",", &saveptr); tok != NULL;
 		 tok = strtok_r(NULL, ",", &saveptr))
 	{
-		char	   *name = tok;
-		int			len;
+		char	   *name = trim_whitespace(tok);
 
-		/* Trim leading whitespace */
-		while (*name == ' ' || *name == '\t')
-			name++;
-
-		/* Trim trailing whitespace */
-		len = strlen(name);
-		while (len > 0 && (name[len - 1] == ' ' || name[len - 1] == '\t'))
-			name[--len] = '\0';
-
-		if (len == 0)
+		if (name[0] == '\0')
 			continue;
 
 		if (count == capacity)
@@ -343,16 +363,10 @@ database_has_worker(const char *dbname)
  * eventually serviced when there are more databases than slots.
  */
 static void
-launcher_sweep(char **db_names, int db_count)
+launcher_retire_surplus(void)
 {
-	int			visited;
 	int			live = 0;
-	bool		warned = false;
 
-	if (db_count == 0)
-		return;
-
-	/* If the cap was lowered at runtime, retire the surplus */
 	for (int i = 0; i < launcher_nslots; i++)
 	{
 		if (!launcher_slots[i].terminating)
@@ -372,6 +386,54 @@ launcher_sweep(char **db_names, int db_count)
 		launcher_slots[i].terminating = true;
 		live--;
 	}
+}
+
+/*
+ * Stop workers whose database is no longer configured, so that removing a
+ * database from pgedge_vectorizer.databases actually releases it.
+ */
+static void
+launcher_retire_unconfigured(char **db_names, int db_count)
+{
+	for (int i = 0; i < launcher_nslots; i++)
+	{
+		bool		still_configured = false;
+
+		if (launcher_slots[i].terminating)
+			continue;
+
+		for (int j = 0; j < db_count; j++)
+		{
+			if (strcmp(launcher_slots[i].dbname, db_names[j]) == 0)
+			{
+				still_configured = true;
+				break;
+			}
+		}
+
+		if (still_configured)
+			continue;
+
+		elog(LOG, "pgedge_vectorizer launcher: stopping worker for database "
+			 "\"%s\", no longer configured", launcher_slots[i].dbname);
+		TerminateBackgroundWorker(launcher_slots[i].handle);
+		launcher_slots[i].terminating = true;
+	}
+}
+
+/*
+ * One pass over the database list, spawning workers where they are missing.
+ */
+static void
+launcher_sweep(char **db_names, int db_count)
+{
+	int			visited;
+	bool		warned = false;
+
+	if (db_count == 0)
+		return;
+
+	launcher_retire_surplus();
 
 	for (visited = 0; visited < db_count; visited++)
 	{
@@ -406,6 +468,50 @@ launcher_sweep(char **db_names, int db_count)
 
 	/* Start the next sweep further along, so every database gets a turn */
 	launcher_cursor = (launcher_cursor + visited) % db_count;
+}
+
+/*
+ * Re-read the configured database list, freeing the previous one.
+ *
+ * Returns the new count. *logged_empty tracks whether we have already
+ * complained about an empty list, so that the complaint appears once rather
+ * than on every sweep.
+ */
+static int
+launcher_reload_databases(char ***db_names, int old_count, bool *logged_empty)
+{
+	int			db_count;
+
+	if (*db_names != NULL)
+	{
+		for (int i = 0; i < old_count; i++)
+			pfree((*db_names)[i]);
+		pfree(*db_names);
+		*db_names = NULL;
+	}
+
+	db_count = parse_database_list(db_names);
+
+	if (db_count == 0)
+	{
+		if (!*logged_empty)
+		{
+			elog(LOG, "pgedge_vectorizer launcher: no databases configured in "
+				 "pgedge_vectorizer.databases, waiting");
+			*logged_empty = true;
+		}
+
+		return db_count;
+	}
+
+	*logged_empty = false;
+
+	if (db_count > pgedge_vectorizer_num_workers)
+		elog(LOG, "pgedge_vectorizer launcher: %d databases configured with "
+			 "num_workers = %d, databases will be serviced in rotation",
+			 db_count, pgedge_vectorizer_num_workers);
+
+	return db_count;
 }
 
 /*
@@ -451,68 +557,12 @@ pgedge_vectorizer_launcher_main(Datum main_arg)
 
 		if (reload_list)
 		{
-			if (db_names != NULL)
-			{
-				for (int i = 0; i < db_count; i++)
-					pfree(db_names[i]);
-				pfree(db_names);
-				db_names = NULL;
-			}
-
-			db_count = parse_database_list(&db_names);
+			db_count = launcher_reload_databases(&db_names, db_count,
+												 &logged_empty);
 			reload_list = false;
-
-			if (db_count == 0)
-			{
-				if (!logged_empty)
-				{
-					elog(LOG, "pgedge_vectorizer launcher: no databases "
-						 "configured in pgedge_vectorizer.databases, waiting");
-					logged_empty = true;
-				}
-			}
-			else
-			{
-				logged_empty = false;
-
-				if (db_count > pgedge_vectorizer_num_workers)
-					elog(LOG, "pgedge_vectorizer launcher: %d databases "
-						 "configured with num_workers = %d, databases will be "
-						 "serviced in rotation",
-						 db_count, pgedge_vectorizer_num_workers);
-			}
 		}
 
-		/*
-		 * Retire workers whose database is no longer configured, so that
-		 * removing a database from the list actually releases it.
-		 */
-		for (int i = 0; i < launcher_nslots; i++)
-		{
-			bool		still_configured = false;
-
-			if (launcher_slots[i].terminating)
-				continue;
-
-			for (int j = 0; j < db_count; j++)
-			{
-				if (strcmp(launcher_slots[i].dbname, db_names[j]) == 0)
-				{
-					still_configured = true;
-					break;
-				}
-			}
-
-			if (!still_configured)
-			{
-				elog(LOG, "pgedge_vectorizer launcher: stopping worker for "
-					 "database \"%s\", no longer configured",
-					 launcher_slots[i].dbname);
-				TerminateBackgroundWorker(launcher_slots[i].handle);
-				launcher_slots[i].terminating = true;
-			}
-		}
-
+		launcher_retire_unconfigured(db_names, db_count);
 		launcher_reap_workers();
 		launcher_sweep(db_names, db_count);
 
