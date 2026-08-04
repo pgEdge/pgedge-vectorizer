@@ -60,6 +60,21 @@ ifeq ($(PGXS),)
 $(error pg_config not found. Please install PostgreSQL development packages or set PG_CONFIG)
 endif
 
+# TAP tests
+#
+# Multi-database worker coverage cannot be expressed in pg_regress, which runs
+# against a single database and cannot set shared_preload_libraries, so those
+# properties are tested with TAP instead.
+#
+# Only enable them when this installation actually ships the PostgreSQL Perl
+# test modules: Homebrew builds on macOS do not, and an unconditional TAP_TESTS
+# would fail the suite there rather than simply not running it.
+PG_PERL_TEST_DIR := $(dir $(PGXS))../../src/test/perl
+ifneq ($(wildcard $(PG_PERL_TEST_DIR)/PostgreSQL/Test/Cluster.pm),)
+TAP_TESTS = 1
+PROVE_TESTS = test/t/*.pl
+endif
+
 include $(PGXS)
 
 # Version compatibility check
