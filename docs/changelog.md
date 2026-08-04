@@ -30,6 +30,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parsing position in a single process-wide static, which any other `strtok()`
   caller reached from the same loop would corrupt (CWE-676)
 
+### Added
+
+- Added `pgedge_vectorizer.worker_service_quantum`, which bounds how long a
+  worker services one database before yielding its slot when there are more
+  configured databases than workers. It is ignored when every configured
+  database can have its own worker, in which case workers stay resident.
+
+### Changed
+
+- `pgedge_vectorizer.num_workers` now sets the maximum number of *concurrent*
+  workers rather than a fixed pool size, and can be changed with a reload
+  instead of requiring a restart. Configurations that raised it purely to obtain
+  coverage of every configured database no longer need to do so. Note that this
+  is a change in meaning: a value chosen to guarantee coverage now caps
+  concurrency instead.
+- Background workers are now spawned per database by a launcher process rather
+  than being statically registered at startup, so the set of serviced databases
+  follows `pgedge_vectorizer.databases` as it changes, without a restart.
+
+### Fixed
+
+- Fixed databases beyond `pgedge_vectorizer.num_workers` never being processed
+  ([#23](https://github.com/pgEdge/pgedge-vectorizer/issues/23)). Workers were
+  assigned to databases by `worker_id % db_count`, and because `worker_id` only
+  ranged over `0` to `num_workers-1`, any database at a later position in the
+  list was silently never serviced: its queue accumulated entries that were
+  never handled, with nothing logged to indicate it. With the default
+  `num_workers = 2` and five databases configured, three of them were affected.
+
 ## [1.0] - 2026-03-13
 
 ### Added
