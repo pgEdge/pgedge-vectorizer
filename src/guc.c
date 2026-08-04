@@ -27,6 +27,7 @@ char *pgedge_vectorizer_extra_headers = NULL;
  */
 char *pgedge_vectorizer_databases = NULL;
 int pgedge_vectorizer_num_workers = 2;
+int pgedge_vectorizer_worker_service_quantum = 60;
 int pgedge_vectorizer_batch_size = 10;
 int pgedge_vectorizer_max_retries = 3;
 int pgedge_vectorizer_worker_poll_interval = 1000;
@@ -128,15 +129,34 @@ pgedge_vectorizer_init_guc(void)
 								NULL, NULL, NULL);
 
 	DefineCustomIntVariable("pgedge_vectorizer.num_workers",
-							"Number of background workers",
-							"Number of background worker processes to spawn. "
-							"Requires PostgreSQL restart to change.",
+							"Maximum number of concurrent background workers",
+							"Upper bound on how many per-database workers may run at "
+							"once. Databases are serviced in rotation, so every "
+							"configured database is processed even when there are more "
+							"databases than workers. Workers are spawned dynamically "
+							"and draw from max_worker_processes.",
 							&pgedge_vectorizer_num_workers,
 							2,      /* default */
 							1,      /* min */
-							32,     /* max */
-							PGC_POSTMASTER,
+							PGEDGE_VECTORIZER_MAX_WORKERS,
+							PGC_SIGHUP,
 							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pgedge_vectorizer.worker_service_quantum",
+							"Seconds a worker services one database before yielding",
+							"When more databases are configured than num_workers can "
+							"service at once, a worker gives up its slot after this "
+							"many seconds so that the next database in the rotation "
+							"can be processed. Ignored entirely when every configured "
+							"database can have its own worker, in which case workers "
+							"stay resident.",
+							&pgedge_vectorizer_worker_service_quantum,
+							60,     /* default */
+							1,      /* min */
+							3600,   /* max */
+							PGC_SIGHUP,
+							GUC_UNIT_S,
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable("pgedge_vectorizer.batch_size",
