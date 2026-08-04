@@ -99,6 +99,50 @@ my $shown = $node->safe_psql('postgres', 'SHOW pgedge_vectorizer.num_workers');
 is($shown, '4', 'num_workers can be changed by reload without a restart');
 
 $node->stop;
+
+# A worker that starts when the launcher is NOT oversubscribed must still begin
+# yielding if a later reload makes it oversubscribed. A worker that decided its
+# quantum once at startup would stay resident forever and starve the databases
+# added by the reload, which is issue #23 reappearing through a reload rather
+# than through the original static assignment.
+my @first  = qw(rotdb1 rotdb2);
+my @second = qw(rotdb3 rotdb4 rotdb5);
+
+my $rnode = PostgreSQL::Test::Cluster->new('vectorizer_reload');
+$rnode->init;
+$rnode->append_conf(
+	'postgresql.conf', qq(
+shared_preload_libraries = 'pgedge_vectorizer'
+pgedge_vectorizer.databases = '@{[ join ',', @first ]}'
+pgedge_vectorizer.num_workers = 2
+pgedge_vectorizer.worker_poll_interval = 200
+pgedge_vectorizer.worker_service_quantum = 5
+max_worker_processes = 16
+));
+$rnode->start;
+
+for my $db (@first, @second)
+{
+	$rnode->safe_psql('postgres', "CREATE DATABASE $db");
+	$rnode->safe_psql($db,        'CREATE EXTENSION pgedge_vectorizer CASCADE');
+}
+
+# Both of the first two databases can have their own worker, so both should be
+# resident with no quantum at all at this point.
+my @resident = wait_for_all_databases_serviced($rnode, \@first, 120);
+is_deeply(\@resident, [], 'both databases are serviced when not oversubscribed');
+
+# Now oversubscribe by reload alone, without restarting.
+$rnode->safe_psql('postgres',
+	"ALTER SYSTEM SET pgedge_vectorizer.databases = '"
+	  . join(',', @first, @second) . "'");
+$rnode->reload;
+
+my @after_reload = wait_for_all_databases_serviced($rnode, \@second, 120);
+is_deeply(\@after_reload, [],
+	'databases added by a reload that oversubscribes the launcher are serviced');
+
+$rnode->stop;
 done_testing();
 
 # Wait until every database in $dbs has announced a worker in the server log,

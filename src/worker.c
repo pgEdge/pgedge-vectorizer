@@ -80,8 +80,8 @@ static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
 							 const float *embedding, int dim);
 static int	parse_database_list(char ***names);
-static BackgroundWorkerHandle *launch_worker_for_database(const char *dbname,
-														  int quantum_secs);
+static int	worker_quantum_secs(void);
+static BackgroundWorkerHandle *launch_worker_for_database(const char *dbname);
 static void launcher_reap_workers(void);
 static bool database_has_worker(const char *dbname);
 static void launcher_sweep(char **db_names, int db_count);
@@ -209,13 +209,47 @@ parse_database_list(char ***names)
 }
 
 /*
+ * How long may a worker hold its slot before yielding it?
+ *
+ * Zero means stay resident, which is correct whenever every configured database
+ * can have a worker of its own.
+ *
+ * Whether we are oversubscribed is a pure function of the database count and
+ * the concurrency cap, so a worker can evaluate this itself rather than being
+ * told at spawn time, and must re-evaluate it after every reload. A worker that
+ * latched the value at startup would stay resident forever after a reload that
+ * added databases, starving the additions exactly as the old static assignment
+ * starved anything beyond num_workers.
+ */
+static int
+worker_quantum_secs(void)
+{
+	char	  **db_names;
+	int			db_count;
+	int			quantum;
+
+	db_count = parse_database_list(&db_names);
+
+	quantum = (db_count > pgedge_vectorizer_num_workers)
+		? pgedge_vectorizer_worker_service_quantum
+		: 0;
+
+	for (int i = 0; i < db_count; i++)
+		pfree(db_names[i]);
+	if (db_names != NULL)
+		pfree(db_names);
+
+	return quantum;
+}
+
+/*
  * Spawn a worker for one database.
  *
  * Returns the handle, or NULL when no worker slot could be obtained, which
  * normally means max_worker_processes is exhausted.
  */
 static BackgroundWorkerHandle *
-launch_worker_for_database(const char *dbname, int quantum_secs)
+launch_worker_for_database(const char *dbname)
 {
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *handle;
@@ -241,11 +275,11 @@ launch_worker_for_database(const char *dbname, int quantum_secs)
 
 	/*
 	 * bgw_main_arg is a single Datum and cannot carry a string, so the target
-	 * database name travels in bgw_extra. That leaves the Datum free for the
-	 * service quantum, which only the launcher can compute because only it
-	 * knows whether we are oversubscribed.
+	 * database name travels in bgw_extra. The worker works out its own service
+	 * quantum from the GUCs, so nothing else needs passing: were the launcher
+	 * to pass it at spawn time, the value would go stale on the next reload.
 	 */
-	worker.bgw_main_arg = Int32GetDatum(quantum_secs);
+	worker.bgw_main_arg = (Datum) 0;
 	strlcpy(worker.bgw_extra, dbname, NAMEDATALEN);
 
 	/* Be signalled when this worker starts or stops */
@@ -311,22 +345,12 @@ database_has_worker(const char *dbname)
 static void
 launcher_sweep(char **db_names, int db_count)
 {
-	int			quantum;
 	int			visited;
 	int			live = 0;
 	bool		warned = false;
 
 	if (db_count == 0)
 		return;
-
-	/*
-	 * A quantum is only meaningful when we cannot give every database its own
-	 * worker. When we can, workers stay resident and there is no churn at all,
-	 * which keeps the common case behaving as it did before.
-	 */
-	quantum = (db_count > pgedge_vectorizer_num_workers)
-		? pgedge_vectorizer_worker_service_quantum
-		: 0;
 
 	/* If the cap was lowered at runtime, retire the surplus */
 	for (int i = 0; i < launcher_nslots; i++)
@@ -361,7 +385,7 @@ launcher_sweep(char **db_names, int db_count)
 		if (database_has_worker(dbname))
 			continue;
 
-		handle = launch_worker_for_database(dbname, quantum);
+		handle = launch_worker_for_database(dbname);
 		if (handle == NULL)
 		{
 			if (!warned)
@@ -551,7 +575,7 @@ extension_installed(void)
 PGDLLEXPORT void
 pgedge_vectorizer_worker_main(Datum main_arg)
 {
-	int quantum_secs = DatumGetInt32(main_arg);
+	int quantum_secs;
 	char dbname[NAMEDATALEN];
 	TimestampTz start_time;
 	bool extension_exists = false;
@@ -568,11 +592,11 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 
 	/*
 	 * The launcher passes our target database in bgw_extra, because
-	 * bgw_main_arg is a single Datum and cannot carry a string. The Datum
-	 * carries our service quantum instead, where 0 means stay resident.
+	 * bgw_main_arg is a single Datum and cannot carry a string.
 	 *
 	 * Deciding which databases are covered is the launcher's job, so there is
-	 * no database list parsing here any more.
+	 * no database list parsing here any more, beyond working out our own
+	 * service quantum below.
 	 */
 	strlcpy(dbname, MyBgworkerEntry->bgw_extra, NAMEDATALEN);
 
@@ -583,6 +607,7 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	}
 
 	start_time = GetCurrentTimestamp();
+	quantum_secs = worker_quantum_secs();
 
 	/* Connect to the database the launcher assigned us */
 	BackgroundWorkerInitializeConnection(dbname, NULL, 0);
@@ -606,6 +631,13 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 			/* Recheck extension status after config reload */
 			extension_exists = false;
 			ext_retry_interval = 5000;
+
+			/*
+			 * Re-evaluate our quantum: a reload may have added databases or
+			 * lowered the cap, turning a resident worker into one that must
+			 * yield its slot so the additions get serviced.
+			 */
+			quantum_secs = worker_quantum_secs();
 		}
 
 		/* Check if extension is installed (periodically recheck) */
