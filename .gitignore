@@ -25,6 +25,9 @@ test/results/*.out
 test/results/*.diff
 test/tmp_check/
 test/isolationcheck_tmp_check/
+# PGXS creates tmp_check at the top level for TAP tests, since that is where
+# the Makefile invoking prove lives
+tmp_check/
 
 # PostgreSQL extension build files
 *.control.in
