@@ -277,11 +277,13 @@ BEGIN
     -- Use EXECUTE...USING to avoid PL/pgSQL variable/column ambiguity.
     EXECUTE
         'INSERT INTO pgedge_vectorizer.vectorizers
-             (source_table, source_column, chunk_table)
-         VALUES ($1, $2, $3)
+             (source_table, source_column, chunk_table, source_pk, pk_type)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (source_table, source_column)
-         DO UPDATE SET chunk_table = EXCLUDED.chunk_table'
-    USING source_table::TEXT, source_column, chunk_table;
+         DO UPDATE SET chunk_table = EXCLUDED.chunk_table,
+                       source_pk   = EXCLUDED.source_pk,
+                       pk_type     = EXCLUDED.pk_type'
+    USING source_table::TEXT, source_column, chunk_table, source_pk, pk_col_type;
 
     -- Create trigger to chunk and queue on insert/update
     trigger_name := source_table::TEXT || '_' || source_column || '_vectorization_trigger';
@@ -294,6 +296,28 @@ BEGIN
         trigger_name, source_table,
         source_column, chunk_table, actual_strategy,
         actual_chunk_size, actual_chunk_overlap, source_pk, pk_col_type);
+
+    -- Clean up derived data when source rows are deleted.  Statement-level with
+    -- a transition table so that bulk deletes do not degenerate into per-row
+    -- work.
+    EXECUTE format('
+        CREATE OR REPLACE TRIGGER %I
+        AFTER DELETE ON %s
+        REFERENCING OLD TABLE AS old_rows
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION pgedge_vectorizer.vectorization_delete_trigger(%L, %L, %L, %L)',
+        source_table::TEXT || '_' || source_column || '_vectorization_delete_trigger',
+        source_table,
+        source_column, chunk_table, source_pk, pk_col_type);
+
+    -- Clean up when the whole source table is truncated.
+    EXECUTE format('
+        CREATE OR REPLACE TRIGGER %I
+        AFTER TRUNCATE ON %s
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger(%L)',
+        source_table::TEXT || '_' || source_column || '_vectorization_truncate_trigger',
+        source_table, chunk_table);
 
     RAISE NOTICE 'Vectorization enabled: % -> %', source_table, chunk_table;
     RAISE NOTICE 'Strategy: %, chunk_size: %, overlap: %',
@@ -428,8 +452,14 @@ BEGIN
             chunk_table := source_table::TEXT || '_' || source_column || '_chunks';
         END IF;
 
-        -- Drop trigger
+        -- Drop triggers
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, source_table);
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s',
+                       source_table::TEXT || '_' || source_column || '_vectorization_delete_trigger',
+                       source_table);
+        EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s',
+                       source_table::TEXT || '_' || source_column || '_vectorization_truncate_trigger',
+                       source_table);
 
         -- Remove orphaned queue items for this chunk table
         EXECUTE format('DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = %L AND status IN (''pending'', ''processing'')', chunk_table);
@@ -458,7 +488,9 @@ BEGIN
             FROM pg_trigger t
             JOIN pg_class c ON t.tgrelid = c.oid
             WHERE c.oid = source_table
-            AND tgname LIKE source_table::TEXT || '%_vectorization_trigger'
+            -- Matches the row trigger plus the delete and truncate cleanup
+            -- triggers; still prefix-scoped to this source table.
+            AND tgname LIKE source_table::TEXT || '%_vectorization%trigger'
         LOOP
             EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_rec.tgname, source_table);
             RAISE NOTICE 'Dropped trigger: %', trigger_rec.tgname;
@@ -500,6 +532,67 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.disable_vectorization IS
 'Disable automatic vectorization for a table';
+
+-- Recreate the DELETE and TRUNCATE cleanup triggers for every registered
+-- vectorizer.
+--
+-- Upgrade scripts only run on a version change, so an installation of an
+-- unreleased build that already has vectorized tables would otherwise have no
+-- supported way to acquire the new triggers.  This is also the repair route if
+-- triggers are ever dropped by hand.
+--
+-- Returns the number of vectorizers whose triggers were recreated.  Entries
+-- whose primary key is not recorded are skipped with a warning rather than
+-- guessed at, because enable_vectorization() accepts an explicit source_pk that
+-- re-detection could get wrong.
+CREATE FUNCTION pgedge_vectorizer.refresh_triggers()
+RETURNS INT AS $$
+DECLARE
+    v         RECORD;
+    refreshed INT := 0;
+BEGIN
+    FOR v IN
+        SELECT source_table, source_column, chunk_table, source_pk, pk_type
+        FROM pgedge_vectorizer.vectorizers
+    LOOP
+        IF to_regclass(v.source_table) IS NULL THEN
+            RAISE WARNING 'Skipping %: source table no longer exists', v.source_table;
+            CONTINUE;
+        END IF;
+
+        IF v.source_pk IS NULL OR v.pk_type IS NULL THEN
+            RAISE WARNING 'Skipping %.%: primary key not recorded, re-run enable_vectorization() for this column',
+                v.source_table, v.source_column;
+            CONTINUE;
+        END IF;
+
+        EXECUTE format('
+            CREATE OR REPLACE TRIGGER %I
+            AFTER DELETE ON %s
+            REFERENCING OLD TABLE AS old_rows
+            FOR EACH STATEMENT
+            EXECUTE FUNCTION pgedge_vectorizer.vectorization_delete_trigger(%L, %L, %L, %L)',
+            v.source_table || '_' || v.source_column || '_vectorization_delete_trigger',
+            v.source_table,
+            v.source_column, v.chunk_table, v.source_pk, v.pk_type);
+
+        EXECUTE format('
+            CREATE OR REPLACE TRIGGER %I
+            AFTER TRUNCATE ON %s
+            FOR EACH STATEMENT
+            EXECUTE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger(%L)',
+            v.source_table || '_' || v.source_column || '_vectorization_truncate_trigger',
+            v.source_table, v.chunk_table);
+
+        refreshed := refreshed + 1;
+    END LOOP;
+
+    RETURN refreshed;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.refresh_triggers IS
+'Recreate the DELETE and TRUNCATE cleanup triggers for all registered vectorizers; returns the number refreshed';
 
 -- BM25 IDF stats decrement helper
 -- Called by vectorization_trigger before deleting old chunks on UPDATE so that
