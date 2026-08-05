@@ -114,8 +114,6 @@ typedef struct
 {
 	char   *term;
 	int     doc_freq;
-	int     total_docs;
-	float8  idf_weight;
 } IdfStat;
 
 /*
@@ -221,6 +219,38 @@ bm25_tokenize(const char *text, int *ntokens)
  */
 
 /*
+ * bm25_chunk_count — number of rows in the chunk table, i.e. the BM25
+ * corpus size N.  Clamped to a minimum of 1 so that callers dividing or
+ * taking logarithms never see zero.  Caller must have an active SPI
+ * connection.  count(*) is left uncast because ::int would raise
+ * "integer out of range" past 2^31 rows.
+ */
+static int64
+bm25_chunk_count(const char *chunk_table)
+{
+	char   *sql;
+	int     ret;
+	int64   total = 0;
+	bool    isnull;
+	Datum   val;
+
+	sql = psprintf("SELECT count(*) FROM %s",
+				   quote_identifier(chunk_table));
+	ret = SPI_execute(sql, true, 1);
+	pfree(sql);
+
+	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		val = SPI_getbinval(SPI_tuptable->vals[0],
+							SPI_tuptable->tupdesc, 1, &isnull);
+		if (!isnull)
+			total = DatumGetInt64(val);
+	}
+
+	return (total <= 0) ? 1 : total;
+}
+
+/*
  * read_idf_row — extract one IdfStat from a SPI result row
  */
 static IdfStat
@@ -236,12 +266,6 @@ read_idf_row(SPITupleTable *tuptable, int i)
 	val = SPI_getbinval(tuptable->vals[i], tuptable->tupdesc, 2, &isnull);
 	s.doc_freq = isnull ? 1 : DatumGetInt32(val);
 
-	val = SPI_getbinval(tuptable->vals[i], tuptable->tupdesc, 3, &isnull);
-	s.total_docs = isnull ? 1 : DatumGetInt32(val);
-
-	val = SPI_getbinval(tuptable->vals[i], tuptable->tupdesc, 4, &isnull);
-	s.idf_weight = isnull ? 0.693 : DatumGetFloat8(val);
-
 	return s;
 }
 
@@ -255,13 +279,13 @@ bm25_load_idf_stats(const char *chunk_table)
 	ResourceOwner    oldowner;
 	HTAB            *htab = NULL;
 	HASHCTL          ctl;
+	int64            total_docs = 1;
 
 	{
 		char       *tbl_name = psprintf("%s_idf_stats", chunk_table);
 		const char *qtbl     = quote_identifier(tbl_name);
 
-		sql = psprintf(
-			"SELECT term, doc_freq, total_docs, idf_weight FROM %s", qtbl);
+		sql = psprintf("SELECT term, doc_freq FROM %s", qtbl);
 		pfree(tbl_name);
 	}
 
@@ -275,6 +299,13 @@ bm25_load_idf_stats(const char *chunk_table)
 	BeginInternalSubTransaction(NULL);
 	PG_TRY();
 	{
+		/*
+		 * Must precede the stats query: SPI_execute() replaces SPI_tuptable,
+		 * so counting after would leave the loop reading the count(*) result
+		 * as (term, doc_freq).
+		 */
+		total_docs = bm25_chunk_count(chunk_table);
+
 		ret = SPI_execute(sql, true, 0);
 		ok  = true;
 		ReleaseCurrentSubTransaction();
@@ -321,7 +352,18 @@ bm25_load_idf_stats(const char *chunk_table)
 
 		entry = hash_search(htab, row.term, HASH_ENTER, &found);
 		if (!found)
-			entry->idf_weight = row.idf_weight;
+		{
+			/*
+			 * Derived, not stored: the corpus size is identical for every
+			 * term.  Expression shape matches the SQL it replaced so that
+			 * results are bit-identical.
+			 */
+			entry->idf_weight =
+				(row.doc_freq <= 0)
+					? 0.0
+					: log(1.0 + ((double) total_docs - row.doc_freq + 0.5)
+								/ (row.doc_freq + 0.5));
+		}
 		/* Duplicate terms: keep the first weight encountered */
 	}
 
