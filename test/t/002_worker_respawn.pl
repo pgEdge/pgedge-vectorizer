@@ -61,7 +61,14 @@ like($first, qr/^\d+$/, 'a resident worker starts for the database');
 # Terminate the worker cleanly. This exits 0, so unlike a signal death it does
 # not provoke a postmaster-wide crash restart, which would bring the worker
 # back by restarting everything and prove nothing about the launcher.
-$node->safe_psql('postgres', "SELECT pg_terminate_backend($first)");
+#
+# Check the request was accepted. Nothing else retires a worker here, both
+# being resident with a zero quantum, so a false return means the worker went
+# away for a reason this test did not intend and the wait below is measuring
+# something other than the notification path.
+my $terminated =
+  $node->safe_psql('postgres', "SELECT pg_terminate_backend($first)");
+is($terminated, 't', 'the worker accepts the termination request');
 
 # The launcher must notice and relaunch. 20s is far longer than the
 # notification path needs and far shorter than the 60s idle sweep, so this
