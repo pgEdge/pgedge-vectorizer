@@ -234,8 +234,8 @@ SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
 
 -- Seed a term into the IDF stats table
 INSERT INTO hybrid_test_docs_content_chunks_idf_stats
-    (term, doc_freq, total_docs, idf_weight)
-VALUES ('testterm', 5, 10, 1.0);
+    (term, doc_freq)
+VALUES ('testterm', 5);
 
 -- Decrement by 1
 SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
