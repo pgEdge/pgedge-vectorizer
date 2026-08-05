@@ -249,6 +249,12 @@ SELECT term, doc_freq
 FROM hybrid_test_docs_content_chunks_idf_stats
 WHERE term = 'testterm';
 
+-- bm25_query_vector against a populated stats table.  Test 14 calls it while
+-- _idf_stats is empty, which returns early without building the IDF hash.
+SELECT pgedge_vectorizer.bm25_query_vector(
+    'testterm sample', 'hybrid_test_docs_content_chunks'
+) IS NOT NULL AS query_vector_with_populated_stats;
+
 -- Clean up the test row
 DELETE FROM hybrid_test_docs_content_chunks_idf_stats WHERE term = 'testterm';
 
