@@ -71,8 +71,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   setting it to `false` had no effect. Making it do something real would mean
   gating trigger creation in `enable_vectorization()`, a larger behavioural
   change than removing a no-op setting, and is being tracked separately if
-  wanted. Setting `pgedge_vectorizer.auto_chunk` now fails with `unrecognized
-  configuration parameter` rather than being silently ignored.
+  wanted. `SET` and `ALTER SYSTEM SET` still accept
+  `pgedge_vectorizer.auto_chunk`, since PostgreSQL permits any two-part name
+  as a placeholder for an extension GUC it does not recognise, but reading it
+  back with `SHOW` or `current_setting()` without having set it first in that
+  session now fails with `unrecognized configuration parameter`, rather than
+  quietly returning a value nothing acts on.
 
 ### Fixed
 
