@@ -37,8 +37,35 @@ SELECT count(*) > 0 AS bigint_pk_chunks_after_recreate FROM pk_docs_bigint_body_
 SELECT pgedge_vectorizer.recreate_chunks('pk_docs_text', 'body');
 SELECT count(*) > 0 AS text_pk_chunks_after_recreate FROM pk_docs_text_body_chunks;
 
+-- The fix casts the RECORD field to text unconditionally, so it must not
+-- depend on which order the types are seen in. Repeat with a fresh pair of
+-- tables in the opposite order: text first this time, to seed the callsite's
+-- cached parameter type with text instead of bigint, then bigint second.
+CREATE TABLE pk_docs_text_first (doc_key TEXT PRIMARY KEY, body TEXT);
+INSERT INTO pk_docs_text_first VALUES ('k1', repeat('eta theta iota ', 20));
+SELECT pgedge_vectorizer.enable_vectorization('pk_docs_text_first', 'body',
+                                              source_pk => 'doc_key',
+                                              embedding_dimension => 3);
+SELECT count(*) > 0 AS text_first_has_chunks FROM pk_docs_text_first_body_chunks;
+
+CREATE TABLE pk_docs_bigint_second (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO pk_docs_bigint_second (body) VALUES (repeat('kappa lambda mu ', 20));
+SELECT pgedge_vectorizer.enable_vectorization('pk_docs_bigint_second', 'body',
+                                              embedding_dimension => 3);
+SELECT count(*) > 0 AS bigint_second_has_chunks FROM pk_docs_bigint_second_body_chunks;
+
+SELECT pgedge_vectorizer.recreate_chunks('pk_docs_text_first', 'body');
+SELECT count(*) > 0 AS text_first_chunks_after_recreate FROM pk_docs_text_first_body_chunks;
+
+SELECT pgedge_vectorizer.recreate_chunks('pk_docs_bigint_second', 'body');
+SELECT count(*) > 0 AS bigint_second_chunks_after_recreate FROM pk_docs_bigint_second_body_chunks;
+
 -- Clean up
 SELECT pgedge_vectorizer.disable_vectorization('pk_docs_bigint', 'body', true);
 SELECT pgedge_vectorizer.disable_vectorization('pk_docs_text', 'body', true);
+SELECT pgedge_vectorizer.disable_vectorization('pk_docs_text_first', 'body', true);
+SELECT pgedge_vectorizer.disable_vectorization('pk_docs_bigint_second', 'body', true);
 DROP TABLE pk_docs_bigint;
 DROP TABLE pk_docs_text;
+DROP TABLE pk_docs_text_first;
+DROP TABLE pk_docs_bigint_second;
