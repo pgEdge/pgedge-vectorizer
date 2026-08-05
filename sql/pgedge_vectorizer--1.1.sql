@@ -311,13 +311,12 @@ BEGIN
         WHERE sparse_embedding IS NOT NULL',
         chunk_table || '_sparse_idx', chunk_table);
 
-    -- Create BM25 IDF statistics table for this chunk table
+    -- Create BM25 IDF statistics table for this chunk table.
+    -- Only doc_freq is stored; the IDF weight is computed on read.
     EXECUTE format('
         CREATE TABLE IF NOT EXISTS %I (
             term        TEXT    PRIMARY KEY,
             doc_freq    INT     NOT NULL DEFAULT 1,
-            total_docs  INT     NOT NULL DEFAULT 1,
-            idf_weight  FLOAT8  NOT NULL DEFAULT 0.693,
             updated_at  TIMESTAMPTZ DEFAULT now()
         )', chunk_table || '_idf_stats');
 
