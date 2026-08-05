@@ -15,6 +15,7 @@ pgEdge Vectorizer automatically chunks text content and generates vector embeddi
 - **Automatic Chunking**: Intelligently splits text into chunks with configurable strategies
 - **Async Processing**: Background workers process embeddings without blocking your application
 - **Multiple Providers**: Support for OpenAI, Voyage AI, Ollama (local embeddings), and Gemini
+- **Stays In Sync**: Chunks, embeddings, queue entries and BM25 statistics are removed automatically when source rows are deleted or the source table is truncated
 - **Configurable**: Extensive GUC parameters for fine-tuning behavior
 - **Batching**: Efficient batch processing of embeddings
 - **Retry Logic**: Automatic retry with exponential backoff for failed embeddings
@@ -293,6 +294,14 @@ SELECT pgedge_vectorizer.disable_vectorization(
     source_table REGCLASS,
     drop_chunk_table BOOLEAN DEFAULT FALSE
 );
+```
+
+#### `refresh_triggers()`
+
+Recreate the DELETE and TRUNCATE cleanup triggers for every registered vectorizer, returning the number recreated. Not normally needed, since upgrading repairs existing tables; use it if a trigger has been dropped by hand.
+
+```sql
+SELECT pgedge_vectorizer.refresh_triggers();
 ```
 
 #### `chunk_text()`

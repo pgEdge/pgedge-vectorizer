@@ -84,7 +84,7 @@ SELECT COUNT(*) AS trigger_count FROM pg_trigger
 WHERE tgname LIKE 'multi_test%vectorization%';
  trigger_count 
 ---------------
-             2
+             6
 (1 row)
 
 -- Insert test data
@@ -116,7 +116,7 @@ SELECT COUNT(*) AS remaining_triggers FROM pg_trigger
 WHERE tgname LIKE 'multi_test%vectorization%';
  remaining_triggers 
 --------------------
-                  1
+                  3
 (1 row)
 
 -- Clean up

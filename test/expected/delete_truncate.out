@@ -1,0 +1,260 @@
+-- DELETE and TRUNCATE cleanup test
+--
+-- Verifies that removing source rows removes their derived chunks, queue
+-- entries and BM25 statistics, rather than leaving them orphaned (issue #24).
+--
+-- Uses embedding_dimension => 3 and asserts only on row counts and trigger
+-- existence, never on embedding values, so no provider credentials are needed.
+CREATE TABLE dt_docs (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO dt_docs (body) VALUES
+    (repeat('alpha beta gamma ', 20)),
+    (repeat('delta epsilon zeta ', 20)),
+    (repeat('eta theta iota ', 20));
+SELECT pgedge_vectorizer.enable_vectorization('dt_docs', 'body',
+                                              embedding_dimension => 3);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "dt_docs_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: dt_docs -> dt_docs_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 400, overlap: 50
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 3 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- All three triggers should now exist
+SELECT tgname FROM pg_trigger
+ WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal
+ ORDER BY tgname;
+                        tgname                        
+------------------------------------------------------
+ dt_docs_body_f8876619_vectorization_delete_trigger
+ dt_docs_body_f8876619_vectorization_truncate_trigger
+ dt_docs_body_vectorization_trigger
+(3 rows)
+
+-- Deleting one row removes only that row's chunks
+SELECT count(*) > 0 AS has_chunks_for_row1
+  FROM dt_docs_body_chunks WHERE source_id = 1;
+ has_chunks_for_row1 
+---------------------
+ t
+(1 row)
+
+DELETE FROM dt_docs WHERE id = 1;
+SELECT count(*) AS chunks_for_deleted_row
+  FROM dt_docs_body_chunks WHERE source_id = 1;
+ chunks_for_deleted_row 
+------------------------
+                      0
+(1 row)
+
+SELECT count(*) > 0 AS other_rows_untouched
+  FROM dt_docs_body_chunks WHERE source_id = 2;
+ other_rows_untouched 
+----------------------
+ t
+(1 row)
+
+-- No queue entry should reference a chunk that no longer exists
+SELECT count(*) AS orphaned_queue_entries
+  FROM pgedge_vectorizer.queue q
+ WHERE q.chunk_table = 'dt_docs_body_chunks'
+   AND NOT EXISTS (SELECT 1 FROM dt_docs_body_chunks c WHERE c.id = q.chunk_id);
+ orphaned_queue_entries 
+------------------------
+                      0
+(1 row)
+
+-- Seed BM25 statistics the way the worker would, so that the corpus accounting
+-- below is actually exercised: the worker does not run during these tests, so
+-- _idf_stats would otherwise be empty and the assertion vacuous.
+INSERT INTO dt_docs_body_chunks_idf_stats (term, doc_freq, total_docs, idf_weight)
+VALUES ('delta', 1, 2, 0.9), ('eta', 1, 2, 0.9);
+-- Bulk delete in a single statement, which is the case the statement-level
+-- trigger exists to handle without degenerating into per-row work
+DELETE FROM dt_docs;
+SELECT count(*) AS chunks_after_bulk_delete FROM dt_docs_body_chunks;
+ chunks_after_bulk_delete 
+--------------------------
+                        0
+(1 row)
+
+-- The corpus total must agree with the surviving chunk count. Decrementing per
+-- document while the chunks are all still present sets total_docs from the same
+-- unchanged count every time, so without a final resync only the last
+-- document's value would survive and it would disagree with doc_freq.
+SELECT count(*) AS idf_rows_with_wrong_total
+  FROM dt_docs_body_chunks_idf_stats
+ WHERE total_docs <> (SELECT count(*) FROM dt_docs_body_chunks);
+ idf_rows_with_wrong_total 
+---------------------------
+                         0
+(1 row)
+
+-- TRUNCATE also cleans up
+INSERT INTO dt_docs (body) VALUES (repeat('kappa lambda mu ', 20));
+SELECT count(*) > 0 AS chunks_before_truncate FROM dt_docs_body_chunks;
+ chunks_before_truncate 
+------------------------
+ t
+(1 row)
+
+TRUNCATE dt_docs;
+SELECT count(*) AS chunks_after_truncate FROM dt_docs_body_chunks;
+ chunks_after_truncate 
+-----------------------
+                     0
+(1 row)
+
+SELECT count(*) AS idf_after_truncate FROM dt_docs_body_chunks_idf_stats;
+ idf_after_truncate 
+--------------------
+                  0
+(1 row)
+
+SELECT count(*) AS queue_after_truncate
+  FROM pgedge_vectorizer.queue WHERE chunk_table = 'dt_docs_body_chunks';
+ queue_after_truncate 
+----------------------
+                    0
+(1 row)
+
+-- refresh_triggers() restores triggers dropped by hand, and is idempotent
+DROP TRIGGER dt_docs_body_vectorization_delete_trigger ON dt_docs;
+ERROR:  trigger "dt_docs_body_vectorization_delete_trigger" for table "dt_docs" does not exist
+DROP TRIGGER dt_docs_body_vectorization_truncate_trigger ON dt_docs;
+ERROR:  trigger "dt_docs_body_vectorization_truncate_trigger" for table "dt_docs" does not exist
+SELECT count(*) AS triggers_after_manual_drop FROM pg_trigger
+ WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
+ triggers_after_manual_drop 
+----------------------------
+                          3
+(1 row)
+
+-- refresh_triggers() counts every registered vectorizer, including any left by
+-- earlier test files, so assert only that it did something.
+SELECT pgedge_vectorizer.refresh_triggers() >= 1 AS refreshed;
+ refreshed 
+-----------
+ t
+(1 row)
+
+SELECT count(*) AS triggers_after_refresh FROM pg_trigger
+ WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
+ triggers_after_refresh 
+------------------------
+                      3
+(1 row)
+
+SELECT pgedge_vectorizer.refresh_triggers() >= 1 AS refreshed_again;
+ refreshed_again 
+-----------------
+ t
+(1 row)
+
+-- disable_vectorization() must remove every trigger it created
+SELECT pgedge_vectorizer.disable_vectorization('dt_docs', 'body', true);
+NOTICE:  Vectorization disabled and chunk table dropped: dt_docs_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+SELECT count(*) AS triggers_after_disable FROM pg_trigger
+ WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
+ triggers_after_disable 
+------------------------
+                      0
+(1 row)
+
+-- Clean up
+DROP TABLE dt_docs;
+-- Long identifiers must not collide, and teardown must still find the triggers.
+--
+-- Cleanup trigger names are shortened to fit the 63-byte identifier limit, so a
+-- digest of the table and column keeps them unique: without it, two columns on
+-- a long-named table would shorten to the same name and the second
+-- CREATE OR REPLACE TRIGGER would silently replace the first. A shortened name
+-- also no longer begins with the source table text, so whole-table teardown
+-- looks triggers up by trigger function rather than by name pattern.
+CREATE TABLE dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (id BIGSERIAL PRIMARY KEY, a TEXT, b TEXT);
+INSERT INTO dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (a, b)
+VALUES (repeat('alpha beta ', 5), repeat('gamma delta ', 5));
+SELECT pgedge_vectorizer.enable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'a',
+                                              embedding_dimension => 3);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_chunks
+NOTICE:  Strategy: token_based, chunk_size: 400, overlap: 50
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT pgedge_vectorizer.enable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'b',
+                                              embedding_dimension => 3);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_chunks
+NOTICE:  Strategy: token_based, chunk_size: 400, overlap: 50
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Six triggers, all distinct: three per column with no collisions
+SELECT count(*) AS long_name_trigger_count FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+ long_name_trigger_count 
+-------------------------
+                       6
+(1 row)
+
+SELECT count(DISTINCT tgname) AS long_name_distinct_names FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+ long_name_distinct_names 
+--------------------------
+                        6
+(1 row)
+
+-- Deleting must still clean up both columns' chunks
+DELETE FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;
+SELECT count(*) AS long_name_chunks_a FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_chunks;
+ long_name_chunks_a 
+--------------------
+                  0
+(1 row)
+
+SELECT count(*) AS long_name_chunks_b FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_chunks;
+ long_name_chunks_b 
+--------------------
+                  0
+(1 row)
+
+-- Whole-table teardown must remove all six despite the shortened names
+SELECT pgedge_vectorizer.disable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_vectorization_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaaaa_5160e7bf_vectorization_delete_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaa_5160e7bf_vectorization_truncate_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_vectorization_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaaaa_6431d834_vectorization_delete_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaa_6431d834_vectorization_truncate_trigger
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+SELECT count(*) AS long_name_triggers_after_disable FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+ long_name_triggers_after_disable 
+----------------------------------
+                                0
+(1 row)
+
+DROP TABLE dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;

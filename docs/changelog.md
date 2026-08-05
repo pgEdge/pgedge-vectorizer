@@ -36,6 +36,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   worker services one database before yielding its slot when there are more
   configured databases than workers. It is ignored when every configured
   database can have its own worker, in which case workers stay resident.
+- `pgedge_vectorizer.refresh_triggers()` recreates the DELETE and TRUNCATE
+  cleanup triggers for every registered vectorizer, returning the number
+  recreated. Upgrading repairs existing tables automatically, so this is only
+  needed if a trigger has been dropped by hand, or on an installation whose
+  vectorized tables were created under a build predating those triggers.
+- `pgedge_vectorizer.vectorizers` now records the document identifier column and
+  its type, so cleanup triggers can be recreated without re-detecting it.
 
 ### Changed
 
@@ -58,6 +65,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   list was silently never serviced: its queue accumulated entries that were
   never handled, with nothing logged to indicate it. With the default
   `num_workers = 2` and five databases configured, three of them were affected.
+- Deleting rows from a vectorized source table, or truncating it, no longer
+  leaves orphaned chunks, embeddings, queue entries and BM25 document
+  frequencies behind
+  ([#24](https://github.com/pgEdge/pgedge-vectorizer/issues/24)). Vectorization
+  previously installed an `AFTER INSERT OR UPDATE` trigger only, so removing
+  source data left every piece of derived data in place: vector and hybrid
+  search returned hits pointing at rows that no longer existed, the queue spent
+  embedding API calls on chunks for deleted rows, and `idf_weight` drifted for
+  the whole corpus, distorting relevance ranking for every query rather than
+  only those touching deleted rows.
+
+  Vectorization now installs three triggers per column, adding an `AFTER DELETE`
+  and an `AFTER TRUNCATE` trigger. The DELETE trigger is statement-level and uses
+  a transition table, so a bulk delete stays set-based rather than doing per-row
+  work. **Upgrading also repairs tables that were already vectorized**, which
+  otherwise would have kept leaking silently.
 
 ## [1.0] - 2026-03-13
 

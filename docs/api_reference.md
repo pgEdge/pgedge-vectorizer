@@ -72,6 +72,20 @@ SELECT pgedge_vectorizer.disable_vectorization(
 - `source_column`: Column to disable (NULL = disable all columns)
 - `drop_chunk_table`: Whether to drop the chunk table
 
+### refresh_triggers()
+
+Recreate the DELETE and TRUNCATE cleanup triggers for every registered vectorizer.
+
+```sql
+SELECT pgedge_vectorizer.refresh_triggers();
+```
+
+**Returns:** the number of vectorized columns whose triggers were recreated.
+
+Vectorization installs three triggers per column: one for INSERT and UPDATE, one for DELETE, and one for TRUNCATE. Upgrading the extension repairs tables that were vectorized before the cleanup triggers existed, so this function is not normally needed. Use it if a trigger has been dropped by hand, or on an installation that acquired its vectorized tables under a build predating the cleanup triggers and so will never run the relevant upgrade script.
+
+Columns whose document identifier is not recorded in `pgedge_vectorizer.vectorizers` are skipped with a warning rather than guessed at; re-run `enable_vectorization()` for those.
+
 ### chunk_text()
 
 Manually chunk text content.
