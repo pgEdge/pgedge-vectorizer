@@ -359,12 +359,8 @@ database_has_worker(const char *dbname)
 }
 
 /*
- * One pass over the database list, spawning workers where they are missing.
- *
- * Databases are visited from a persistent cursor rather than always from the
- * head of the list. Combined with the service quantum that makes busy workers
- * relinquish their slots, this is what guarantees that every database is
- * eventually serviced when there are more databases than slots.
+ * Stop the newest workers until no more than num_workers remain, so that
+ * lowering num_workers takes effect without waiting for workers to yield.
  */
 static void
 launcher_retire_surplus(void)
@@ -427,6 +423,11 @@ launcher_retire_unconfigured(char **db_names, int db_count)
 
 /*
  * One pass over the database list, spawning workers where they are missing.
+ *
+ * Databases are visited from a persistent cursor rather than always from the
+ * head of the list. Combined with the service quantum that makes busy workers
+ * relinquish their slots, this is what guarantees that every database is
+ * eventually serviced when there are more databases than slots.
  */
 static void
 launcher_sweep(char **db_names, int db_count)

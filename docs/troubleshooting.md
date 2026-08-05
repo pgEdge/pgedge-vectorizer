@@ -37,7 +37,7 @@ SELECT pg_reload_conf();
 1. Increase workers:
 ```sql
 ALTER SYSTEM SET pgedge_vectorizer.num_workers = 4;
--- Requires restart
+SELECT pg_reload_conf();
 ```
 
 2. Increase batch size:
