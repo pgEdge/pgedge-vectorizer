@@ -1,0 +1,152 @@
+-- DELETE and TRUNCATE cleanup test
+--
+-- Verifies that removing source rows removes their derived chunks, queue
+-- entries and BM25 statistics, rather than leaving them orphaned (issue #24).
+--
+-- Uses embedding_dimension => 3 and asserts only on row counts and trigger
+-- existence, never on embedding values, so no provider credentials are needed.
+CREATE TABLE dt_docs (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO dt_docs (body) VALUES
+    (repeat('alpha beta gamma ', 20)),
+    (repeat('delta epsilon zeta ', 20)),
+    (repeat('eta theta iota ', 20));
+SELECT pgedge_vectorizer.enable_vectorization('dt_docs', 'body',
+                                              embedding_dimension => 3);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "dt_docs_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: dt_docs -> dt_docs_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 400, overlap: 50
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 3 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- All three triggers should now exist
+SELECT tgname FROM pg_trigger
+ WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal
+ ORDER BY tgname;
+                   tgname                    
+---------------------------------------------
+ dt_docs_body_vectorization_delete_trigger
+ dt_docs_body_vectorization_trigger
+ dt_docs_body_vectorization_truncate_trigger
+(3 rows)
+
+-- Deleting one row removes only that row's chunks
+SELECT count(*) > 0 AS has_chunks_for_row1
+  FROM dt_docs_body_chunks WHERE source_id = 1;
+ has_chunks_for_row1 
+---------------------
+ t
+(1 row)
+
+DELETE FROM dt_docs WHERE id = 1;
+SELECT count(*) AS chunks_for_deleted_row
+  FROM dt_docs_body_chunks WHERE source_id = 1;
+ chunks_for_deleted_row 
+------------------------
+                      0
+(1 row)
+
+SELECT count(*) > 0 AS other_rows_untouched
+  FROM dt_docs_body_chunks WHERE source_id = 2;
+ other_rows_untouched 
+----------------------
+ t
+(1 row)
+
+-- No queue entry should reference a chunk that no longer exists
+SELECT count(*) AS orphaned_queue_entries
+  FROM pgedge_vectorizer.queue q
+ WHERE q.chunk_table = 'dt_docs_body_chunks'
+   AND NOT EXISTS (SELECT 1 FROM dt_docs_body_chunks c WHERE c.id = q.chunk_id);
+ orphaned_queue_entries 
+------------------------
+                      0
+(1 row)
+
+-- Bulk delete in a single statement, which is the case the statement-level
+-- trigger exists to handle without degenerating into per-row work
+DELETE FROM dt_docs;
+SELECT count(*) AS chunks_after_bulk_delete FROM dt_docs_body_chunks;
+ chunks_after_bulk_delete 
+--------------------------
+                        0
+(1 row)
+
+-- TRUNCATE also cleans up
+INSERT INTO dt_docs (body) VALUES (repeat('kappa lambda mu ', 20));
+SELECT count(*) > 0 AS chunks_before_truncate FROM dt_docs_body_chunks;
+ chunks_before_truncate 
+------------------------
+ t
+(1 row)
+
+TRUNCATE dt_docs;
+SELECT count(*) AS chunks_after_truncate FROM dt_docs_body_chunks;
+ chunks_after_truncate 
+-----------------------
+                     0
+(1 row)
+
+SELECT count(*) AS idf_after_truncate FROM dt_docs_body_chunks_idf_stats;
+ idf_after_truncate 
+--------------------
+                  0
+(1 row)
+
+SELECT count(*) AS queue_after_truncate
+  FROM pgedge_vectorizer.queue WHERE chunk_table = 'dt_docs_body_chunks';
+ queue_after_truncate 
+----------------------
+                    0
+(1 row)
+
+-- refresh_triggers() restores triggers dropped by hand, and is idempotent
+DROP TRIGGER dt_docs_body_vectorization_delete_trigger ON dt_docs;
+DROP TRIGGER dt_docs_body_vectorization_truncate_trigger ON dt_docs;
+SELECT count(*) AS triggers_after_manual_drop FROM pg_trigger
+ WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
+ triggers_after_manual_drop 
+----------------------------
+                          1
+(1 row)
+
+SELECT pgedge_vectorizer.refresh_triggers() AS refreshed;
+ refreshed 
+-----------
+         1
+(1 row)
+
+SELECT count(*) AS triggers_after_refresh FROM pg_trigger
+ WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
+ triggers_after_refresh 
+------------------------
+                      3
+(1 row)
+
+SELECT pgedge_vectorizer.refresh_triggers() AS refreshed_again;
+ refreshed_again 
+-----------------
+               1
+(1 row)
+
+-- disable_vectorization() must remove every trigger it created
+SELECT pgedge_vectorizer.disable_vectorization('dt_docs', 'body', true);
+NOTICE:  Vectorization disabled and chunk table dropped: dt_docs_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+SELECT count(*) AS triggers_after_disable FROM pg_trigger
+ WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
+ triggers_after_disable 
+------------------------
+                      0
+(1 row)
+
+-- Clean up
+DROP TABLE dt_docs;

@@ -434,7 +434,11 @@ SELECT pgedge_vectorizer.disable_vectorization(
     'hybrid_multi_test'::regclass, NULL, true
 );
 NOTICE:  Dropped trigger: hybrid_multi_test_title_vectorization_trigger
+NOTICE:  Dropped trigger: hybrid_multi_test_title_vectorization_delete_trigger
+NOTICE:  Dropped trigger: hybrid_multi_test_title_vectorization_truncate_trigger
 NOTICE:  Dropped trigger: hybrid_multi_test_body_vectorization_trigger
+NOTICE:  Dropped trigger: hybrid_multi_test_body_vectorization_delete_trigger
+NOTICE:  Dropped trigger: hybrid_multi_test_body_vectorization_truncate_trigger
 NOTICE:  Vectorization disabled and chunk table dropped: hybrid_multi_test_title_chunks
 NOTICE:  Vectorization disabled and chunk table dropped: hybrid_multi_test_body_chunks
  disable_vectorization 
