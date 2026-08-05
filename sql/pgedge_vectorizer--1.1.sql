@@ -135,6 +135,30 @@ COMMENT ON FUNCTION pgedge_vectorizer.bm25_tokenize IS
 -- SQL Functions
 ---------------------------------------------------------------------------
 
+-- Build a trigger name that keeps its distinguishing suffix within PostgreSQL's
+-- 63-byte identifier limit.
+--
+-- The cleanup trigger names differ only in their final word, so letting
+-- PostgreSQL truncate them would make the delete and truncate names identical
+-- for a sufficiently long table and column, and the second
+-- CREATE OR REPLACE TRIGGER would then silently replace the first, losing a
+-- cleanup trigger with no error at all.  Truncate the variable prefix instead,
+-- so that the suffix always survives.
+--
+-- The limit is counted in characters rather than bytes, which is conservative
+-- for ASCII identifiers and the overwhelmingly common case.
+CREATE FUNCTION pgedge_vectorizer.cleanup_trigger_name(
+    p_prefix TEXT,
+    p_suffix TEXT
+) RETURNS TEXT AS $$
+BEGIN
+    RETURN left(p_prefix, 63 - length(p_suffix)) || p_suffix;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+COMMENT ON FUNCTION pgedge_vectorizer.cleanup_trigger_name IS
+'Build a trigger name whose distinguishing suffix survives identifier truncation';
+
 -- Enable vectorization for a table/column
 CREATE FUNCTION pgedge_vectorizer.enable_vectorization(
     source_table REGCLASS,
@@ -306,7 +330,9 @@ BEGIN
         REFERENCING OLD TABLE AS old_rows
         FOR EACH STATEMENT
         EXECUTE FUNCTION pgedge_vectorizer.vectorization_delete_trigger(%L, %L, %L, %L)',
-        source_table::TEXT || '_' || source_column || '_vectorization_delete_trigger',
+        pgedge_vectorizer.cleanup_trigger_name(
+            source_table::TEXT || '_' || source_column,
+            '_vectorization_delete_trigger'),
         source_table,
         source_column, chunk_table, source_pk, pk_col_type);
 
@@ -316,7 +342,9 @@ BEGIN
         AFTER TRUNCATE ON %s
         FOR EACH STATEMENT
         EXECUTE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger(%L)',
-        source_table::TEXT || '_' || source_column || '_vectorization_truncate_trigger',
+        pgedge_vectorizer.cleanup_trigger_name(
+            source_table::TEXT || '_' || source_column,
+            '_vectorization_truncate_trigger'),
         source_table, chunk_table);
 
     RAISE NOTICE 'Vectorization enabled: % -> %', source_table, chunk_table;
@@ -455,10 +483,14 @@ BEGIN
         -- Drop triggers
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, source_table);
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s',
-                       source_table::TEXT || '_' || source_column || '_vectorization_delete_trigger',
+                       pgedge_vectorizer.cleanup_trigger_name(
+                           source_table::TEXT || '_' || source_column,
+                           '_vectorization_delete_trigger'),
                        source_table);
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s',
-                       source_table::TEXT || '_' || source_column || '_vectorization_truncate_trigger',
+                       pgedge_vectorizer.cleanup_trigger_name(
+                           source_table::TEXT || '_' || source_column,
+                           '_vectorization_truncate_trigger'),
                        source_table);
 
         -- Remove orphaned queue items for this chunk table
@@ -572,7 +604,9 @@ BEGIN
             REFERENCING OLD TABLE AS old_rows
             FOR EACH STATEMENT
             EXECUTE FUNCTION pgedge_vectorizer.vectorization_delete_trigger(%L, %L, %L, %L)',
-            v.source_table || '_' || v.source_column || '_vectorization_delete_trigger',
+            pgedge_vectorizer.cleanup_trigger_name(
+                v.source_table || '_' || v.source_column,
+                '_vectorization_delete_trigger'),
             v.source_table,
             v.source_column, v.chunk_table, v.source_pk, v.pk_type);
 
@@ -581,7 +615,9 @@ BEGIN
             AFTER TRUNCATE ON %s
             FOR EACH STATEMENT
             EXECUTE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger(%L)',
-            v.source_table || '_' || v.source_column || '_vectorization_truncate_trigger',
+            pgedge_vectorizer.cleanup_trigger_name(
+                v.source_table || '_' || v.source_column,
+                '_vectorization_truncate_trigger'),
             v.source_table, v.chunk_table);
 
         refreshed := refreshed + 1;
@@ -639,6 +675,45 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.bm25_decrement_idf_stats IS
 'Decrement doc_freq in the _idf_stats table for a set of terms before their source chunks are deleted';
+
+-- Recompute total_docs and idf_weight for every term from the current chunk count.
+--
+-- bm25_decrement_idf_stats() sets total_docs from the chunk count at the moment
+-- it runs, which is right for a single document but wrong when several are
+-- removed by one statement: called once per document while the chunks are all
+-- still present, every call sees the same unchanged count and only the last
+-- one's value survives, leaving total_docs disagreeing with the doc_freq values
+-- that did accumulate.  Call this once after the chunks have gone to bring the
+-- corpus total back in step.
+CREATE FUNCTION pgedge_vectorizer.bm25_resync_idf_totals(
+    p_chunk_table TEXT
+) RETURNS VOID AS $$
+DECLARE
+    total INT;
+BEGIN
+    IF to_regclass(p_chunk_table || '_idf_stats') IS NULL THEN
+        RETURN;
+    END IF;
+
+    EXECUTE format('SELECT count(*)::int FROM %I', p_chunk_table) INTO total;
+
+    EXECUTE format(
+        'UPDATE %I SET'
+        '    total_docs = $1,'
+        '    idf_weight = CASE'
+        '                     WHEN doc_freq <= 0 THEN 0.0'
+        '                     ELSE ln(1.0 + ($1::float8 - doc_freq + 0.5)'
+        '                                  / (doc_freq + 0.5))'
+        '                 END,'
+        '    updated_at = now()',
+        p_chunk_table || '_idf_stats')
+    USING total;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.bm25_resync_idf_totals IS
+'Recompute total_docs and idf_weight for all terms from the current chunk count';
+
 
 -- Statement-level trigger function cleaning up after DELETE on a source table.
 --
@@ -704,6 +779,11 @@ BEGIN
     EXECUTE format(
         'DELETE FROM %I WHERE source_id IN (SELECT o.%I::%s FROM old_rows o)',
         chunk_table, pk_col, pk_type);
+
+    -- Bring the corpus total back in step.  The per-document decrements above
+    -- each set total_docs from the then-unchanged chunk count, so on a bulk
+    -- delete only the last one's value would otherwise survive.
+    PERFORM pgedge_vectorizer.bm25_resync_idf_totals(chunk_table);
 
     RETURN NULL;
 END;

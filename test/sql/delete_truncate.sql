@@ -37,10 +37,24 @@ SELECT count(*) AS orphaned_queue_entries
  WHERE q.chunk_table = 'dt_docs_body_chunks'
    AND NOT EXISTS (SELECT 1 FROM dt_docs_body_chunks c WHERE c.id = q.chunk_id);
 
+-- Seed BM25 statistics the way the worker would, so that the corpus accounting
+-- below is actually exercised: the worker does not run during these tests, so
+-- _idf_stats would otherwise be empty and the assertion vacuous.
+INSERT INTO dt_docs_body_chunks_idf_stats (term, doc_freq, total_docs, idf_weight)
+VALUES ('delta', 1, 2, 0.9), ('eta', 1, 2, 0.9);
+
 -- Bulk delete in a single statement, which is the case the statement-level
 -- trigger exists to handle without degenerating into per-row work
 DELETE FROM dt_docs;
 SELECT count(*) AS chunks_after_bulk_delete FROM dt_docs_body_chunks;
+
+-- The corpus total must agree with the surviving chunk count. Decrementing per
+-- document while the chunks are all still present sets total_docs from the same
+-- unchanged count every time, so without a final resync only the last
+-- document's value would survive and it would disagree with doc_freq.
+SELECT count(*) AS idf_rows_with_wrong_total
+  FROM dt_docs_body_chunks_idf_stats
+ WHERE total_docs <> (SELECT count(*) FROM dt_docs_body_chunks);
 
 -- TRUNCATE also cleans up
 INSERT INTO dt_docs (body) VALUES (repeat('kappa lambda mu ', 20));
@@ -56,10 +70,12 @@ DROP TRIGGER dt_docs_body_vectorization_delete_trigger ON dt_docs;
 DROP TRIGGER dt_docs_body_vectorization_truncate_trigger ON dt_docs;
 SELECT count(*) AS triggers_after_manual_drop FROM pg_trigger
  WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
-SELECT pgedge_vectorizer.refresh_triggers() AS refreshed;
+-- refresh_triggers() counts every registered vectorizer, including any left by
+-- earlier test files, so assert only that it did something.
+SELECT pgedge_vectorizer.refresh_triggers() >= 1 AS refreshed;
 SELECT count(*) AS triggers_after_refresh FROM pg_trigger
  WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
-SELECT pgedge_vectorizer.refresh_triggers() AS refreshed_again;
+SELECT pgedge_vectorizer.refresh_triggers() >= 1 AS refreshed_again;
 
 -- disable_vectorization() must remove every trigger it created
 SELECT pgedge_vectorizer.disable_vectorization('dt_docs', 'body', true);
