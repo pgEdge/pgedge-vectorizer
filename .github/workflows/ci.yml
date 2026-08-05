@@ -38,7 +38,8 @@ jobs:
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }} \
             libcurl4-openssl-dev \
-            build-essential
+            build-essential \
+            libipc-run-perl
 
       - name: Install PostgreSQL (macOS)
         if: runner.os == 'macOS'

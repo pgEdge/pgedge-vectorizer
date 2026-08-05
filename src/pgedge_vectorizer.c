@@ -31,7 +31,7 @@ _PG_init(void)
 	if (process_shared_preload_libraries_in_progress)
 	{
 		register_background_workers();
-		elog(LOG, "pgedge_vectorizer: %d background worker(s) registered",
+		elog(LOG, "pgedge_vectorizer: launcher registered (max %d concurrent worker(s))",
 			 pgedge_vectorizer_num_workers);
 	}
 

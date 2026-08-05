@@ -243,7 +243,8 @@ An explicitly configured `api_url` always takes precedence over the provider def
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `pgedge_vectorizer.num_workers` | integer | `2` | Number of background workers (requires restart) |
+| `pgedge_vectorizer.num_workers` | integer | `2` | Maximum number of concurrent background workers. Databases are serviced in rotation, so every configured database is processed even when there are more databases than workers |
+| `pgedge_vectorizer.worker_service_quantum` | integer | `60s` | Seconds a worker services one database before yielding its slot, when there are more databases than workers. Ignored when every database can have its own worker |
 | `pgedge_vectorizer.batch_size` | integer | `10` | Batch size for embedding generation |
 | `pgedge_vectorizer.max_retries` | integer | `3` | Maximum retry attempts for failed embeddings |
 | `pgedge_vectorizer.worker_poll_interval` | integer | `1000` | Worker polling interval in milliseconds |

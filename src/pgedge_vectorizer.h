@@ -56,6 +56,7 @@ extern char *pgedge_vectorizer_model;
 extern char *pgedge_vectorizer_extra_headers;
 extern char *pgedge_vectorizer_databases;
 extern int pgedge_vectorizer_num_workers;
+extern int pgedge_vectorizer_worker_service_quantum;
 extern int pgedge_vectorizer_batch_size;
 extern int pgedge_vectorizer_max_retries;
 extern int pgedge_vectorizer_worker_poll_interval;
@@ -189,8 +190,16 @@ List *parse_markdown_structure(const char *content);
 void free_markdown_elements(List *elements);
 
 /* worker.c */
+extern PGDLLEXPORT PGEDGE_NORETURN void pgedge_vectorizer_launcher_main(Datum main_arg) PGEDGE_NORETURN_SUFFIX;
 extern PGDLLEXPORT PGEDGE_NORETURN void pgedge_vectorizer_worker_main(Datum main_arg) PGEDGE_NORETURN_SUFFIX;
 void register_background_workers(void);
+
+/*
+ * Upper bound on concurrent workers. Shared between the num_workers GUC
+ * maximum and the launcher's fixed slot array, so that the two cannot drift
+ * apart.
+ */
+#define PGEDGE_VECTORIZER_MAX_WORKERS	32
 
 /* queue.c */
 Datum pgedge_vectorizer_queue_status(PG_FUNCTION_ARGS);

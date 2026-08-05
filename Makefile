@@ -60,6 +60,34 @@ ifeq ($(PGXS),)
 $(error pg_config not found. Please install PostgreSQL development packages or set PG_CONFIG)
 endif
 
+# TAP tests
+#
+# Multi-database worker coverage cannot be expressed in pg_regress, which runs
+# against a single database and cannot set shared_preload_libraries, so those
+# properties are tested with TAP instead.
+#
+# Only enable them when this installation can actually run them, so that an
+# environment lacking the plumbing simply does not run them rather than failing
+# the whole suite. Two things are needed:
+#
+#   - The PostgreSQL Perl test modules. Homebrew builds on macOS do not ship
+#     these at all.
+#   - IPC::Run, which PostgreSQL::Test::Cluster requires at compile time. It is
+#     a separate package (libipc-run-perl on Debian and Ubuntu) and is not
+#     pulled in by the server development package, so the modules being present
+#     does not imply it is.
+#
+# CI installs IPC::Run explicitly so that these tests really do run there; a
+# silent skip everywhere would be worse than useless, because it would look like
+# the coverage property was being verified when it was not.
+PG_PERL_TEST_DIR := $(dir $(PGXS))../../src/test/perl
+ifneq ($(wildcard $(PG_PERL_TEST_DIR)/PostgreSQL/Test/Cluster.pm),)
+ifeq ($(shell perl -MIPC::Run -e 'print "yes"' 2>/dev/null),yes)
+TAP_TESTS = 1
+PROVE_TESTS = test/t/*.pl
+endif
+endif
+
 include $(PGXS)
 
 # Version compatibility check
