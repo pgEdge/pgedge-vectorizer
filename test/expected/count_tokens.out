@@ -1,0 +1,181 @@
+-- count_tokens.sql
+-- Regression tests for count_tokens() and refresh_token_counts().
+---------------------------------------------------------------------------
+-- Test 1: count_tokens() is registered
+---------------------------------------------------------------------------
+SELECT proname
+FROM pg_proc
+WHERE proname = 'count_tokens'
+  AND pronamespace = (
+      SELECT oid FROM pg_namespace WHERE nspname = 'pgedge_vectorizer'
+  );
+   proname    
+--------------
+ count_tokens
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 2: count_tokens() approximation values
+---------------------------------------------------------------------------
+-- 'hello world' = 11 chars, (11+3)/4 = 3
+SELECT pgedge_vectorizer.count_tokens('hello world') AS tokens;
+ tokens 
+--------
+      3
+(1 row)
+
+-- empty string returns 0
+SELECT pgedge_vectorizer.count_tokens('') AS tokens;
+ tokens 
+--------
+      0
+(1 row)
+
+-- 'test' = 4 chars, (4+3)/4 = 1
+SELECT pgedge_vectorizer.count_tokens('test') AS tokens;
+ tokens 
+--------
+      1
+(1 row)
+
+-- NULL returns NULL (STRICT function)
+SELECT pgedge_vectorizer.count_tokens(NULL) IS NULL AS is_null;
+ is_null 
+---------
+ t
+(1 row)
+
+-- '你好世界' = 4 UTF-8 characters, not 12 bytes; (4+3)/4 = 1
+SELECT pgedge_vectorizer.count_tokens('你好世界') AS tokens;
+ tokens 
+--------
+      1
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 3: refresh_token_counts() is registered
+---------------------------------------------------------------------------
+SELECT proname
+FROM pg_proc
+WHERE proname = 'refresh_token_counts'
+  AND pronamespace = (
+      SELECT oid FROM pg_namespace WHERE nspname = 'pgedge_vectorizer'
+  );
+       proname        
+----------------------
+ refresh_token_counts
+(1 row)
+
+---------------------------------------------------------------------------
+-- Test 4: refresh_token_counts() updates rows and returns the count
+---------------------------------------------------------------------------
+CREATE TABLE count_tokens_refresh_test (
+    id      BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+INSERT INTO count_tokens_refresh_test (content)
+VALUES ('Refresh test document one.'),
+       ('Refresh test document two.');
+SELECT pgedge_vectorizer.enable_vectorization(
+    'count_tokens_refresh_test'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "count_tokens_refresh_test_content_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: count_tokens_refresh_test -> count_tokens_refresh_test_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 2 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Force token_count to 0 to simulate stale values
+UPDATE count_tokens_refresh_test_content_chunks SET token_count = 0;
+SELECT COUNT(*) AS zeroed
+FROM count_tokens_refresh_test_content_chunks
+WHERE token_count = 0;
+ zeroed 
+--------
+      2
+(1 row)
+
+-- refresh_token_counts() should update all rows and return the exact count
+SELECT pgedge_vectorizer.refresh_token_counts(
+    'count_tokens_refresh_test_content_chunks'::regclass
+) = (
+    SELECT COUNT(*) FROM count_tokens_refresh_test_content_chunks
+) AS refresh_returned_count;
+NOTICE:  refresh_token_counts: updated 2 rows in count_tokens_refresh_test_content_chunks
+ refresh_returned_count 
+------------------------
+ t
+(1 row)
+
+-- All token_counts should now be positive
+SELECT COALESCE(BOOL_AND(token_count > 0), false) AS all_refreshed
+FROM count_tokens_refresh_test_content_chunks;
+ all_refreshed 
+---------------
+ t
+(1 row)
+
+-- Cleanup
+SELECT pgedge_vectorizer.disable_vectorization(
+    'count_tokens_refresh_test'::regclass, 'content', true
+);
+NOTICE:  Vectorization disabled and chunk table dropped: count_tokens_refresh_test_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE count_tokens_refresh_test;
+---------------------------------------------------------------------------
+-- Test 5: refresh_token_counts() works with a schema-qualified table
+---------------------------------------------------------------------------
+CREATE SCHEMA count_tokens_ns_test;
+CREATE TABLE count_tokens_ns_test.ns_chunks (
+    id          BIGSERIAL PRIMARY KEY,
+    source_id   BIGINT    NOT NULL DEFAULT 1,
+    content     TEXT      NOT NULL,
+    token_count INT
+);
+INSERT INTO count_tokens_ns_test.ns_chunks (content)
+VALUES ('Schema-qualified refresh test.'),
+       ('Another row for schema test.');
+UPDATE count_tokens_ns_test.ns_chunks SET token_count = 0;
+SELECT COUNT(*) AS zeroed
+FROM count_tokens_ns_test.ns_chunks
+WHERE token_count = 0;
+ zeroed 
+--------
+      2
+(1 row)
+
+SELECT pgedge_vectorizer.refresh_token_counts(
+    'count_tokens_ns_test.ns_chunks'::regclass
+) = (
+    SELECT COUNT(*) FROM count_tokens_ns_test.ns_chunks
+) AS refresh_returned_count;
+NOTICE:  refresh_token_counts: updated 2 rows in count_tokens_ns_test.ns_chunks
+ refresh_returned_count 
+------------------------
+ t
+(1 row)
+
+SELECT COALESCE(BOOL_AND(token_count > 0), false) AS all_refreshed
+FROM count_tokens_ns_test.ns_chunks;
+ all_refreshed 
+---------------
+ t
+(1 row)
+
+-- Cleanup
+DROP TABLE count_tokens_ns_test.ns_chunks;
+DROP SCHEMA count_tokens_ns_test;

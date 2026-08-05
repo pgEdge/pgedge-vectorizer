@@ -129,6 +129,17 @@ LANGUAGE C STRICT;
 COMMENT ON FUNCTION pgedge_vectorizer.bm25_tokenize IS
 'Tokenize text and return the non-stopword terms (useful for testing)';
 
+-- UTF-8 aware approximate token counter (C implementation)
+CREATE OR REPLACE FUNCTION pgedge_vectorizer.count_tokens(
+    p_text TEXT
+) RETURNS INT
+AS 'MODULE_PATHNAME', 'pgedge_vectorizer_count_tokens_sql'
+LANGUAGE C IMMUTABLE STRICT;
+
+COMMENT ON FUNCTION pgedge_vectorizer.count_tokens IS
+'Approximate token count using UTF-8 character counting (~4 chars/token). '
+'Used internally by the chunking engine and for stored token_count values.';
+
 ---------------------------------------------------------------------------
 -- SQL Functions
 ---------------------------------------------------------------------------
@@ -344,7 +355,7 @@ BEGIN
                               (sparse_embedding IS NULL) AS needs_sparse',
                     chunk_table, chunk_table, chunk_table, chunk_table, chunk_table)
                 USING row_record.pk_val, i, chunk_text,
-                      length(chunk_text) / 4  -- Approximate token count
+                      pgedge_vectorizer.count_tokens(chunk_text)
                 INTO chunk_id, needs_embedding, needs_sparse;
 
                 -- Queue if dense or sparse work is needed.
@@ -661,7 +672,7 @@ BEGIN
             VALUES ($1::%s, $2, $3, $4)
             RETURNING id', chunk_table, pk_type)
         USING source_id_val, i, chunk_text,
-              length(chunk_text) / 4  -- Approximate token count
+              pgedge_vectorizer.count_tokens(chunk_text)
         INTO chunk_id;
 
         -- Queue for embedding
@@ -956,7 +967,7 @@ BEGIN
                     VALUES ($1::%s, $2, $3, $4)
                     RETURNING id', chunk_table_name, pk_type)
                 USING row_record.pk_val, i, chunk_text,
-                      length(chunk_text) / 4  -- Approximate token count
+                      pgedge_vectorizer.count_tokens(chunk_text)
                 INTO chunk_id;
 
                 -- Queue for embedding
@@ -975,6 +986,35 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.recreate_chunks IS
 'Delete all chunks and recreate from source table (complete rebuild)';
+
+---------------------------------------------------------------------------
+-- refresh_token_counts() — recompute stored token_count for existing chunks
+---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION pgedge_vectorizer.refresh_token_counts(
+    p_chunk_table REGCLASS
+) RETURNS BIGINT AS $$
+DECLARE
+    rows_updated BIGINT;
+BEGIN
+    EXECUTE format(
+        'UPDATE %s
+         SET    token_count = pgedge_vectorizer.count_tokens(content)
+         WHERE  token_count IS DISTINCT FROM pgedge_vectorizer.count_tokens(content)',
+        p_chunk_table
+    );
+    GET DIAGNOSTICS rows_updated = ROW_COUNT;
+    RAISE NOTICE 'refresh_token_counts: updated % rows in %',
+        rows_updated, p_chunk_table::TEXT;
+    RETURN rows_updated;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.refresh_token_counts IS
+'Recompute token_count for every row in the given chunk table using '
+'count_tokens(). Useful for back-filling accurate counts after adding '
+'new rows outside the normal trigger path, or after a schema change. '
+'Returns the number of rows updated.';
 
 -- Get configuration summary
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.show_config()

@@ -55,6 +55,15 @@ count_tokens(const char *text, const char *model)
 	return token_estimate;
 }
 
+PG_FUNCTION_INFO_V1(pgedge_vectorizer_count_tokens_sql);
+Datum
+pgedge_vectorizer_count_tokens_sql(PG_FUNCTION_ARGS)
+{
+	text *txt = PG_GETARG_TEXT_PP(0);
+	char *s   = text_to_cstring(txt);
+	PG_RETURN_INT32(count_tokens(s, pgedge_vectorizer_model));
+}
+
 /*
  * Tokenize text into token IDs
  *
