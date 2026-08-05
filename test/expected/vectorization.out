@@ -37,11 +37,11 @@ WHERE tablename = 'test_docs_content_chunks';
 -- Verify trigger was created
 SELECT tgname FROM pg_trigger
 WHERE tgname LIKE '%test_docs%vectorization%';
-                      tgname                      
---------------------------------------------------
+                          tgname                           
+-----------------------------------------------------------
  test_docs_content_vectorization_trigger
- test_docs_content_vectorization_delete_trigger
- test_docs_content_vectorization_truncate_trigger
+ test_docs_content_9bafa066_vectorization_delete_trigger
+ test_docs_content_9bafa066_vectorization_truncate_trigger
 (3 rows)
 
 -- Insert a test document
@@ -119,11 +119,11 @@ NOTICE:  Processed 1 existing rows
 -- Verify trigger was re-created
 SELECT tgname FROM pg_trigger
 WHERE tgname LIKE '%test_docs%vectorization%';
-                      tgname                      
---------------------------------------------------
+                          tgname                           
+-----------------------------------------------------------
  test_docs_content_vectorization_trigger
- test_docs_content_vectorization_delete_trigger
- test_docs_content_vectorization_truncate_trigger
+ test_docs_content_9bafa066_vectorization_delete_trigger
+ test_docs_content_9bafa066_vectorization_truncate_trigger
 (3 rows)
 
 -- Verify chunks still exist (upserted, not duplicated)

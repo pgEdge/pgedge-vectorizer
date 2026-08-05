@@ -135,29 +135,44 @@ COMMENT ON FUNCTION pgedge_vectorizer.bm25_tokenize IS
 -- SQL Functions
 ---------------------------------------------------------------------------
 
--- Build a trigger name that keeps its distinguishing suffix within PostgreSQL's
--- 63-byte identifier limit.
+-- Build a cleanup trigger name that stays unique within PostgreSQL's 63-byte
+-- identifier limit.
 --
--- The cleanup trigger names differ only in their final word, so letting
--- PostgreSQL truncate them would make the delete and truncate names identical
--- for a sufficiently long table and column, and the second
--- CREATE OR REPLACE TRIGGER would then silently replace the first, losing a
--- cleanup trigger with no error at all.  Truncate the variable prefix instead,
--- so that the suffix always survives.
+-- Two problems have to be solved at once.  The names differ only in their final
+-- word, so plain truncation would make the delete and truncate names identical
+-- for a long enough table and column, and the second CREATE OR REPLACE TRIGGER
+-- would silently replace the first.  Shortening the readable part instead is not
+-- sufficient either, because two columns on a long-named table would then
+-- shorten to the same string.
 --
--- The limit is counted in characters rather than bytes, which is conservative
--- for ASCII identifiers and the overwhelmingly common case.
+-- So the readable prefix is shortened to fit and a digest of the exact table and
+-- column is appended, which keeps the name unique per vectorized column however
+-- much of the readable part had to go.
+--
+-- Note that a shortened name no longer begins with the source table text, so
+-- teardown must not look these up by name pattern.  disable_vectorization()
+-- finds them by trigger function instead.
 CREATE FUNCTION pgedge_vectorizer.cleanup_trigger_name(
-    p_prefix TEXT,
-    p_suffix TEXT
+    p_source_table  TEXT,
+    p_source_column TEXT,
+    p_suffix        TEXT
 ) RETURNS TEXT AS $$
+DECLARE
+    digest TEXT;
+    room   INT;
 BEGIN
-    RETURN left(p_prefix, 63 - length(p_suffix)) || p_suffix;
+    digest := substr(md5(p_source_table || '.' || p_source_column), 1, 8);
+
+    -- One character for the separator before the digest.
+    room := 63 - length(p_suffix) - length(digest) - 1;
+
+    RETURN left(p_source_table || '_' || p_source_column, GREATEST(room, 0))
+           || '_' || digest || p_suffix;
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
 COMMENT ON FUNCTION pgedge_vectorizer.cleanup_trigger_name IS
-'Build a trigger name whose distinguishing suffix survives identifier truncation';
+'Build a cleanup trigger name that remains unique per vectorized column within the identifier length limit';
 
 -- Enable vectorization for a table/column
 CREATE FUNCTION pgedge_vectorizer.enable_vectorization(
@@ -331,8 +346,7 @@ BEGIN
         FOR EACH STATEMENT
         EXECUTE FUNCTION pgedge_vectorizer.vectorization_delete_trigger(%L, %L, %L, %L)',
         pgedge_vectorizer.cleanup_trigger_name(
-            source_table::TEXT || '_' || source_column,
-            '_vectorization_delete_trigger'),
+            source_table::TEXT, source_column, '_vectorization_delete_trigger'),
         source_table,
         source_column, chunk_table, source_pk, pk_col_type);
 
@@ -343,8 +357,7 @@ BEGIN
         FOR EACH STATEMENT
         EXECUTE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger(%L)',
         pgedge_vectorizer.cleanup_trigger_name(
-            source_table::TEXT || '_' || source_column,
-            '_vectorization_truncate_trigger'),
+            source_table::TEXT, source_column, '_vectorization_truncate_trigger'),
         source_table, chunk_table);
 
     RAISE NOTICE 'Vectorization enabled: % -> %', source_table, chunk_table;
@@ -484,13 +497,11 @@ BEGIN
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, source_table);
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s',
                        pgedge_vectorizer.cleanup_trigger_name(
-                           source_table::TEXT || '_' || source_column,
-                           '_vectorization_delete_trigger'),
+                           source_table::TEXT, source_column, '_vectorization_delete_trigger'),
                        source_table);
         EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s',
                        pgedge_vectorizer.cleanup_trigger_name(
-                           source_table::TEXT || '_' || source_column,
-                           '_vectorization_truncate_trigger'),
+                           source_table::TEXT, source_column, '_vectorization_truncate_trigger'),
                        source_table);
 
         -- Remove orphaned queue items for this chunk table
@@ -515,14 +526,24 @@ BEGIN
         END IF;
     ELSE
         -- Drop all vectorization triggers for this table
+        -- Find vectorization triggers by their trigger function rather than by
+        -- name pattern.  Cleanup trigger names are shortened when the table and
+        -- column are long, so a shortened name need not begin with the source
+        -- table text and a LIKE pattern anchored on it would miss them,
+        -- silently leaving cleanup triggers behind.
         FOR trigger_rec IN
-            SELECT tgname
+            SELECT t.tgname
             FROM pg_trigger t
-            JOIN pg_class c ON t.tgrelid = c.oid
-            WHERE c.oid = source_table
-            -- Matches the row trigger plus the delete and truncate cleanup
-            -- triggers; still prefix-scoped to this source table.
-            AND tgname LIKE source_table::TEXT || '%_vectorization%trigger'
+            WHERE t.tgrelid = source_table
+              AND NOT t.tgisinternal
+              AND t.tgfoid IN (
+                  SELECT p.oid
+                  FROM pg_proc p
+                  JOIN pg_namespace n ON n.oid = p.pronamespace
+                  WHERE n.nspname = 'pgedge_vectorizer'
+                    AND p.proname IN ('vectorization_trigger',
+                                      'vectorization_delete_trigger',
+                                      'vectorization_truncate_trigger'))
         LOOP
             EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_rec.tgname, source_table);
             RAISE NOTICE 'Dropped trigger: %', trigger_rec.tgname;
@@ -605,8 +626,7 @@ BEGIN
             FOR EACH STATEMENT
             EXECUTE FUNCTION pgedge_vectorizer.vectorization_delete_trigger(%L, %L, %L, %L)',
             pgedge_vectorizer.cleanup_trigger_name(
-                v.source_table || '_' || v.source_column,
-                '_vectorization_delete_trigger'),
+                v.source_table, v.source_column, '_vectorization_delete_trigger'),
             v.source_table,
             v.source_column, v.chunk_table, v.source_pk, v.pk_type);
 
@@ -616,8 +636,7 @@ BEGIN
             FOR EACH STATEMENT
             EXECUTE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger(%L)',
             pgedge_vectorizer.cleanup_trigger_name(
-                v.source_table || '_' || v.source_column,
-                '_vectorization_truncate_trigger'),
+                v.source_table, v.source_column, '_vectorization_truncate_trigger'),
             v.source_table, v.chunk_table);
 
         refreshed := refreshed + 1;

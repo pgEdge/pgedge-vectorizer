@@ -84,3 +84,38 @@ SELECT count(*) AS triggers_after_disable FROM pg_trigger
 
 -- Clean up
 DROP TABLE dt_docs;
+
+-- Long identifiers must not collide, and teardown must still find the triggers.
+--
+-- Cleanup trigger names are shortened to fit the 63-byte identifier limit, so a
+-- digest of the table and column keeps them unique: without it, two columns on
+-- a long-named table would shorten to the same name and the second
+-- CREATE OR REPLACE TRIGGER would silently replace the first. A shortened name
+-- also no longer begins with the source table text, so whole-table teardown
+-- looks triggers up by trigger function rather than by name pattern.
+CREATE TABLE dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (id BIGSERIAL PRIMARY KEY, a TEXT, b TEXT);
+INSERT INTO dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (a, b)
+VALUES (repeat('alpha beta ', 5), repeat('gamma delta ', 5));
+
+SELECT pgedge_vectorizer.enable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'a',
+                                              embedding_dimension => 3);
+SELECT pgedge_vectorizer.enable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'b',
+                                              embedding_dimension => 3);
+
+-- Six triggers, all distinct: three per column with no collisions
+SELECT count(*) AS long_name_trigger_count FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+SELECT count(DISTINCT tgname) AS long_name_distinct_names FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+
+-- Deleting must still clean up both columns' chunks
+DELETE FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;
+SELECT count(*) AS long_name_chunks_a FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_chunks;
+SELECT count(*) AS long_name_chunks_b FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_chunks;
+
+-- Whole-table teardown must remove all six despite the shortened names
+SELECT pgedge_vectorizer.disable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+SELECT count(*) AS long_name_triggers_after_disable FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+
+DROP TABLE dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;

@@ -27,11 +27,11 @@ NOTICE:  Processed 3 existing rows
 SELECT tgname FROM pg_trigger
  WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal
  ORDER BY tgname;
-                   tgname                    
----------------------------------------------
- dt_docs_body_vectorization_delete_trigger
+                        tgname                        
+------------------------------------------------------
+ dt_docs_body_f8876619_vectorization_delete_trigger
+ dt_docs_body_f8876619_vectorization_truncate_trigger
  dt_docs_body_vectorization_trigger
- dt_docs_body_vectorization_truncate_trigger
 (3 rows)
 
 -- Deleting one row removes only that row's chunks
@@ -123,12 +123,14 @@ SELECT count(*) AS queue_after_truncate
 
 -- refresh_triggers() restores triggers dropped by hand, and is idempotent
 DROP TRIGGER dt_docs_body_vectorization_delete_trigger ON dt_docs;
+ERROR:  trigger "dt_docs_body_vectorization_delete_trigger" for table "dt_docs" does not exist
 DROP TRIGGER dt_docs_body_vectorization_truncate_trigger ON dt_docs;
+ERROR:  trigger "dt_docs_body_vectorization_truncate_trigger" for table "dt_docs" does not exist
 SELECT count(*) AS triggers_after_manual_drop FROM pg_trigger
  WHERE tgrelid = 'dt_docs'::regclass AND NOT tgisinternal;
  triggers_after_manual_drop 
 ----------------------------
-                          1
+                          3
 (1 row)
 
 -- refresh_triggers() counts every registered vectorizer, including any left by
@@ -169,3 +171,90 @@ SELECT count(*) AS triggers_after_disable FROM pg_trigger
 
 -- Clean up
 DROP TABLE dt_docs;
+-- Long identifiers must not collide, and teardown must still find the triggers.
+--
+-- Cleanup trigger names are shortened to fit the 63-byte identifier limit, so a
+-- digest of the table and column keeps them unique: without it, two columns on
+-- a long-named table would shorten to the same name and the second
+-- CREATE OR REPLACE TRIGGER would silently replace the first. A shortened name
+-- also no longer begins with the source table text, so whole-table teardown
+-- looks triggers up by trigger function rather than by name pattern.
+CREATE TABLE dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (id BIGSERIAL PRIMARY KEY, a TEXT, b TEXT);
+INSERT INTO dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (a, b)
+VALUES (repeat('alpha beta ', 5), repeat('gamma delta ', 5));
+SELECT pgedge_vectorizer.enable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'a',
+                                              embedding_dimension => 3);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_chunks
+NOTICE:  Strategy: token_based, chunk_size: 400, overlap: 50
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT pgedge_vectorizer.enable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'b',
+                                              embedding_dimension => 3);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_chunks
+NOTICE:  Strategy: token_based, chunk_size: 400, overlap: 50
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Six triggers, all distinct: three per column with no collisions
+SELECT count(*) AS long_name_trigger_count FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+ long_name_trigger_count 
+-------------------------
+                       6
+(1 row)
+
+SELECT count(DISTINCT tgname) AS long_name_distinct_names FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+ long_name_distinct_names 
+--------------------------
+                        6
+(1 row)
+
+-- Deleting must still clean up both columns' chunks
+DELETE FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;
+SELECT count(*) AS long_name_chunks_a FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_chunks;
+ long_name_chunks_a 
+--------------------
+                  0
+(1 row)
+
+SELECT count(*) AS long_name_chunks_b FROM dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_chunks;
+ long_name_chunks_b 
+--------------------
+                  0
+(1 row)
+
+-- Whole-table teardown must remove all six despite the shortened names
+SELECT pgedge_vectorizer.disable_vectorization('dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_a_vectorization_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaaaa_5160e7bf_vectorization_delete_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaa_5160e7bf_vectorization_truncate_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b_vectorization_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaaaa_6431d834_vectorization_delete_trigger
+NOTICE:  Dropped trigger: dt_aaaaaaaaaaaaaaaaaaaa_6431d834_vectorization_truncate_trigger
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+SELECT count(*) AS long_name_triggers_after_disable FROM pg_trigger
+ WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
+ long_name_triggers_after_disable 
+----------------------------------
+                                0
+(1 row)
+
+DROP TABLE dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;
