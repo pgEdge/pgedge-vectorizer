@@ -23,6 +23,8 @@ CREATE TABLE pgedge_vectorizer.vectorizers (
     source_table  TEXT NOT NULL,
     source_column NAME NOT NULL,
     chunk_table   TEXT NOT NULL,
+    source_pk     NAME,
+    pk_type       TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (source_table, source_column)
 );
@@ -544,6 +546,109 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.bm25_decrement_idf_stats IS
 'Decrement doc_freq in the _idf_stats table for a set of terms before their source chunks are deleted';
+
+-- Statement-level trigger function cleaning up after DELETE on a source table.
+--
+-- Statement-level rather than row-level so that a bulk delete does not run three
+-- statements plus a tokenisation per row: with the old_rows transition table the
+-- queue and chunk deletions are one set-based statement each.  Only the BM25
+-- decrement needs a loop, because bm25_decrement_idf_stats() takes one
+-- document's terms at a time.
+CREATE FUNCTION pgedge_vectorizer.vectorization_delete_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    content_col TEXT;
+    chunk_table TEXT;
+    pk_col      TEXT;
+    pk_type     TEXT;
+    old_row     RECORD;
+    old_terms   TEXT[];
+    chunk_count INT;
+BEGIN
+    content_col := TG_ARGV[0];
+    chunk_table := TG_ARGV[1];
+    pk_col      := COALESCE(TG_ARGV[2], 'id');
+    pk_type     := COALESCE(TG_ARGV[3], 'bigint');
+
+    -- Decrement BM25 document frequencies before deleting anything, because
+    -- bm25_decrement_idf_stats() derives the new corpus size by counting the
+    -- chunk table and subtracting the count we pass it.  Doing this afterwards
+    -- would understate the corpus and skew idf_weight for every term.
+    FOR old_row IN EXECUTE
+        format('SELECT %I::text AS pk_value, %I::text AS content FROM old_rows',
+               pk_col, content_col)
+    LOOP
+        IF old_row.content IS NULL OR trim(old_row.content) = '' THEN
+            CONTINUE;
+        END IF;
+
+        EXECUTE format(
+            'SELECT count(*)::int FROM %I WHERE source_id = $1::%s',
+            chunk_table, pk_type)
+        INTO chunk_count
+        USING old_row.pk_value;
+
+        IF chunk_count > 0 THEN
+            old_terms := pgedge_vectorizer.bm25_tokenize(trim(old_row.content));
+            PERFORM pgedge_vectorizer.bm25_decrement_idf_stats(
+                chunk_table, old_terms, chunk_count);
+        END IF;
+    END LOOP;
+
+    -- Remove queue entries for the doomed chunks, so the worker does not spend
+    -- embedding API calls on them.  'processing' rows are left alone, matching
+    -- the INSERT/UPDATE path: the worker copes with the chunk having gone.
+    EXECUTE format(
+        'DELETE FROM pgedge_vectorizer.queue
+          WHERE chunk_table = %L
+            AND status IN (''pending'', ''failed'')
+            AND chunk_id IN (
+                SELECT c.id FROM %I c
+                 WHERE c.source_id IN (SELECT o.%I::%s FROM old_rows o))',
+        chunk_table, chunk_table, pk_col, pk_type);
+
+    -- Finally the chunks themselves, which takes the embeddings with them.
+    EXECUTE format(
+        'DELETE FROM %I WHERE source_id IN (SELECT o.%I::%s FROM old_rows o)',
+        chunk_table, pk_col, pk_type);
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.vectorization_delete_trigger IS
+'Statement-level AFTER DELETE trigger removing chunks, queue entries and BM25 statistics for deleted source rows';
+
+-- Statement-level trigger function cleaning up after TRUNCATE on a source table.
+--
+-- Truncating the source orphans every chunk, so there is no per-row work and no
+-- transition table (which TRUNCATE triggers cannot have in any case).  Resetting
+-- _idf_stats wholesale is right because the corpus becomes empty, and mirrors
+-- what recreate_chunks() does when rebuilding from scratch.
+CREATE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    chunk_table TEXT;
+BEGIN
+    chunk_table := TG_ARGV[0];
+
+    EXECUTE format(
+        'DELETE FROM pgedge_vectorizer.queue
+          WHERE chunk_table = %L AND status IN (''pending'', ''failed'')',
+        chunk_table);
+
+    EXECUTE format('TRUNCATE TABLE %I', chunk_table);
+
+    IF to_regclass(chunk_table || '_idf_stats') IS NOT NULL THEN
+        EXECUTE format('TRUNCATE TABLE %I', chunk_table || '_idf_stats');
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.vectorization_truncate_trigger IS
+'Statement-level AFTER TRUNCATE trigger emptying the chunk table, its queue entries and its BM25 statistics';
 
 -- Trigger function for vectorization
 CREATE FUNCTION pgedge_vectorizer.vectorization_trigger()
