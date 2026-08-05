@@ -598,17 +598,16 @@ bm25_compute_sparse_vector(BM25Term *tokens, int ntokens,
  * bm25_update_idf_stats
  *
  * Upsert each token's term into {chunk_table}_idf_stats, incrementing
- * doc_freq and recomputing idf_weight.  Runs inside a subtransaction
- * so that a failure does not abort the outer worker transaction.
+ * doc_freq.  Runs inside a subtransaction so that a failure does not
+ * abort the outer worker transaction.
  * Caller must have an active SPI connection.
  */
 /*
- * upsert_term_idf — insert or update a single term's IDF stats row.
- * total_docs is pre-computed once by the caller; passing it here
- * avoids a full-table count(*) scan per term.
+ * upsert_term_idf — insert or increment a single term's document frequency.
+ * Only doc_freq is stored; the IDF weight is computed on read.
  */
 static void
-upsert_term_idf(const char *chunk_table, const char *term, int total_docs)
+upsert_term_idf(const char *chunk_table, const char *term)
 {
 	char       *safe_term  = quote_literal_cstr(term);
 	char       *tbl_name   = psprintf("%s_idf_stats", chunk_table);
@@ -617,20 +616,12 @@ upsert_term_idf(const char *chunk_table, const char *term, int total_docs)
 	int         ret;
 
 	sql = psprintf(
-		"INSERT INTO %s"
-		"    (term, doc_freq, total_docs, idf_weight)"
-		" VALUES (%s, 1, %d,"
-		"         ln(1.0 + (%d - 1.0 + 0.5) / (1.0 + 0.5)))"
+		"INSERT INTO %s (term, doc_freq)"
+		" VALUES (%s, 1)"
 		" ON CONFLICT (term) DO UPDATE SET"
 		"    doc_freq   = %s.doc_freq + 1,"
-		"    total_docs = %d,"
-		"    idf_weight = ln(1.0 +"
-		"        (%d - (%s.doc_freq + 1) + 0.5)"
-		"        / ((%s.doc_freq + 1) + 0.5)),"
 		"    updated_at = now()",
-		qidf, safe_term, total_docs, total_docs,
-		qidf,
-		total_docs, total_docs, qidf, qidf);
+		qidf, safe_term, qidf);
 
 	pfree(tbl_name);
 	pfree(safe_term);
@@ -649,31 +640,9 @@ bm25_update_idf_stats(const char *chunk_table,
 {
 	MemoryContext oldctx;
 	ResourceOwner oldowner;
-	int           total_docs = 0;
-	bool          isnull;
-	Datum         val;
-	char         *sql;
-	int           ret;
 
 	if (ntokens <= 0)
 		return;
-
-	/* Pre-compute total_docs once to avoid per-term count(*) scans */
-	sql = psprintf("SELECT count(*)::int FROM %s",
-				   quote_identifier(chunk_table));
-	ret = SPI_execute(sql, true, 1);
-	pfree(sql);
-
-	if (ret == SPI_OK_SELECT && SPI_processed > 0)
-	{
-		val = SPI_getbinval(SPI_tuptable->vals[0],
-							SPI_tuptable->tupdesc, 1, &isnull);
-		if (!isnull)
-			total_docs = DatumGetInt32(val);
-	}
-
-	if (total_docs <= 0)
-		total_docs = 1;
 
 	oldctx   = CurrentMemoryContext;
 	oldowner = CurrentResourceOwner;
@@ -682,7 +651,7 @@ bm25_update_idf_stats(const char *chunk_table,
 	PG_TRY();
 	{
 		for (int i = 0; i < ntokens; i++)
-			upsert_term_idf(chunk_table, tokens[i].term, total_docs);
+			upsert_term_idf(chunk_table, tokens[i].term);
 
 		ReleaseCurrentSubTransaction();
 	}
