@@ -37,24 +37,38 @@ SELECT count(*) AS orphaned_queue_entries
  WHERE q.chunk_table = 'dt_docs_body_chunks'
    AND NOT EXISTS (SELECT 1 FROM dt_docs_body_chunks c WHERE c.id = q.chunk_id);
 
--- Seed BM25 statistics the way the worker would, so that the corpus accounting
--- below is actually exercised: the worker does not run during these tests, so
--- _idf_stats would otherwise be empty and the assertion vacuous.
-INSERT INTO dt_docs_body_chunks_idf_stats (term, doc_freq, total_docs, idf_weight)
-VALUES ('delta', 1, 2, 0.9), ('eta', 1, 2, 0.9);
+-- Seed BM25 statistics the way the worker would, so that the assertions below
+-- are actually exercised: the worker does not run during these tests, so
+-- _idf_stats would otherwise be empty and they would be vacuous.  Row 2's body
+-- supplies delta/epsilon/zeta and row 3's supplies eta/theta/iota.
+INSERT INTO dt_docs_body_chunks_idf_stats (term, doc_freq)
+VALUES ('delta', 1), ('epsilon', 1), ('zeta', 1),
+       ('eta', 1), ('theta', 1), ('iota', 1);
+
+-- A delete must touch only the terms of the document it removed.  Stamping
+-- every row first makes a table-wide rewrite visible: the corpus resync this
+-- replaced updated every row unconditionally, so terms belonging to documents
+-- that were not deleted had their updated_at bumped along with the rest.
+UPDATE dt_docs_body_chunks_idf_stats SET updated_at = 'epoch';
+
+DELETE FROM dt_docs WHERE id = 2;
+
+-- Terms belonging only to the surviving document must be untouched
+SELECT count(*) AS untouched_terms
+  FROM dt_docs_body_chunks_idf_stats
+ WHERE term IN ('eta', 'theta', 'iota')
+   AND updated_at = 'epoch';
+
+-- while the deleted document's own terms must still have been decremented
+SELECT count(*) AS touched_terms
+  FROM dt_docs_body_chunks_idf_stats
+ WHERE term IN ('delta', 'epsilon', 'zeta')
+   AND updated_at <> 'epoch';
 
 -- Bulk delete in a single statement, which is the case the statement-level
 -- trigger exists to handle without degenerating into per-row work
 DELETE FROM dt_docs;
 SELECT count(*) AS chunks_after_bulk_delete FROM dt_docs_body_chunks;
-
--- The corpus total must agree with the surviving chunk count. Decrementing per
--- document while the chunks are all still present sets total_docs from the same
--- unchanged count every time, so without a final resync only the last
--- document's value would survive and it would disagree with doc_freq.
-SELECT count(*) AS idf_rows_with_wrong_total
-  FROM dt_docs_body_chunks_idf_stats
- WHERE total_docs <> (SELECT count(*) FROM dt_docs_body_chunks);
 
 -- TRUNCATE also cleans up
 INSERT INTO dt_docs (body) VALUES (repeat('kappa lambda mu ', 20));
