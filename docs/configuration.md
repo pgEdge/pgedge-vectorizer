@@ -24,7 +24,7 @@ These settings control the background workers that process the embedding queue, 
 | `pgedge_vectorizer.databases` | (empty) | **Required.** Comma-separated list of databases to monitor. Workers will not process any embeddings if this is not set. | Yes | No | No |
 | `pgedge_vectorizer.worker_service_quantum` | `60s` | Seconds a worker services one database before yielding its slot, when there are more databases than workers. Ignored when every database can have its own worker | Yes | No | No |
 | `pgedge_vectorizer.batch_size` | `10` | Batch size for embeddings | Yes | No | No |
-| `pgedge_vectorizer.max_retries` | `3` | Max retry attempts | Yes | No | No |
+| `pgedge_vectorizer.max_retries` | `3` | Max retry attempts before a queue item is marked `failed` | Yes | No | No |
 | `pgedge_vectorizer.worker_poll_interval` | `1000` | Poll interval in ms | Yes | No | No |
 
 ## Chunking Settings
@@ -33,7 +33,6 @@ These settings determine how text content is split into chunks before embedding 
 
 | Parameter | Default | Description | Reload | Restart | Superuser |
 |-----------|---------|-------------|--------|---------|-----------|
-| `pgedge_vectorizer.auto_chunk` | `true` | Enable auto-chunking | Yes | No | No |
 | `pgedge_vectorizer.default_chunk_strategy` | `token_based` | Chunking strategy | Yes | No | No |
 | `pgedge_vectorizer.default_chunk_size` | `400` | Chunk size in tokens | Yes | No | No |
 | `pgedge_vectorizer.default_chunk_overlap` | `50` | Overlap in tokens | Yes | No | No |

@@ -60,7 +60,6 @@ extern int pgedge_vectorizer_worker_service_quantum;
 extern int pgedge_vectorizer_batch_size;
 extern int pgedge_vectorizer_max_retries;
 extern int pgedge_vectorizer_worker_poll_interval;
-extern bool pgedge_vectorizer_auto_chunk;
 extern char *pgedge_vectorizer_default_chunk_strategy;
 extern int pgedge_vectorizer_default_chunk_size;
 extern int pgedge_vectorizer_default_chunk_overlap;

@@ -35,7 +35,6 @@ int pgedge_vectorizer_worker_poll_interval = 1000;
 /*
  * GUC Variables - Chunking Configuration
  */
-bool pgedge_vectorizer_auto_chunk = true;
 char *pgedge_vectorizer_default_chunk_strategy = NULL;
 int pgedge_vectorizer_default_chunk_size = 400;
 int pgedge_vectorizer_default_chunk_overlap = 50;
@@ -195,15 +194,6 @@ pgedge_vectorizer_init_guc(void)
 							NULL, NULL, NULL);
 
 	/* Chunking configuration */
-	DefineCustomBoolVariable("pgedge_vectorizer.auto_chunk",
-							 "Enable automatic chunking",
-							 "Automatically chunk documents when enabled via enable_vectorization().",
-							 &pgedge_vectorizer_auto_chunk,
-							 true,
-							 PGC_SIGHUP,
-							 0,
-							 NULL, NULL, NULL);
-
 	DefineCustomStringVariable("pgedge_vectorizer.default_chunk_strategy",
 								"Default chunking strategy",
 								"Strategy to use for chunking: token_based, semantic, markdown, sentence.",

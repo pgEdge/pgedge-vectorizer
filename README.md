@@ -247,14 +247,13 @@ An explicitly configured `api_url` always takes precedence over the provider def
 | `pgedge_vectorizer.num_workers` | integer | `2` | Maximum number of concurrent background workers. Databases are serviced in rotation, so every configured database is processed even when there are more databases than workers |
 | `pgedge_vectorizer.worker_service_quantum` | integer | `60s` | Seconds a worker services one database before yielding its slot, when there are more databases than workers. Ignored when every database can have its own worker |
 | `pgedge_vectorizer.batch_size` | integer | `10` | Batch size for embedding generation |
-| `pgedge_vectorizer.max_retries` | integer | `3` | Maximum retry attempts for failed embeddings |
+| `pgedge_vectorizer.max_retries` | integer | `3` | Maximum retry attempts before a queue item is marked failed |
 | `pgedge_vectorizer.worker_poll_interval` | integer | `1000` | Worker polling interval in milliseconds |
 
 ### Chunking Configuration
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `pgedge_vectorizer.auto_chunk` | boolean | `true` | Enable automatic chunking |
 | `pgedge_vectorizer.default_chunk_strategy` | string | `'token_based'` | Default chunking strategy |
 | `pgedge_vectorizer.default_chunk_size` | integer | `400` | Default chunk size in tokens |
 | `pgedge_vectorizer.default_chunk_overlap` | integer | `50` | Default chunk overlap in tokens |
