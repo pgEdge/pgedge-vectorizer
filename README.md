@@ -8,13 +8,13 @@ A PostgreSQL extension for asynchronous text chunking and vector embedding gener
 
 ## Overview
 
-pgEdge Vectorizer automatically chunks text content and generates vector embeddings using background workers. It supports multiple embedding providers (OpenAI, Voyage AI, and Ollama) and provides a simple SQL interface for enabling vectorization on any table.
+pgEdge Vectorizer automatically chunks text content and generates vector embeddings using background workers. It supports multiple embedding providers (OpenAI, Voyage AI, Ollama, and Gemini) and provides a simple SQL interface for enabling vectorization on any table.
 
 ### Key Features
 
 - **Automatic Chunking**: Intelligently splits text into chunks with configurable strategies
 - **Async Processing**: Background workers process embeddings without blocking your application
-- **Multiple Providers**: Support for OpenAI, Voyage AI, and Ollama (local embeddings)
+- **Multiple Providers**: Support for OpenAI, Voyage AI, Ollama (local embeddings), and Gemini
 - **Configurable**: Extensive GUC parameters for fine-tuning behavior
 - **Batching**: Efficient batch processing of embeddings
 - **Retry Logic**: Automatic retry with exponential backoff for failed embeddings
@@ -25,7 +25,7 @@ pgEdge Vectorizer automatically chunks text content and generates vector embeddi
 - PostgreSQL 14 or later
 - [pgvector](https://github.com/pgvector/pgvector) extension
 - libcurl development files
-- API key (for OpenAI or Voyage AI providers; not needed for Ollama)
+- API key (for the OpenAI, Voyage AI, or Gemini providers; not needed for Ollama)
 
 ## Installation
 
@@ -223,10 +223,21 @@ All configuration parameters can be set in `postgresql.conf` or via `ALTER SYSTE
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `pgedge_vectorizer.provider` | string | `'openai'` | Embedding provider (openai, voyage, ollama) |
+| `pgedge_vectorizer.provider` | string | `'openai'` | Embedding provider (openai, voyage, ollama, gemini) |
 | `pgedge_vectorizer.api_key_file` | string | `'~/.pgedge-vectorizer-llm-api-key'` | Path to API key file |
-| `pgedge_vectorizer.api_url` | string | `'https://api.openai.com/v1'` | API endpoint URL |
+| `pgedge_vectorizer.api_url` | string | `''` | API endpoint URL. Leave empty to use the selected provider's default endpoint; set it to override with a custom, local, or proxied endpoint |
 | `pgedge_vectorizer.model` | string | `'text-embedding-3-small'` | Embedding model name |
+
+Because `pgedge_vectorizer.api_url` defaults to an empty string, selecting a provider is normally enough on its own; each provider falls back to its own endpoint:
+
+| Provider | Default endpoint |
+|----------|------------------|
+| `openai` | `https://api.openai.com/v1` |
+| `voyage` | `https://api.voyageai.com/v1` |
+| `ollama` | `http://localhost:11434` |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta` |
+
+An explicitly configured `api_url` always takes precedence over the provider default, which is what allows OpenAI-compatible local inference servers and proxies to be used; see the [embedding providers documentation](https://github.com/pgEdge/pgedge-vectorizer/blob/main/docs/embedding_providers.md) for details.
 
 ### Worker Configuration
 
