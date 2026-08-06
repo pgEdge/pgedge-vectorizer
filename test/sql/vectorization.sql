@@ -23,8 +23,12 @@ SELECT tablename FROM pg_tables
 WHERE tablename = 'test_docs_content_chunks';
 
 -- Verify trigger was created
+-- ORDER BY because this returns the three cleanup triggers per column, and an
+-- unordered scan of pg_trigger returns them in physical order, which shifts
+-- with whatever earlier tests left behind.
 SELECT tgname FROM pg_trigger
-WHERE tgname LIKE '%test_docs%vectorization%';
+WHERE tgname LIKE '%test_docs%vectorization%'
+ORDER BY tgname;
 
 -- Insert a test document
 INSERT INTO test_docs (title, content)
@@ -66,7 +70,8 @@ SELECT pgedge_vectorizer.enable_vectorization(
 
 -- Verify trigger was re-created
 SELECT tgname FROM pg_trigger
-WHERE tgname LIKE '%test_docs%vectorization%';
+WHERE tgname LIKE '%test_docs%vectorization%'
+ORDER BY tgname;
 
 -- Verify chunks still exist (upserted, not duplicated)
 SELECT COUNT(*) AS chunk_count FROM test_docs_content_chunks;
