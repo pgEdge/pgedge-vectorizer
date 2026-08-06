@@ -55,6 +55,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Background workers are now spawned per database by a launcher process rather
   than being statically registered at startup, so the set of serviced databases
   follows `pgedge_vectorizer.databases` as it changes, without a restart.
+- `pgedge_vectorizer.max_retries` is now actually read
+  ([#26](https://github.com/pgEdge/pgedge-vectorizer/issues/26)). It was
+  declared and documented but never used anywhere; every queued embedding got
+  its retry limit from `queue.max_attempts`'s hardcoded `DEFAULT 3` instead,
+  regardless of the configured value. The GUC now sets `max_attempts` at every
+  point a chunk is queued: on initial chunking, on content updates, and on
+  `recreate_chunks()` and `reprocess_chunks()`.
+
+### Removed
+
+- Removed the unused `pgedge_vectorizer.auto_chunk` GUC
+  ([#26](https://github.com/pgEdge/pgedge-vectorizer/issues/26)). It was
+  documented as disabling automatic chunking but was never checked anywhere;
+  setting it to `false` had no effect. Making it do something real would mean
+  gating trigger creation in `enable_vectorization()`, a larger behavioural
+  change than removing a no-op setting, and is being tracked separately if
+  wanted. `SET` and `ALTER SYSTEM SET` still accept
+  `pgedge_vectorizer.auto_chunk`, since PostgreSQL permits any two-part name
+  as a placeholder for an extension GUC it does not recognise, but reading it
+  back with `SHOW` or `current_setting()` without having set it first in that
+  session now fails with `unrecognized configuration parameter`, rather than
+  quietly returning a value nothing acts on.
 
 ### Fixed
 

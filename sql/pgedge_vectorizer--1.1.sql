@@ -430,7 +430,7 @@ BEGIN
 
                 -- Queue if dense or sparse work is needed.
                 IF needs_embedding OR needs_sparse THEN
-                    INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, metadata)
+                    INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, metadata, max_attempts)
                     VALUES (
                         chunk_id,
                         chunk_table,
@@ -439,7 +439,8 @@ BEGIN
                             WHEN NOT needs_embedding AND needs_sparse
                                 THEN jsonb_build_object('sparse_only', true)
                             ELSE NULL
-                        END
+                        END,
+                        current_setting('pgedge_vectorizer.max_retries')::INT
                     );
                 END IF;
             END LOOP;
@@ -976,8 +977,9 @@ BEGIN
         INTO chunk_id;
 
         -- Queue for embedding
-        INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)
-        VALUES (chunk_id, chunk_table, chunk_text);
+        INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, max_attempts)
+        VALUES (chunk_id, chunk_table, chunk_text,
+                current_setting('pgedge_vectorizer.max_retries')::INT);
     END LOOP;
 
     -- Notify workers (they will pick up work via polling and SKIP LOCKED)
@@ -1121,7 +1123,7 @@ BEGIN
 
         -- Only queue if not already queued
         IF NOT FOUND THEN
-            INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, metadata)
+            INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, metadata, max_attempts)
             VALUES (
                 chunk_record.id,
                 chunk_table_name,
@@ -1130,7 +1132,8 @@ BEGIN
                     WHEN NOT chunk_record.needs_embedding AND chunk_record.needs_sparse
                         THEN jsonb_build_object('sparse_only', true)
                     ELSE NULL
-                END
+                END,
+                current_setting('pgedge_vectorizer.max_retries')::INT
             );
 
             rows_affected := rows_affected + 1;
@@ -1279,8 +1282,9 @@ BEGIN
                 INTO chunk_id;
 
                 -- Queue for embedding
-                INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content)
-                VALUES (chunk_id, chunk_table_name, chunk_text);
+                INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, max_attempts)
+                VALUES (chunk_id, chunk_table_name, chunk_text,
+                        current_setting('pgedge_vectorizer.max_retries')::INT);
             END LOOP;
 
             rows_processed := rows_processed + 1;
