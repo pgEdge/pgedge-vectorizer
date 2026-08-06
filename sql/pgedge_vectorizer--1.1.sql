@@ -378,7 +378,17 @@ BEGIN
     BEGIN
         RAISE NOTICE 'Processing existing rows...';
 
-        FOR row_record IN EXECUTE format('SELECT %I as pk_val, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
+        -- pk_val is cast to text here so that row_record.pk_val is always the
+        -- same type across every call to this function within a session,
+        -- regardless of the source table's actual primary key type. PL/pgSQL
+        -- fixes the parameter type of a RECORD field the first time a dynamic
+        -- EXECUTE ... USING statement evaluates it, and reusing that same
+        -- statement later with a differently-typed record field fails with
+        -- "type of parameter N does not match that when preparing the plan"
+        -- (issue #39). Casting at the source, rather than at each USING site,
+        -- is required: PostgreSQL still binds the RECORD field's own runtime
+        -- type before any cast written into the later query text is applied.
+        FOR row_record IN EXECUTE format('SELECT %I::text as pk_val, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
             source_pk, source_column, source_table, source_column, source_column)
         LOOP
             doc_content := row_record.content;
@@ -390,10 +400,14 @@ BEGIN
             FOR i IN 1..array_length(chunks, 1) LOOP
                 chunk_text := chunks[i];
 
-                -- Insert or update chunk (only clear embedding if content changed)
+                -- Insert or update chunk (only clear embedding if content changed).
+                -- pk_col_type uses %s: value from format_type() is system-controlled
+                -- (see the comment where the chunk table is created, above).
+                -- $1::%s casts pk_val, now always text, back to the source
+                -- table's actual primary key type.
                 EXECUTE format('
                     INSERT INTO %I (source_id, chunk_index, content, token_count)
-                    VALUES ($1, $2, $3, $4)
+                    VALUES ($1::%s, $2, $3, $4)
                     ON CONFLICT (source_id, chunk_index)
                     DO UPDATE SET content = EXCLUDED.content,
                                   token_count = EXCLUDED.token_count,
@@ -409,7 +423,7 @@ BEGIN
                     RETURNING id,
                               (embedding IS NULL) AS needs_embedding,
                               (sparse_embedding IS NULL) AS needs_sparse',
-                    chunk_table, chunk_table, chunk_table, chunk_table, chunk_table)
+                    chunk_table, pk_col_type, chunk_table, chunk_table, chunk_table, chunk_table)
                 USING row_record.pk_val, i, chunk_text,
                       length(chunk_text) / 4  -- Approximate token count
                 INTO chunk_id, needs_embedding, needs_sparse;
@@ -1232,8 +1246,16 @@ BEGIN
         RAISE NOTICE 'Re-chunking with strategy=%, size=%, overlap=%',
             actual_strategy, actual_chunk_size, actual_chunk_overlap;
 
+        -- pk_val is cast to text so that row_record.pk_val is always the same
+        -- type across calls in a session, whatever the source table's actual
+        -- primary key type. See the identical comment in enable_vectorization()
+        -- for why: PL/pgSQL fixes a RECORD field's parameter type the first
+        -- time a dynamic EXECUTE ... USING statement evaluates it, and this
+        -- statement's own "$1::%s" cast below does not protect it, because
+        -- that cast is applied after PostgreSQL has already bound the record
+        -- field's raw runtime type (issue #39).
         FOR row_record IN EXECUTE format(
-            'SELECT %I as pk_val, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
+            'SELECT %I::text as pk_val, %I as content FROM %s WHERE %I IS NOT NULL AND %I != ''''',
             pk_col, source_column_name, source_table_name, source_column_name, source_column_name
         )
         LOOP

@@ -81,6 +81,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a transition table, so a bulk delete stays set-based rather than doing per-row
   work. **Upgrading also repairs tables that were already vectorized**, which
   otherwise would have kept leaking silently.
+- Fixed `enable_vectorization()` and `recreate_chunks()` failing with `type of
+  parameter N does not match that when preparing the plan` when called for a
+  table with one primary key type and then, in the same session, a table with a
+  different primary key type
+  ([#39](https://github.com/pgEdge/pgedge-vectorizer/issues/39)). Both functions
+  loop over existing source rows into a `RECORD` variable and pass one of its
+  fields to a dynamic query; PL/pgSQL fixes that field's parameter type the
+  first time the statement runs, and the type mismatch broke any second
+  vectorized table whose primary key differed. The failure aborted partway
+  through, after the chunk table and trigger had already been created, leaving
+  the vectorizer for that column half set up.
 
 ## [1.0] - 2026-03-13
 
