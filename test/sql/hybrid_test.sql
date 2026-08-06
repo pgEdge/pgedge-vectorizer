@@ -255,6 +255,27 @@ SELECT pgedge_vectorizer.bm25_query_vector(
     'testterm sample', 'hybrid_test_docs_content_chunks'
 ) IS NOT NULL AS query_vector_with_populated_stats;
 
+-- The loader fetches only the query's own terms, so vocabulary belonging to
+-- other documents must not affect the result. This guards the scoping against
+-- changing output; it cannot show the resource saving, which is why the number
+-- of rows loaded is not asserted here.
+--
+-- The baseline is held in a psql variable rather than a table: capturing it
+-- with CREATE TABLE AS crashes the backend on a pre-existing resource-owner
+-- bug in bm25_load_idf_stats(), unrelated to this test.
+SELECT pgedge_vectorizer.bm25_query_vector(
+    'testterm sample', 'hybrid_test_docs_content_chunks')::text AS baseline \gset
+
+INSERT INTO hybrid_test_docs_content_chunks_idf_stats (term, doc_freq)
+SELECT 'unrelated' || g, 1 FROM generate_series(1, 5000) g;
+
+SELECT :'baseline'::sparsevec
+       = pgedge_vectorizer.bm25_query_vector(
+             'testterm sample', 'hybrid_test_docs_content_chunks')
+       AS unchanged_by_unrelated_vocabulary;
+
+DELETE FROM hybrid_test_docs_content_chunks_idf_stats WHERE term LIKE 'unrelated%';
+
 -- Clean up the test row
 DELETE FROM hybrid_test_docs_content_chunks_idf_stats WHERE term = 'testterm';
 

@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "lib/stringinfo.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -270,7 +271,7 @@ read_idf_row(SPITupleTable *tuptable, int i)
 }
 
 HTAB *
-bm25_load_idf_stats(const char *chunk_table)
+bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens)
 {
 	char            *sql;
 	int              ret;
@@ -280,12 +281,35 @@ bm25_load_idf_stats(const char *chunk_table)
 	HTAB            *htab = NULL;
 	HASHCTL          ctl;
 	int64            total_docs = 1;
+	Datum            terms;
+	Oid              argtype = TEXTARRAYOID;
+
+	if (tokens == NULL || ntokens <= 0)
+		return NULL;
+
+	/*
+	 * Only the caller's own terms are ever looked up, so fetch only those
+	 * rather than the whole vocabulary.  term is the primary key, making this
+	 * an index lookup; loading every row cost memory proportional to the
+	 * vocabulary on each call, and the worker calls this once per chunk.
+	 */
+	{
+		Datum *elems = palloc(ntokens * sizeof(Datum));
+
+		for (int i = 0; i < ntokens; i++)
+			elems[i] = CStringGetTextDatum(tokens[i].term);
+
+		terms = PointerGetDatum(construct_array(elems, ntokens, TEXTOID,
+												-1, false, TYPALIGN_INT));
+		pfree(elems);
+	}
 
 	{
 		char       *tbl_name = psprintf("%s_idf_stats", chunk_table);
 		const char *qtbl     = quote_identifier(tbl_name);
 
-		sql = psprintf("SELECT term, doc_freq FROM %s", qtbl);
+		sql = psprintf("SELECT term, doc_freq FROM %s WHERE term = ANY($1)",
+					   qtbl);
 		pfree(tbl_name);
 	}
 
@@ -306,7 +330,7 @@ bm25_load_idf_stats(const char *chunk_table)
 		 */
 		total_docs = bm25_chunk_count(chunk_table);
 
-		ret = SPI_execute(sql, true, 0);
+		ret = SPI_execute_with_args(sql, 1, &argtype, &terms, NULL, true, 0);
 		ok  = true;
 		ReleaseCurrentSubTransaction();
 	}
@@ -340,7 +364,7 @@ bm25_load_idf_stats(const char *chunk_table)
 	ctl.keysize   = BM25_MAX_TERM_LEN;
 	ctl.entrysize = sizeof(IdfHashEntry);
 	htab = hash_create("bm25_idf_stats",
-					   (int) SPI_processed * 2,
+					   ntokens,
 					   &ctl,
 					   HASH_ELEM | HASH_STRINGS);
 
@@ -712,7 +736,7 @@ pgedge_vectorizer_bm25_query_vector(PG_FUNCTION_ARGS)
 	SPI_connect();
 
 	tokens      = bm25_tokenize(query, &ntokens);
-	idf_htab    = bm25_load_idf_stats(chunk_table);
+	idf_htab    = bm25_load_idf_stats(chunk_table, tokens, ntokens);
 	avg_doc_len = bm25_avg_doc_len_internal(chunk_table);
 
 	result = bm25_compute_sparse_vector(
