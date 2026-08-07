@@ -260,9 +260,6 @@ SELECT pgedge_vectorizer.bm25_query_vector(
 -- changing output; it cannot show the resource saving, which is why the number
 -- of rows loaded is not asserted here.
 --
--- The baseline is held in a psql variable rather than a table: capturing it
--- with CREATE TABLE AS crashes the backend on a pre-existing resource-owner
--- bug in bm25_load_idf_stats(), unrelated to this test.
 SELECT pgedge_vectorizer.bm25_query_vector(
     'testterm sample', 'hybrid_test_docs_content_chunks')::text AS baseline \gset
 
@@ -275,6 +272,16 @@ SELECT :'baseline'::sparsevec
        AS unchanged_by_unrelated_vocabulary;
 
 DELETE FROM hybrid_test_docs_content_chunks_idf_stats WHERE term LIKE 'unrelated%';
+
+-- bm25_query_vector() inside a statement that owns relations. The loader runs
+-- its SPI query in a subtransaction; if it does not restore the caller's
+-- resource owner on release, this aborts the backend with "relcache reference
+-- is not owned by resource owner". A plain SELECT does not catch it.
+CREATE TABLE bm25_owner_check AS
+SELECT pgedge_vectorizer.bm25_query_vector(
+    'testterm sample', 'hybrid_test_docs_content_chunks') AS v;
+SELECT count(*) AS rows_written FROM bm25_owner_check;
+DROP TABLE bm25_owner_check;
 
 -- Clean up the test row
 DELETE FROM hybrid_test_docs_content_chunks_idf_stats WHERE term = 'testterm';

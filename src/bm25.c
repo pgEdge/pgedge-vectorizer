@@ -332,7 +332,17 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens)
 
 		ret = SPI_execute_with_args(sql, 1, &argtype, &terms, NULL, true, 0);
 		ok  = true;
+
+		/*
+		 * Restore the context and resource owner on the way out, as the
+		 * catch path does.  Releasing a subtransaction leaves them pointing
+		 * at its own owner, and a caller whose statement owns relations --
+		 * CREATE TABLE AS, for one -- then fails with "relcache reference is
+		 * not owned by resource owner".
+		 */
 		ReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(oldctx);
+		CurrentResourceOwner = oldowner;
 	}
 	PG_CATCH();
 	{
@@ -677,7 +687,10 @@ bm25_update_idf_stats(const char *chunk_table,
 		for (int i = 0; i < ntokens; i++)
 			upsert_term_idf(chunk_table, tokens[i].term);
 
+		/* Restore on the way out, as the catch path does */
 		ReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(oldctx);
+		CurrentResourceOwner = oldowner;
 	}
 	PG_CATCH();
 	{
