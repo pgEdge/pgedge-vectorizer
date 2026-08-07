@@ -119,3 +119,29 @@ SELECT count(*) AS long_name_triggers_after_disable FROM pg_trigger
  WHERE tgrelid = 'dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'::regclass AND NOT tgisinternal;
 
 DROP TABLE dt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;
+
+-- The 63 limit is bytes, not characters.  Budgeting in characters lets a
+-- multibyte name overflow, and the server then truncates it -- cutting off the
+-- digest, which is the collision the digest exists to prevent.  The ::name
+-- casts apply that truncation, so these compare the names as actually stored.
+--
+-- Three-byte characters are what push the digest past the limit, so this
+-- assumes a UTF-8 database.
+SELECT octet_length(pgedge_vectorizer.cleanup_trigger_name(
+           repeat('日', 40), repeat('本', 40),
+           '_vectorization_delete_trigger')) <= 63 AS multibyte_name_fits,
+       pgedge_vectorizer.cleanup_trigger_name(
+           repeat('日', 40), repeat('本', 40), '_vectorization_delete_trigger')::name
+       <> pgedge_vectorizer.cleanup_trigger_name(
+           repeat('日', 40), repeat('本', 40), '_vectorization_truncate_trigger')::name
+           AS delete_and_truncate_distinct,
+       pgedge_vectorizer.cleanup_trigger_name(
+           repeat('日', 40), 'a', '_vectorization_delete_trigger')::name
+       <> pgedge_vectorizer.cleanup_trigger_name(
+           repeat('日', 40), 'b', '_vectorization_delete_trigger')::name
+           AS two_columns_distinct;
+
+-- ASCII names must be unaffected by the byte-based budget.
+SELECT pgedge_vectorizer.cleanup_trigger_name(
+           'dt_docs', 'body', '_vectorization_delete_trigger')
+           AS ascii_name_unchanged;

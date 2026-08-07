@@ -167,15 +167,24 @@ CREATE OR REPLACE FUNCTION pgedge_vectorizer.cleanup_trigger_name(
 ) RETURNS TEXT AS $$
 DECLARE
     digest TEXT;
+    prefix TEXT;
     room   INT;
 BEGIN
     digest := substr(md5(p_source_table || '.' || p_source_column), 1, 8);
 
-    -- One character for the separator before the digest.
-    room := 63 - length(p_suffix) - length(digest) - 1;
+    -- Budget in bytes, not characters: the limit is 63 bytes, so a multibyte
+    -- name measured in characters would overflow and be truncated by the
+    -- server, cutting into the digest.  One byte for the separator.
+    room := GREATEST(63 - octet_length(p_suffix) - octet_length(digest) - 1, 0);
 
-    RETURN left(p_source_table || '_' || p_source_column, GREATEST(room, 0))
-           || '_' || digest || p_suffix;
+    -- No more than `room` characters can fit in `room` bytes, so start there
+    -- and drop whole characters until the prefix is within the byte budget.
+    prefix := left(p_source_table || '_' || p_source_column, room);
+    WHILE octet_length(prefix) > room LOOP
+        prefix := left(prefix, -1);
+    END LOOP;
+
+    RETURN prefix || '_' || digest || p_suffix;
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
