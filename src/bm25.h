@@ -62,7 +62,7 @@ extern double pgedge_vectorizer_bm25_b;
  * when done to release memory promptly.
  */
 BM25Term *bm25_tokenize(const char *text, int *ntokens);
-HTAB     *bm25_load_idf_stats(const char *chunk_table);
+HTAB     *bm25_load_idf_stats(const char *chunk_table, float8 *avg_doc_len);
 char     *bm25_compute_sparse_str(BM25Term *tokens, int ntokens,
 								  HTAB *idf_htab,
 								  float8 k1, float8 b,
