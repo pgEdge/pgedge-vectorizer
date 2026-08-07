@@ -304,14 +304,19 @@ bm25_load_idf_stats(const char *chunk_table)
 	if (!ok || ret != SPI_OK_SELECT || SPI_processed == 0)
 		return NULL;
 
-	/* Build hash table from SPI results for O(1) lookups */
+	/*
+	 * Build hash table from SPI results for O(1) lookups.  HASH_CONTEXT ties
+	 * it to the caller's SPI context; the default is TopMemoryContext, which
+	 * leaks whenever an error is reached before hash_destroy().
+	 */
 	memset(&ctl, 0, sizeof(ctl));
 	ctl.keysize   = BM25_MAX_TERM_LEN;
 	ctl.entrysize = sizeof(IdfHashEntry);
+	ctl.hcxt      = CurrentMemoryContext;
 	htab = hash_create("bm25_idf_stats",
 					   (int) SPI_processed * 2,
 					   &ctl,
-					   HASH_ELEM | HASH_STRINGS);
+					   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
 	for (int i = 0; i < (int) SPI_processed; i++)
 	{
