@@ -20,6 +20,7 @@
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "storage/proc.h"
+#include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
@@ -58,16 +59,19 @@ static int	launcher_cursor = 0;	/* round-robin position in the database list */
 /*
  * Sweep intervals.
  *
- * Workers are registered with bgw_notify_pid set to the launcher, but that
- * notification was observed not to wake a launcher holding no database
- * connection, so the sweep interval rather than the notification is what
- * bounds how quickly a freed slot is refilled. Do not rely on the latch being
- * set when a worker exits.
+ * Workers are registered with bgw_notify_pid set to the launcher, and the
+ * launcher installs procsignal_sigusr1_handler, so the postmaster's exit
+ * notification sets the launcher's latch and a freed slot is normally refilled
+ * within milliseconds. See the signal setup in
+ * pgedge_vectorizer_launcher_main() for why the handler has to be installed
+ * explicitly.
  *
- * When there are more databases than slots, databases are queued waiting for a
- * turn and refill latency directly limits throughput, so sweep briskly. When
- * every database has its own worker there is nothing to refill and the sweep
- * only needs to notice configuration changes, so sweep rarely.
+ * These intervals are therefore a backstop rather than the mechanism: they
+ * bound how quickly the launcher notices something no notification covers,
+ * chiefly a configuration change that neither started nor stopped a worker.
+ * Sweep briskly whilst databases are queued waiting for a turn, since a missed
+ * wakeup there costs throughput, and rarely once every database has its own
+ * resident worker.
  */
 #define LAUNCHER_SWEEP_INTERVAL_ROTATING_MS		1000
 #define LAUNCHER_SWEEP_INTERVAL_IDLE_MS			60000
@@ -355,12 +359,8 @@ database_has_worker(const char *dbname)
 }
 
 /*
- * One pass over the database list, spawning workers where they are missing.
- *
- * Databases are visited from a persistent cursor rather than always from the
- * head of the list. Combined with the service quantum that makes busy workers
- * relinquish their slots, this is what guarantees that every database is
- * eventually serviced when there are more databases than slots.
+ * Stop the newest workers until no more than num_workers remain, so that
+ * lowering num_workers takes effect without waiting for workers to yield.
  */
 static void
 launcher_retire_surplus(void)
@@ -423,6 +423,11 @@ launcher_retire_unconfigured(char **db_names, int db_count)
 
 /*
  * One pass over the database list, spawning workers where they are missing.
+ *
+ * Databases are visited from a persistent cursor rather than always from the
+ * head of the list. Combined with the service quantum that makes busy workers
+ * relinquish their slots, this is what guarantees that every database is
+ * eventually serviced when there are more databases than slots.
  */
 static void
 launcher_sweep(char **db_names, int db_count)
@@ -533,9 +538,22 @@ pgedge_vectorizer_launcher_main(Datum main_arg)
 	bool		reload_list = true;
 	bool		logged_empty = false;
 
-	/* Setup signal handlers */
+	/*
+	 * Setup signal handlers.
+	 *
+	 * SIGUSR1 has to be handled explicitly. BackgroundWorkerMain() only
+	 * installs procsignal_sigusr1_handler for workers that requested
+	 * BGWORKER_BACKEND_DATABASE_CONNECTION, and points SIGUSR1 at SIG_IGN for
+	 * everyone else. This launcher takes no database connection, so without
+	 * this the bgw_notify_pid notification the postmaster sends when a worker
+	 * exits would be discarded and refilling a slot would wait for the next
+	 * sweep. contrib/pg_prewarm's leader does the same thing for the same
+	 * reason; the handler is safe here because CheckProcSignal() ignores a
+	 * process with no ProcSignal slot, leaving just the latch wakeup.
+	 */
 	pqsignal(SIGTERM, worker_sigterm);
 	pqsignal(SIGHUP, worker_sighup);
+	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();

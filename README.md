@@ -454,7 +454,7 @@ SELECT * FROM pgedge_vectorizer.failed_items;
 1. Increase number of workers:
 ```sql
 ALTER SYSTEM SET pgedge_vectorizer.num_workers = 4;
--- Restart required
+SELECT pg_reload_conf();
 ```
 
 2. Increase batch size:
