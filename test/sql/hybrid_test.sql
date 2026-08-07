@@ -197,6 +197,62 @@ SELECT pgedge_vectorizer.bm25_avg_doc_len(
 ) >= 0 AS non_negative;
 
 ---------------------------------------------------------------------------
+-- Test 15b: bm25_avg_doc_len equals the actual average
+---------------------------------------------------------------------------
+
+-- AVG() over an integer column yields numeric, so reading its Datum as a
+-- float8 without a cast gives a denormal rather than the mean.  ">= 0" above
+-- cannot catch that: a denormal is positive.  Compare against the value SQL
+-- computes, on a table with rows in it.
+
+CREATE TABLE avg_len_docs (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO avg_len_docs (body)
+SELECT repeat('alpha beta gamma delta ', 40) FROM generate_series(1, 5);
+
+SELECT pgedge_vectorizer.enable_vectorization('avg_len_docs', 'body',
+                                              embedding_dimension => 3);
+
+SELECT pgedge_vectorizer.bm25_avg_doc_len('avg_len_docs_body_chunks')
+       = (SELECT AVG(token_count)::float8 FROM avg_len_docs_body_chunks)
+       AS avg_doc_len_matches_sql;
+
+-- and it must be a plausible document length, not a denormal
+SELECT pgedge_vectorizer.bm25_avg_doc_len('avg_len_docs_body_chunks') > 1.0
+       AS avg_doc_len_is_realistic;
+
+SELECT pgedge_vectorizer.disable_vectorization('avg_len_docs', 'body', true);
+DROP TABLE avg_len_docs;
+
+---------------------------------------------------------------------------
+-- Test 15c: a missing chunk table is reported, not absorbed
+---------------------------------------------------------------------------
+
+-- The stats load runs in a subtransaction that tolerates a missing table,
+-- which is right for the stats table (not vectorized yet) but wrong for the
+-- chunk table, where it means the registry points at something that is gone.
+-- Reading the corpus figures inside that subtransaction would swallow it and
+-- return a silently degraded vector.
+
+CREATE TABLE orphan_idf_stats (
+    term TEXT PRIMARY KEY,
+    doc_freq INT,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+INSERT INTO orphan_idf_stats (term, doc_freq) VALUES ('alpha', 1), ('beta', 1);
+
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.bm25_query_vector('alpha beta', 'orphan');
+    RAISE EXCEPTION 'Expected exception was not raised';
+EXCEPTION
+    WHEN undefined_table THEN
+        RAISE NOTICE 'Got expected exception for missing chunk table';
+END;
+$$;
+
+DROP TABLE orphan_idf_stats;
+
+---------------------------------------------------------------------------
 -- Test 16: BM25 tokenizer returns empty array for NULL input
 ---------------------------------------------------------------------------
 
@@ -234,8 +290,8 @@ SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
 
 -- Seed a term into the IDF stats table
 INSERT INTO hybrid_test_docs_content_chunks_idf_stats
-    (term, doc_freq, total_docs, idf_weight)
-VALUES ('testterm', 5, 10, 1.0);
+    (term, doc_freq)
+VALUES ('testterm', 5);
 
 -- Decrement by 1
 SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
@@ -248,6 +304,12 @@ SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
 SELECT term, doc_freq
 FROM hybrid_test_docs_content_chunks_idf_stats
 WHERE term = 'testterm';
+
+-- bm25_query_vector against a populated stats table.  Test 14 calls it while
+-- _idf_stats is empty, which returns early without building the IDF hash.
+SELECT pgedge_vectorizer.bm25_query_vector(
+    'testterm sample', 'hybrid_test_docs_content_chunks'
+) IS NOT NULL AS query_vector_with_populated_stats;
 
 -- Clean up the test row
 DELETE FROM hybrid_test_docs_content_chunks_idf_stats WHERE term = 'testterm';

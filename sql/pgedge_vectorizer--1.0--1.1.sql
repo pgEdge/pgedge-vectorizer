@@ -319,13 +319,12 @@ BEGIN
         WHERE sparse_embedding IS NOT NULL',
         chunk_table || '_sparse_idx', chunk_table);
 
-    -- Create BM25 IDF statistics table for this chunk table
+    -- Create BM25 IDF statistics table for this chunk table.
+    -- Only doc_freq is stored; the IDF weight is computed on read.
     EXECUTE format('
         CREATE TABLE IF NOT EXISTS %I (
             term        TEXT    PRIMARY KEY,
             doc_freq    INT     NOT NULL DEFAULT 1,
-            total_docs  INT     NOT NULL DEFAULT 1,
-            idf_weight  FLOAT8  NOT NULL DEFAULT 0.693,
             updated_at  TIMESTAMPTZ DEFAULT now()
         )', chunk_table || '_idf_stats');
 
@@ -691,8 +690,6 @@ CREATE OR REPLACE FUNCTION pgedge_vectorizer.bm25_decrement_idf_stats(
     p_terms       TEXT[],
     p_deleted_chunks_count INT DEFAULT 1
 ) RETURNS VOID AS $$
-DECLARE
-    new_total INT;
 BEGIN
     IF p_terms IS NULL OR array_length(p_terms, 1) IS NULL THEN
         RETURN;
@@ -702,69 +699,18 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Count chunks BEFORE the deletion so new_total reflects the post-delete
-    -- corpus size after deleting the current document's chunks.
-    EXECUTE format('SELECT GREATEST(count(*)::int - $1, 0) FROM %I', p_chunk_table)
-    INTO new_total
-    USING p_deleted_chunks_count;
-
     EXECUTE format(
         'UPDATE %I SET'
-        '    doc_freq   = GREATEST(doc_freq - $2, 0),'
-        '    total_docs = $1,'
-        '    idf_weight = CASE'
-        '                     WHEN GREATEST(doc_freq - $2, 0) <= 0 THEN 0.0'
-        '                     ELSE ln(1.0 + ($1::float8 - GREATEST(doc_freq - $2, 0) + 0.5)'
-        '                                  / (GREATEST(doc_freq - $2, 0) + 0.5))'
-        '                 END,'
+        '    doc_freq   = GREATEST(doc_freq - $1, 0),'
         '    updated_at = now()'
-        ' WHERE term = ANY($3)',
+        ' WHERE term = ANY($2)',
         p_chunk_table || '_idf_stats')
-    USING new_total, p_deleted_chunks_count, p_terms;
+    USING p_deleted_chunks_count, p_terms;
 END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.bm25_decrement_idf_stats IS
 'Decrement doc_freq in the _idf_stats table for a set of terms before their source chunks are deleted';
-
--- Recompute total_docs and idf_weight for every term from the current chunk count.
---
--- bm25_decrement_idf_stats() sets total_docs from the chunk count at the moment
--- it runs, which is right for a single document but wrong when several are
--- removed by one statement: called once per document while the chunks are all
--- still present, every call sees the same unchanged count and only the last
--- one's value survives, leaving total_docs disagreeing with the doc_freq values
--- that did accumulate.  Call this once after the chunks have gone to bring the
--- corpus total back in step.
-CREATE OR REPLACE FUNCTION pgedge_vectorizer.bm25_resync_idf_totals(
-    p_chunk_table TEXT
-) RETURNS VOID AS $$
-DECLARE
-    total INT;
-BEGIN
-    IF to_regclass(p_chunk_table || '_idf_stats') IS NULL THEN
-        RETURN;
-    END IF;
-
-    EXECUTE format('SELECT count(*)::int FROM %I', p_chunk_table) INTO total;
-
-    EXECUTE format(
-        'UPDATE %I SET'
-        '    total_docs = $1,'
-        '    idf_weight = CASE'
-        '                     WHEN doc_freq <= 0 THEN 0.0'
-        '                     ELSE ln(1.0 + ($1::float8 - doc_freq + 0.5)'
-        '                                  / (doc_freq + 0.5))'
-        '                 END,'
-        '    updated_at = now()',
-        p_chunk_table || '_idf_stats')
-    USING total;
-END;
-$$ LANGUAGE plpgsql;
-
-COMMENT ON FUNCTION pgedge_vectorizer.bm25_resync_idf_totals IS
-'Recompute total_docs and idf_weight for all terms from the current chunk count';
-
 
 -- Statement-level trigger function cleaning up after DELETE on a source table.
 --
@@ -789,10 +735,8 @@ BEGIN
     pk_col      := COALESCE(TG_ARGV[2], 'id');
     pk_type     := COALESCE(TG_ARGV[3], 'bigint');
 
-    -- Decrement BM25 document frequencies before deleting anything, because
-    -- bm25_decrement_idf_stats() derives the new corpus size by counting the
-    -- chunk table and subtracting the count we pass it.  Doing this afterwards
-    -- would understate the corpus and skew idf_weight for every term.
+    -- Decrement BM25 document frequencies first: the loop counts each
+    -- document's chunks, which is only possible while they still exist.
     FOR old_row IN EXECUTE
         format('SELECT %I::text AS pk_value, %I::text AS content FROM old_rows',
                pk_col, content_col)
@@ -830,11 +774,6 @@ BEGIN
     EXECUTE format(
         'DELETE FROM %I WHERE source_id IN (SELECT o.%I::%s FROM old_rows o)',
         chunk_table, pk_col, pk_type);
-
-    -- Bring the corpus total back in step.  The per-document decrements above
-    -- each set total_docs from the then-unchanged chunk count, so on a bulk
-    -- delete only the last one's value would otherwise survive.
-    PERFORM pgedge_vectorizer.bm25_resync_idf_totals(chunk_table);
 
     RETURN NULL;
 END;
@@ -1608,8 +1547,6 @@ BEGIN
             'CREATE TABLE IF NOT EXISTS %I ('
             '    term        TEXT    PRIMARY KEY,'
             '    doc_freq    INT     NOT NULL DEFAULT 1,'
-            '    total_docs  INT     NOT NULL DEFAULT 1,'
-            '    idf_weight  FLOAT8  NOT NULL DEFAULT 0.693,'
             '    updated_at  TIMESTAMPTZ DEFAULT now()'
             ')',
             chk_tbl || '_idf_stats');
