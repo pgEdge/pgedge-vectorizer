@@ -206,19 +206,6 @@ bm25_tokenize(const char *text, int *ntokens)
 }
 
 /*
- * bm25_load_idf_stats
- *
- * Load all rows from {chunk_table}_idf_stats via SPI and return them as
- * a dynahash keyed on term for O(1) IDF lookups.  Returns NULL (not an
- * error) if the stats table does not exist yet.
- *
- * Uses a subtransaction so a missing table does not abort the outer
- * worker transaction.  Re-throws all errors except ERRCODE_UNDEFINED_TABLE.
- * Caller must have an active SPI connection.
- * Caller should call hash_destroy() on the returned HTAB when done.
- */
-
-/*
  * bm25_corpus_stats — corpus size N and mean document length, in one pass.
  *
  * Both come from the same scan: taken separately they made two passes over
@@ -286,6 +273,19 @@ read_idf_row(SPITupleTable *tuptable, int i)
 	return s;
 }
 
+/*
+ * bm25_load_idf_stats
+ *
+ * Load all rows from {chunk_table}_idf_stats via SPI and return them as
+ * a dynahash keyed on term for O(1) IDF lookups.  Returns NULL (not an
+ * error) if the stats table does not exist yet.  Sets *avg_doc_len to the
+ * mean document length, or 1.0 when none could be read.
+ *
+ * Uses a subtransaction so a missing table does not abort the outer
+ * worker transaction.  Re-throws all errors except ERRCODE_UNDEFINED_TABLE.
+ * Caller must have an active SPI connection.
+ * Caller should call hash_destroy() on the returned HTAB when done.
+ */
 HTAB *
 bm25_load_idf_stats(const char *chunk_table, float8 *avg_doc_len)
 {
