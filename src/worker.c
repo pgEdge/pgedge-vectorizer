@@ -20,6 +20,7 @@
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
 #include "storage/proc.h"
+#include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
@@ -49,6 +50,7 @@ typedef struct LauncherSlot
 	char		dbname[NAMEDATALEN];
 	BackgroundWorkerHandle *handle;
 	bool		terminating;	/* asked to stop; awaiting confirmation */
+	TimestampTz spawn_time;		/* when this worker was registered */
 } LauncherSlot;
 
 static LauncherSlot launcher_slots[PGEDGE_VECTORIZER_MAX_WORKERS];
@@ -56,18 +58,69 @@ static int	launcher_nslots = 0;
 static int	launcher_cursor = 0;	/* round-robin position in the database list */
 
 /*
+ * Failed-start backoff.
+ *
+ * A worker that cannot start at all, because its database does not exist or
+ * will not accept connections, exits within a few milliseconds, and the exit
+ * notification brings the launcher straight back round to spawn a replacement.
+ * Nothing in the spawn path rate limits that, so the launcher forks as fast as
+ * the postmaster will oblige: left alone it burns thousands of PIDs a minute
+ * and fills the log at a comparable rate. A single mistyped name in
+ * pgedge_vectorizer.databases is enough to provoke it.
+ *
+ * A worker is judged to have failed to start if it exits within
+ * LAUNCHER_FAILED_START_MS of being spawned. Its database is then held off for
+ * an interval that doubles on each successive failure, from
+ * LAUNCHER_RETRY_INTERVAL_MIN_MS up to LAUNCHER_RETRY_INTERVAL_MAX_MS, which
+ * mirrors the extension-not-installed backoff in
+ * pgedge_vectorizer_worker_main(). A worker that lives longer than the
+ * threshold clears its database's backoff, so a database that recovers is
+ * serviced at full speed again.
+ *
+ * The threshold sits below the one second minimum of
+ * pgedge_vectorizer.worker_service_quantum, so a worker yielding its slot at
+ * the end of a quantum can never be mistaken for one that failed to start. It
+ * is still two orders of magnitude more than a failing worker needs to reach
+ * its FATAL, so the distinction is not a fine one in practice.
+ *
+ * This state is keyed by database name rather than held on the slot, because
+ * launcher_reap_workers() drops the slot at the moment the worker exits and
+ * the backoff has to outlive it.
+ */
+#define LAUNCHER_FAILED_START_MS			500
+#define LAUNCHER_RETRY_INTERVAL_MIN_MS		5000
+#define LAUNCHER_RETRY_INTERVAL_MAX_MS		300000
+
+typedef struct LauncherBackoff
+{
+	char		dbname[NAMEDATALEN];
+	int			interval_ms;	/* interval applied for the latest failure */
+	TimestampTz retry_after;	/* no further attempt before this */
+} LauncherBackoff;
+
+static LauncherBackoff *launcher_backoffs = NULL;
+static int	launcher_nbackoffs = 0;
+static int	launcher_backoffs_size = 0;
+
+/*
  * Sweep intervals.
  *
- * Workers are registered with bgw_notify_pid set to the launcher, but that
- * notification was observed not to wake a launcher holding no database
- * connection, so the sweep interval rather than the notification is what
- * bounds how quickly a freed slot is refilled. Do not rely on the latch being
- * set when a worker exits.
+ * Workers are registered with bgw_notify_pid set to the launcher, and the
+ * launcher installs procsignal_sigusr1_handler, so the postmaster's exit
+ * notification sets the launcher's latch and a freed slot is normally refilled
+ * within milliseconds. See the signal setup in
+ * pgedge_vectorizer_launcher_main() for why the handler has to be installed
+ * explicitly.
  *
- * When there are more databases than slots, databases are queued waiting for a
- * turn and refill latency directly limits throughput, so sweep briskly. When
- * every database has its own worker there is nothing to refill and the sweep
- * only needs to notice configuration changes, so sweep rarely.
+ * These intervals are therefore a backstop rather than the mechanism: they
+ * bound how quickly the launcher notices something no notification covers,
+ * chiefly a configuration change that neither started nor stopped a worker.
+ * Sweep briskly whilst databases are queued waiting for a turn, since a missed
+ * wakeup there costs throughput, and rarely once every database has its own
+ * resident worker.
+ *
+ * Whichever applies is shortened when a failed-start backoff is due to expire
+ * sooner, so that a database being retried does not wait out the idle sweep.
  */
 #define LAUNCHER_SWEEP_INTERVAL_ROTATING_MS		1000
 #define LAUNCHER_SWEEP_INTERVAL_IDLE_MS			60000
@@ -90,6 +143,11 @@ static BackgroundWorkerHandle *launch_worker_for_database(const char *dbname);
 static void launcher_reap_workers(void);
 static bool database_has_worker(const char *dbname);
 static void launcher_sweep(char **db_names, int db_count);
+static LauncherBackoff *launcher_backoff_find(const char *dbname);
+static void launcher_backoff_record(const char *dbname);
+static void launcher_backoff_clear(const char *dbname);
+static void launcher_backoff_prune(char **db_names, int db_count);
+static long launcher_backoff_next_retry_ms(TimestampTz now);
 
 /*
  * Signal handler for SIGTERM
@@ -312,12 +370,169 @@ launch_worker_for_database(const char *dbname)
 }
 
 /*
+ * Find the backoff entry for a database, or NULL if it has none.
+ */
+static LauncherBackoff *
+launcher_backoff_find(const char *dbname)
+{
+	for (int i = 0; i < launcher_nbackoffs; i++)
+	{
+		if (strcmp(launcher_backoffs[i].dbname, dbname) == 0)
+			return &launcher_backoffs[i];
+	}
+
+	return NULL;
+}
+
+/*
+ * Note that a worker for this database failed to start, and hold the database
+ * off for a while before trying again.
+ *
+ * The interval doubles on each consecutive failure, so a database that is
+ * briefly unavailable is retried promptly whilst one that is misconfigured
+ * settles at a rate that costs nothing to leave running indefinitely.
+ */
+static void
+launcher_backoff_record(const char *dbname)
+{
+	LauncherBackoff *entry = launcher_backoff_find(dbname);
+
+	if (entry == NULL)
+	{
+		/*
+		 * Entries are bounded by the number of configured databases, since
+		 * launcher_backoff_prune() drops those that leave the list.
+		 */
+		if (launcher_nbackoffs >= launcher_backoffs_size)
+		{
+			int			newsize = (launcher_backoffs_size == 0)
+				? 8 : launcher_backoffs_size * 2;
+
+			if (launcher_backoffs == NULL)
+				launcher_backoffs = palloc(newsize * sizeof(LauncherBackoff));
+			else
+				launcher_backoffs = repalloc(launcher_backoffs,
+											 newsize * sizeof(LauncherBackoff));
+			launcher_backoffs_size = newsize;
+		}
+
+		entry = &launcher_backoffs[launcher_nbackoffs++];
+		strlcpy(entry->dbname, dbname, NAMEDATALEN);
+		entry->interval_ms = LAUNCHER_RETRY_INTERVAL_MIN_MS;
+	}
+	else
+	{
+		entry->interval_ms = Min(entry->interval_ms * 2,
+								 LAUNCHER_RETRY_INTERVAL_MAX_MS);
+	}
+
+	entry->retry_after = TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
+													entry->interval_ms);
+
+	elog(LOG, "pgedge_vectorizer launcher: worker for database \"%s\" exited "
+		 "immediately, retrying in %dms", dbname, entry->interval_ms);
+}
+
+/*
+ * Forget any backoff for a database, so that it is serviced at full speed
+ * again once a worker of its own has run successfully.
+ */
+static void
+launcher_backoff_clear(const char *dbname)
+{
+	LauncherBackoff *entry = launcher_backoff_find(dbname);
+
+	if (entry == NULL)
+		return;
+
+	/* Compact the array by moving the final entry into the hole */
+	*entry = launcher_backoffs[launcher_nbackoffs - 1];
+	launcher_nbackoffs--;
+}
+
+/*
+ * Drop backoff entries for databases that are no longer configured, so that
+ * the array cannot outgrow the database list.
+ *
+ * Removing a database and putting it back therefore earns it an immediate
+ * attempt, which is the right answer: the operator has just changed something.
+ */
+static void
+launcher_backoff_prune(char **db_names, int db_count)
+{
+	int			i = 0;
+
+	while (i < launcher_nbackoffs)
+	{
+		bool		still_configured = false;
+
+		for (int j = 0; j < db_count; j++)
+		{
+			if (strcmp(launcher_backoffs[i].dbname, db_names[j]) == 0)
+			{
+				still_configured = true;
+				break;
+			}
+		}
+
+		if (still_configured)
+			i++;
+		else
+		{
+			launcher_backoffs[i] = launcher_backoffs[launcher_nbackoffs - 1];
+			launcher_nbackoffs--;
+		}
+	}
+}
+
+/*
+ * Milliseconds until the earliest retry still in the future, or -1 if there is
+ * none to wait for.
+ *
+ * Entries that have already come due are skipped rather than reported as due
+ * now. The sweep will have taken any it could, so one still sitting here is
+ * waiting on a worker slot rather than on the clock, and returning a zero or
+ * one millisecond timeout for it would spin the launcher until a slot freed.
+ * The exit notification covers that case, and the sweep interval backs it up.
+ *
+ * Never returns zero, so a sub-millisecond wait cannot spin either.
+ */
+static long
+launcher_backoff_next_retry_ms(TimestampTz now)
+{
+	long		earliest = -1;
+
+	for (int i = 0; i < launcher_nbackoffs; i++)
+	{
+		long		secs;
+		int			usecs;
+		long		msecs;
+
+		if (launcher_backoffs[i].retry_after <= now)
+			continue;
+
+		TimestampDifference(now, launcher_backoffs[i].retry_after,
+							&secs, &usecs);
+		msecs = secs * 1000 + usecs / 1000;
+
+		if (msecs < 1)
+			msecs = 1;
+
+		if (earliest < 0 || msecs < earliest)
+			earliest = msecs;
+	}
+
+	return earliest;
+}
+
+/*
  * Drop tracking entries for workers that have exited.
  */
 static void
 launcher_reap_workers(void)
 {
 	int			i = 0;
+	TimestampTz now = GetCurrentTimestamp();
 
 	while (i < launcher_nslots)
 	{
@@ -325,6 +540,19 @@ launcher_reap_workers(void)
 
 		if (GetBackgroundWorkerPid(launcher_slots[i].handle, &pid) == BGWH_STOPPED)
 		{
+			/*
+			 * A worker that exited almost as soon as it was spawned never got
+			 * as far as doing any work, so hold its database off rather than
+			 * spinning on it. One we asked to stop does not count, however
+			 * promptly it obliged.
+			 */
+			if (!launcher_slots[i].terminating &&
+				!TimestampDifferenceExceeds(launcher_slots[i].spawn_time, now,
+											LAUNCHER_FAILED_START_MS))
+				launcher_backoff_record(launcher_slots[i].dbname);
+			else
+				launcher_backoff_clear(launcher_slots[i].dbname);
+
 			pfree(launcher_slots[i].handle);
 
 			/* Compact the array by moving the final entry into the hole */
@@ -355,12 +583,8 @@ database_has_worker(const char *dbname)
 }
 
 /*
- * One pass over the database list, spawning workers where they are missing.
- *
- * Databases are visited from a persistent cursor rather than always from the
- * head of the list. Combined with the service quantum that makes busy workers
- * relinquish their slots, this is what guarantees that every database is
- * eventually serviced when there are more databases than slots.
+ * Stop the newest workers until no more than num_workers remain, so that
+ * lowering num_workers takes effect without waiting for workers to yield.
  */
 static void
 launcher_retire_surplus(void)
@@ -423,28 +647,42 @@ launcher_retire_unconfigured(char **db_names, int db_count)
 
 /*
  * One pass over the database list, spawning workers where they are missing.
+ *
+ * Databases are visited from a persistent cursor rather than always from the
+ * head of the list. Combined with the service quantum that makes busy workers
+ * relinquish their slots, this is what guarantees that every database is
+ * eventually serviced when there are more databases than slots.
  */
 static void
 launcher_sweep(char **db_names, int db_count)
 {
 	int			visited;
 	bool		warned = false;
+	TimestampTz now;
 
 	if (db_count == 0)
 		return;
 
 	launcher_retire_surplus();
 
+	now = GetCurrentTimestamp();
+
 	for (visited = 0; visited < db_count; visited++)
 	{
 		int			idx = (launcher_cursor + visited) % db_count;
 		const char *dbname = db_names[idx];
+		LauncherBackoff *backoff;
 		BackgroundWorkerHandle *handle;
 
 		if (launcher_nslots >= pgedge_vectorizer_num_workers)
 			break;
 
 		if (database_has_worker(dbname))
+			continue;
+
+		/* Still serving out a failed-start backoff; leave it for a later pass */
+		backoff = launcher_backoff_find(dbname);
+		if (backoff != NULL && now < backoff->retry_after)
 			continue;
 
 		handle = launch_worker_for_database(dbname);
@@ -463,6 +701,7 @@ launcher_sweep(char **db_names, int db_count)
 		strlcpy(launcher_slots[launcher_nslots].dbname, dbname, NAMEDATALEN);
 		launcher_slots[launcher_nslots].handle = handle;
 		launcher_slots[launcher_nslots].terminating = false;
+		launcher_slots[launcher_nslots].spawn_time = GetCurrentTimestamp();
 		launcher_nslots++;
 	}
 
@@ -491,6 +730,8 @@ launcher_reload_databases(char ***db_names, int old_count, bool *logged_empty)
 	}
 
 	db_count = parse_database_list(db_names);
+
+	launcher_backoff_prune(*db_names, db_count);
 
 	if (db_count == 0)
 	{
@@ -533,9 +774,22 @@ pgedge_vectorizer_launcher_main(Datum main_arg)
 	bool		reload_list = true;
 	bool		logged_empty = false;
 
-	/* Setup signal handlers */
+	/*
+	 * Setup signal handlers.
+	 *
+	 * SIGUSR1 has to be handled explicitly. BackgroundWorkerMain() only
+	 * installs procsignal_sigusr1_handler for workers that requested
+	 * BGWORKER_BACKEND_DATABASE_CONNECTION, and points SIGUSR1 at SIG_IGN for
+	 * everyone else. This launcher takes no database connection, so without
+	 * this the bgw_notify_pid notification the postmaster sends when a worker
+	 * exits would be discarded and refilling a slot would wait for the next
+	 * sweep. contrib/pg_prewarm's leader does the same thing for the same
+	 * reason; the handler is safe here because CheckProcSignal() ignores a
+	 * process with no ProcSignal slot, leaving just the latch wakeup.
+	 */
 	pqsignal(SIGTERM, worker_sigterm);
 	pqsignal(SIGHUP, worker_sighup);
+	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
@@ -546,6 +800,7 @@ pgedge_vectorizer_launcher_main(Datum main_arg)
 	{
 		int			rc;
 		long		sweep_interval;
+		long		retry_ms;
 
 		/* Reload configuration if SIGHUP received */
 		if (got_sighup)
@@ -573,6 +828,14 @@ pgedge_vectorizer_launcher_main(Datum main_arg)
 		sweep_interval = (db_count > pgedge_vectorizer_num_workers)
 			? LAUNCHER_SWEEP_INTERVAL_ROTATING_MS
 			: LAUNCHER_SWEEP_INTERVAL_IDLE_MS;
+
+		/*
+		 * Come back for the earliest pending retry if that falls sooner, so a
+		 * backed-off database is not left waiting out the whole sweep.
+		 */
+		retry_ms = launcher_backoff_next_retry_ms(GetCurrentTimestamp());
+		if (retry_ms >= 0 && retry_ms < sweep_interval)
+			sweep_interval = retry_ms;
 
 		rc = WaitLatch(MyLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,

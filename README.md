@@ -454,8 +454,13 @@ SELECT * FROM pgedge_vectorizer.failed_items;
 1. Increase number of workers:
 ```sql
 ALTER SYSTEM SET pgedge_vectorizer.num_workers = 4;
--- Restart required
+SELECT pg_reload_conf();
 ```
+
+Workers are drawn from `max_worker_processes`, so raising `num_workers` beyond
+the slots left spare there achieves nothing; the launcher simply logs that
+`max_worker_processes` may be exhausted and carries on with what it has.
+Raising `max_worker_processes` itself does require a restart.
 
 2. Increase batch size:
 ```sql

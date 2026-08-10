@@ -28,6 +28,10 @@ test/isolationcheck_tmp_check/
 # PGXS creates tmp_check at the top level for TAP tests, since that is where
 # the Makefile invoking prove lives
 tmp_check/
+# PostgreSQL::Test writes its per-test logs alongside it, into log/. These are
+# named regress_log_* and *.log, so the *.log rule below does not cover them
+# all, and the directory has to be ignored outright.
+log/
 
 # PostgreSQL extension build files
 *.control.in
