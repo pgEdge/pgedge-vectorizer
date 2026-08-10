@@ -224,6 +224,35 @@ SELECT pgedge_vectorizer.disable_vectorization('avg_len_docs', 'body', true);
 DROP TABLE avg_len_docs;
 
 ---------------------------------------------------------------------------
+-- Test 15c: a missing chunk table is reported, not absorbed
+---------------------------------------------------------------------------
+
+-- The stats load runs in a subtransaction that tolerates a missing table,
+-- which is right for the stats table (not vectorized yet) but wrong for the
+-- chunk table, where it means the registry points at something that is gone.
+-- Reading the corpus figures inside that subtransaction would swallow it and
+-- return a silently degraded vector.
+
+CREATE TABLE orphan_idf_stats (
+    term TEXT PRIMARY KEY,
+    doc_freq INT,
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+INSERT INTO orphan_idf_stats (term, doc_freq) VALUES ('alpha', 1), ('beta', 1);
+
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.bm25_query_vector('alpha beta', 'orphan');
+    RAISE EXCEPTION 'Expected exception was not raised';
+EXCEPTION
+    WHEN undefined_table THEN
+        RAISE NOTICE 'Got expected exception for missing chunk table';
+END;
+$$;
+
+DROP TABLE orphan_idf_stats;
+
+---------------------------------------------------------------------------
 -- Test 16: BM25 tokenizer returns empty array for NULL input
 ---------------------------------------------------------------------------
 
