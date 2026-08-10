@@ -172,7 +172,18 @@ bm25_tokenize(const char *text, int *ntokens)
 	tok = strtok_r(buf, " ", &saveptr);
 	while (tok != NULL)
 	{
-		if (!is_stopword(tok))
+		/*
+		 * Drop terms too long for the hash key rather than letting dynahash
+		 * truncate them.  Both this table and the IDF table key on
+		 * BM25_MAX_TERM_LEN bytes, so two distinct terms sharing that much of
+		 * a prefix would otherwise merge into one entry, giving a combined
+		 * term frequency and a shared weight.  Dropping them costs nothing a
+		 * truncating match was giving: an alphabetic run this long is not a
+		 * term anyone searches for, and both the indexing and query paths
+		 * tokenize through here, so they are excluded consistently.
+		 */
+		if (!is_stopword(tok) &&
+			strnlen(tok, BM25_MAX_TERM_LEN) < BM25_MAX_TERM_LEN)
 		{
 			bool            found;
 			TermDedupEntry *entry;

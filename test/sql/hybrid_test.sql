@@ -215,6 +215,37 @@ SELECT COALESCE(
 ) AS token_count;
 
 ---------------------------------------------------------------------------
+-- Test 17b: terms too long for the hash key are dropped, not merged
+---------------------------------------------------------------------------
+
+-- The dedup and IDF hashes both key on BM25_MAX_TERM_LEN (128) bytes, so
+-- dynahash truncates anything longer. Two distinct terms sharing that much
+-- of a prefix would merge into one entry with a combined term frequency and
+-- a shared weight. They are dropped instead.
+
+SELECT COALESCE(
+    array_length(pgedge_vectorizer.bm25_tokenize(repeat('a', 200)), 1),
+    0
+) AS overlong_term_dropped;
+
+-- Two distinct 151-character terms differing only in their last character.
+-- Truncated to 127 bytes they are identical, so before this change the pair
+-- collapsed to a single token.
+SELECT COALESCE(
+    array_length(
+        pgedge_vectorizer.bm25_tokenize(
+            repeat('a', 150) || 'x ' || repeat('a', 150) || 'y'),
+        1),
+    0
+) AS overlong_pair_dropped;
+
+-- A term just inside the limit is still indexed
+SELECT COALESCE(
+    array_length(pgedge_vectorizer.bm25_tokenize(repeat('a', 127)), 1),
+    0
+) AS max_length_term_kept;
+
+---------------------------------------------------------------------------
 -- Test 18: bm25_decrement_idf_stats handles NULL/empty terms gracefully
 ---------------------------------------------------------------------------
 
