@@ -425,7 +425,12 @@ bm25_avg_doc_len_internal(const char *chunk_table)
 	Datum   val;
 	float8  result = 1.0;
 
-	sql = psprintf("SELECT AVG(token_count) FROM %s",
+	/*
+	 * AVG() over an integer column yields numeric, whose Datum is a pointer.
+	 * Without the cast DatumGetFloat8() reinterprets those bits as a double,
+	 * producing a denormal that passes the <= 0.0 guard below.
+	 */
+	sql = psprintf("SELECT AVG(token_count)::float8 FROM %s",
 				   quote_identifier(chunk_table));
 	ret = SPI_execute(sql, true, 1);
 	pfree(sql);

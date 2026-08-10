@@ -197,6 +197,33 @@ SELECT pgedge_vectorizer.bm25_avg_doc_len(
 ) >= 0 AS non_negative;
 
 ---------------------------------------------------------------------------
+-- Test 15b: bm25_avg_doc_len equals the actual average
+---------------------------------------------------------------------------
+
+-- AVG() over an integer column yields numeric, so reading its Datum as a
+-- float8 without a cast gives a denormal rather than the mean.  ">= 0" above
+-- cannot catch that: a denormal is positive.  Compare against the value SQL
+-- computes, on a table with rows in it.
+
+CREATE TABLE avg_len_docs (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO avg_len_docs (body)
+SELECT repeat('alpha beta gamma delta ', 40) FROM generate_series(1, 5);
+
+SELECT pgedge_vectorizer.enable_vectorization('avg_len_docs', 'body',
+                                              embedding_dimension => 3);
+
+SELECT pgedge_vectorizer.bm25_avg_doc_len('avg_len_docs_body_chunks')
+       = (SELECT AVG(token_count)::float8 FROM avg_len_docs_body_chunks)
+       AS avg_doc_len_matches_sql;
+
+-- and it must be a plausible document length, not a denormal
+SELECT pgedge_vectorizer.bm25_avg_doc_len('avg_len_docs_body_chunks') > 1.0
+       AS avg_doc_len_is_realistic;
+
+SELECT pgedge_vectorizer.disable_vectorization('avg_len_docs', 'body', true);
+DROP TABLE avg_len_docs;
+
+---------------------------------------------------------------------------
 -- Test 16: BM25 tokenizer returns empty array for NULL input
 ---------------------------------------------------------------------------
 
