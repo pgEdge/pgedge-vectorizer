@@ -1393,7 +1393,7 @@ process_queue_batch(const char *dbname)
 								tokens = bm25_tokenize(contents[idx],
 													   &ntokens);
 								idf_htab = bm25_load_idf_stats(
-										chunk_tables[idx]);
+										chunk_tables[idx], tokens, ntokens);
 								avg_doc_len = bm25_avg_doc_len_internal(
 										chunk_tables[idx]);
 								sparse_str = bm25_compute_sparse_str(

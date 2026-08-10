@@ -234,8 +234,8 @@ SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
 
 -- Seed a term into the IDF stats table
 INSERT INTO hybrid_test_docs_content_chunks_idf_stats
-    (term, doc_freq, total_docs, idf_weight)
-VALUES ('testterm', 5, 10, 1.0);
+    (term, doc_freq)
+VALUES ('testterm', 5);
 
 -- Decrement by 1
 SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
@@ -248,6 +248,40 @@ SELECT pgedge_vectorizer.bm25_decrement_idf_stats(
 SELECT term, doc_freq
 FROM hybrid_test_docs_content_chunks_idf_stats
 WHERE term = 'testterm';
+
+-- bm25_query_vector against a populated stats table.  Test 14 calls it while
+-- _idf_stats is empty, which returns early without building the IDF hash.
+SELECT pgedge_vectorizer.bm25_query_vector(
+    'testterm sample', 'hybrid_test_docs_content_chunks'
+) IS NOT NULL AS query_vector_with_populated_stats;
+
+-- The loader fetches only the query's own terms, so vocabulary belonging to
+-- other documents must not affect the result. This guards the scoping against
+-- changing output; it cannot show the resource saving, which is why the number
+-- of rows loaded is not asserted here.
+--
+SELECT pgedge_vectorizer.bm25_query_vector(
+    'testterm sample', 'hybrid_test_docs_content_chunks')::text AS baseline \gset
+
+INSERT INTO hybrid_test_docs_content_chunks_idf_stats (term, doc_freq)
+SELECT 'unrelated' || g, 1 FROM generate_series(1, 5000) g;
+
+SELECT :'baseline'::sparsevec
+       = pgedge_vectorizer.bm25_query_vector(
+             'testterm sample', 'hybrid_test_docs_content_chunks')
+       AS unchanged_by_unrelated_vocabulary;
+
+DELETE FROM hybrid_test_docs_content_chunks_idf_stats WHERE term LIKE 'unrelated%';
+
+-- bm25_query_vector() inside a statement that owns relations. The loader runs
+-- its SPI query in a subtransaction; if it does not restore the caller's
+-- resource owner on release, this aborts the backend with "relcache reference
+-- is not owned by resource owner". A plain SELECT does not catch it.
+CREATE TABLE bm25_owner_check AS
+SELECT pgedge_vectorizer.bm25_query_vector(
+    'testterm sample', 'hybrid_test_docs_content_chunks') AS v;
+SELECT count(*) AS rows_written FROM bm25_owner_check;
+DROP TABLE bm25_owner_check;
 
 -- Clean up the test row
 DELETE FROM hybrid_test_docs_content_chunks_idf_stats WHERE term = 'testterm';

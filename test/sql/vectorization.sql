@@ -76,6 +76,13 @@ ORDER BY tgname;
 -- Verify chunks still exist (upserted, not duplicated)
 SELECT COUNT(*) AS chunk_count FROM test_docs_content_chunks;
 
+-- The stats table stores only the per-term quantity.  The corpus size is one
+-- value shared by every term and the IDF weight derives from it, so both are
+-- computed when the stats are read rather than materialised per row.
+SELECT string_agg(column_name, ', ' ORDER BY ordinal_position) AS idf_stats_columns
+  FROM information_schema.columns
+ WHERE table_name = 'test_docs_content_chunks_idf_stats';
+
 -- Clean up
 SELECT pgedge_vectorizer.disable_vectorization('test_docs'::regclass, 'content', true);
 DROP TABLE test_docs;

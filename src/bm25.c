@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "access/xact.h"
+#include "catalog/pg_type.h"
 #include "lib/stringinfo.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -114,8 +115,6 @@ typedef struct
 {
 	char   *term;
 	int     doc_freq;
-	int     total_docs;
-	float8  idf_weight;
 } IdfStat;
 
 /*
@@ -221,6 +220,38 @@ bm25_tokenize(const char *text, int *ntokens)
  */
 
 /*
+ * bm25_chunk_count — number of rows in the chunk table, i.e. the BM25
+ * corpus size N.  Clamped to a minimum of 1 so that callers dividing or
+ * taking logarithms never see zero.  Caller must have an active SPI
+ * connection.  count(*) is left uncast because ::int would raise
+ * "integer out of range" past 2^31 rows.
+ */
+static int64
+bm25_chunk_count(const char *chunk_table)
+{
+	char   *sql;
+	int     ret;
+	int64   total = 0;
+	bool    isnull;
+	Datum   val;
+
+	sql = psprintf("SELECT count(*) FROM %s",
+				   quote_identifier(chunk_table));
+	ret = SPI_execute(sql, true, 1);
+	pfree(sql);
+
+	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		val = SPI_getbinval(SPI_tuptable->vals[0],
+							SPI_tuptable->tupdesc, 1, &isnull);
+		if (!isnull)
+			total = DatumGetInt64(val);
+	}
+
+	return (total <= 0) ? 1 : total;
+}
+
+/*
  * read_idf_row — extract one IdfStat from a SPI result row
  */
 static IdfStat
@@ -236,17 +267,11 @@ read_idf_row(SPITupleTable *tuptable, int i)
 	val = SPI_getbinval(tuptable->vals[i], tuptable->tupdesc, 2, &isnull);
 	s.doc_freq = isnull ? 1 : DatumGetInt32(val);
 
-	val = SPI_getbinval(tuptable->vals[i], tuptable->tupdesc, 3, &isnull);
-	s.total_docs = isnull ? 1 : DatumGetInt32(val);
-
-	val = SPI_getbinval(tuptable->vals[i], tuptable->tupdesc, 4, &isnull);
-	s.idf_weight = isnull ? 0.693 : DatumGetFloat8(val);
-
 	return s;
 }
 
 HTAB *
-bm25_load_idf_stats(const char *chunk_table)
+bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens)
 {
 	char            *sql;
 	int              ret;
@@ -255,13 +280,36 @@ bm25_load_idf_stats(const char *chunk_table)
 	ResourceOwner    oldowner;
 	HTAB            *htab = NULL;
 	HASHCTL          ctl;
+	int64            total_docs = 1;
+	Datum            terms;
+	Oid              argtype = TEXTARRAYOID;
+
+	if (tokens == NULL || ntokens <= 0)
+		return NULL;
+
+	/*
+	 * Only the caller's own terms are ever looked up, so fetch only those
+	 * rather than the whole vocabulary.  term is the primary key, making this
+	 * an index lookup; loading every row cost memory proportional to the
+	 * vocabulary on each call, and the worker calls this once per chunk.
+	 */
+	{
+		Datum *elems = palloc(ntokens * sizeof(Datum));
+
+		for (int i = 0; i < ntokens; i++)
+			elems[i] = CStringGetTextDatum(tokens[i].term);
+
+		terms = PointerGetDatum(construct_array(elems, ntokens, TEXTOID,
+												-1, false, TYPALIGN_INT));
+		pfree(elems);
+	}
 
 	{
 		char       *tbl_name = psprintf("%s_idf_stats", chunk_table);
 		const char *qtbl     = quote_identifier(tbl_name);
 
-		sql = psprintf(
-			"SELECT term, doc_freq, total_docs, idf_weight FROM %s", qtbl);
+		sql = psprintf("SELECT term, doc_freq FROM %s WHERE term = ANY($1)",
+					   qtbl);
 		pfree(tbl_name);
 	}
 
@@ -275,9 +323,26 @@ bm25_load_idf_stats(const char *chunk_table)
 	BeginInternalSubTransaction(NULL);
 	PG_TRY();
 	{
-		ret = SPI_execute(sql, true, 0);
+		/*
+		 * Must precede the stats query: SPI_execute() replaces SPI_tuptable,
+		 * so counting after would leave the loop reading the count(*) result
+		 * as (term, doc_freq).
+		 */
+		total_docs = bm25_chunk_count(chunk_table);
+
+		ret = SPI_execute_with_args(sql, 1, &argtype, &terms, NULL, true, 0);
 		ok  = true;
+
+		/*
+		 * Restore the context and resource owner on the way out, as the
+		 * catch path does.  Releasing a subtransaction leaves them pointing
+		 * at its own owner, and a caller whose statement owns relations --
+		 * CREATE TABLE AS, for one -- then fails with "relcache reference is
+		 * not owned by resource owner".
+		 */
 		ReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(oldctx);
+		CurrentResourceOwner = oldowner;
 	}
 	PG_CATCH();
 	{
@@ -314,7 +379,7 @@ bm25_load_idf_stats(const char *chunk_table)
 	ctl.entrysize = sizeof(IdfHashEntry);
 	ctl.hcxt      = CurrentMemoryContext;
 	htab = hash_create("bm25_idf_stats",
-					   (int) SPI_processed * 2,
+					   ntokens,
 					   &ctl,
 					   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
@@ -326,7 +391,18 @@ bm25_load_idf_stats(const char *chunk_table)
 
 		entry = hash_search(htab, row.term, HASH_ENTER, &found);
 		if (!found)
-			entry->idf_weight = row.idf_weight;
+		{
+			/*
+			 * Derived, not stored: the corpus size is identical for every
+			 * term.  Expression shape matches the SQL it replaced so that
+			 * results are bit-identical.
+			 */
+			entry->idf_weight =
+				(row.doc_freq <= 0)
+					? 0.0
+					: log(1.0 + ((double) total_docs - row.doc_freq + 0.5)
+								/ (row.doc_freq + 0.5));
+		}
 		/* Duplicate terms: keep the first weight encountered */
 	}
 
@@ -561,17 +637,16 @@ bm25_compute_sparse_vector(BM25Term *tokens, int ntokens,
  * bm25_update_idf_stats
  *
  * Upsert each token's term into {chunk_table}_idf_stats, incrementing
- * doc_freq and recomputing idf_weight.  Runs inside a subtransaction
- * so that a failure does not abort the outer worker transaction.
+ * doc_freq.  Runs inside a subtransaction so that a failure does not
+ * abort the outer worker transaction.
  * Caller must have an active SPI connection.
  */
 /*
- * upsert_term_idf — insert or update a single term's IDF stats row.
- * total_docs is pre-computed once by the caller; passing it here
- * avoids a full-table count(*) scan per term.
+ * upsert_term_idf — insert or increment a single term's document frequency.
+ * Only doc_freq is stored; the IDF weight is computed on read.
  */
 static void
-upsert_term_idf(const char *chunk_table, const char *term, int total_docs)
+upsert_term_idf(const char *chunk_table, const char *term)
 {
 	char       *safe_term  = quote_literal_cstr(term);
 	char       *tbl_name   = psprintf("%s_idf_stats", chunk_table);
@@ -580,20 +655,12 @@ upsert_term_idf(const char *chunk_table, const char *term, int total_docs)
 	int         ret;
 
 	sql = psprintf(
-		"INSERT INTO %s"
-		"    (term, doc_freq, total_docs, idf_weight)"
-		" VALUES (%s, 1, %d,"
-		"         ln(1.0 + (%d - 1.0 + 0.5) / (1.0 + 0.5)))"
+		"INSERT INTO %s (term, doc_freq)"
+		" VALUES (%s, 1)"
 		" ON CONFLICT (term) DO UPDATE SET"
 		"    doc_freq   = %s.doc_freq + 1,"
-		"    total_docs = %d,"
-		"    idf_weight = ln(1.0 +"
-		"        (%d - (%s.doc_freq + 1) + 0.5)"
-		"        / ((%s.doc_freq + 1) + 0.5)),"
 		"    updated_at = now()",
-		qidf, safe_term, total_docs, total_docs,
-		qidf,
-		total_docs, total_docs, qidf, qidf);
+		qidf, safe_term, qidf);
 
 	pfree(tbl_name);
 	pfree(safe_term);
@@ -612,31 +679,9 @@ bm25_update_idf_stats(const char *chunk_table,
 {
 	MemoryContext oldctx;
 	ResourceOwner oldowner;
-	int           total_docs = 0;
-	bool          isnull;
-	Datum         val;
-	char         *sql;
-	int           ret;
 
 	if (ntokens <= 0)
 		return;
-
-	/* Pre-compute total_docs once to avoid per-term count(*) scans */
-	sql = psprintf("SELECT count(*)::int FROM %s",
-				   quote_identifier(chunk_table));
-	ret = SPI_execute(sql, true, 1);
-	pfree(sql);
-
-	if (ret == SPI_OK_SELECT && SPI_processed > 0)
-	{
-		val = SPI_getbinval(SPI_tuptable->vals[0],
-							SPI_tuptable->tupdesc, 1, &isnull);
-		if (!isnull)
-			total_docs = DatumGetInt32(val);
-	}
-
-	if (total_docs <= 0)
-		total_docs = 1;
 
 	oldctx   = CurrentMemoryContext;
 	oldowner = CurrentResourceOwner;
@@ -645,9 +690,12 @@ bm25_update_idf_stats(const char *chunk_table,
 	PG_TRY();
 	{
 		for (int i = 0; i < ntokens; i++)
-			upsert_term_idf(chunk_table, tokens[i].term, total_docs);
+			upsert_term_idf(chunk_table, tokens[i].term);
 
+		/* Restore on the way out, as the catch path does */
 		ReleaseCurrentSubTransaction();
+		MemoryContextSwitchTo(oldctx);
+		CurrentResourceOwner = oldowner;
 	}
 	PG_CATCH();
 	{
@@ -706,7 +754,7 @@ pgedge_vectorizer_bm25_query_vector(PG_FUNCTION_ARGS)
 	SPI_connect();
 
 	tokens      = bm25_tokenize(query, &ntokens);
-	idf_htab    = bm25_load_idf_stats(chunk_table);
+	idf_htab    = bm25_load_idf_stats(chunk_table, tokens, ntokens);
 	avg_doc_len = bm25_avg_doc_len_internal(chunk_table);
 
 	result = bm25_compute_sparse_vector(

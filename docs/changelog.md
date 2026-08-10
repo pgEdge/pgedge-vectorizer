@@ -62,6 +62,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regardless of the configured value. The GUC now sets `max_attempts` at every
   point a chunk is queued: on initial chunking, on content updates, and on
   `recreate_chunks()` and `reprocess_chunks()`.
+- BM25 IDF statistics tables no longer store `total_docs` or `idf_weight`.
+  Both derive from the corpus size, which is a single value shared by every
+  term, so materialising them per row meant that any change to the corpus
+  invalidated every row at once and deleting a source row had to rewrite the
+  entire vocabulary to keep them true. That rewrite took a lock on every term,
+  so deletes of unrelated rows serialised against each other, and it ran even
+  for statements that removed nothing. A delete now updates only the terms
+  belonging to the rows it removed. The weights are computed when the
+  statistics are read and search results are unchanged.
 
 ### Removed
 
@@ -94,8 +103,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   previously installed an `AFTER INSERT OR UPDATE` trigger only, so removing
   source data left every piece of derived data in place: vector and hybrid
   search returned hits pointing at rows that no longer existed, the queue spent
-  embedding API calls on chunks for deleted rows, and `idf_weight` drifted for
-  the whole corpus, distorting relevance ranking for every query rather than
+  embedding API calls on chunks for deleted rows, and the IDF weighting drifted
+  for the whole corpus, distorting relevance ranking for every query rather than
   only those touching deleted rows.
 
   Vectorization now installs three triggers per column, adding an `AFTER DELETE`
