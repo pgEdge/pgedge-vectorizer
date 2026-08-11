@@ -135,8 +135,7 @@ openai_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	char *json_request;
 	char *url;
 	const char *base_url;
-	char auth_header[512];
-	const char *auth_header_ptr = NULL;
+	char *auth_header = NULL;
 	ResponseBuffer response;
 	float **embeddings;
 
@@ -160,17 +159,17 @@ openai_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	/* Build auth header if we have a key */
 	if (api_key != NULL)
 	{
-		snprintf(auth_header, sizeof(auth_header),
-				 "Authorization: Bearer %s", api_key);
-		auth_header_ptr = auth_header;
+		auth_header = psprintf("Authorization: Bearer %s", api_key);
 	}
 
 	/* Perform request */
-	if (!provider_do_curl_request(url, auth_header_ptr, json_request,
+	if (!provider_do_curl_request(url, auth_header, json_request,
 								  "OpenAI", &response, error_msg))
 	{
 		pfree(json_request);
 		pfree(url);
+		if (auth_header)
+			pfree(auth_header);
 		if (response.data)
 			pfree(response.data);
 		return NULL;
@@ -182,6 +181,8 @@ openai_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 
 	pfree(json_request);
 	pfree(url);
+	if (auth_header)
+		pfree(auth_header);
 	pfree(response.data);
 	return embeddings;
 }

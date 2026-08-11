@@ -56,6 +56,11 @@ static time_t last_cleanup_time = 0;
  * a fixed string tells them the item failed, which they can already see from
  * its status, but not why. A fixed buffer rather than a palloc'd copy, since
  * the transaction context this is captured in does not survive the abort.
+ *
+ * Truncation here is deliberate and harmless: this is diagnostic text, the
+ * untruncated message has already gone to the server log via
+ * EmitErrorReport(), and a bounded buffer is what lets the copy outlive the
+ * abort at all.
  */
 #define FAILED_ITEM_ERROR_LEN	1024
 

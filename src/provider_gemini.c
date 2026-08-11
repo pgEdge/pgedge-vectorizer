@@ -127,7 +127,7 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	char *json_request;
 	char *url;
 	const char *base_url;
-	char auth_header[512];
+	char *auth_header;
 	StringInfoData request_buf;
 	ResponseBuffer response;
 	float **embeddings;
@@ -164,8 +164,7 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 				   pgedge_vectorizer_model);
 
 	/* Build auth header */
-	snprintf(auth_header, sizeof(auth_header),
-			 "x-goog-api-key: %s", api_key);
+	auth_header = psprintf("x-goog-api-key: %s", api_key);
 
 	/* Perform request */
 	if (!provider_do_curl_request(url, auth_header, json_request,
@@ -173,6 +172,7 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	{
 		pfree(json_request);
 		pfree(url);
+		pfree(auth_header);
 		if (response.data)
 			pfree(response.data);
 		return NULL;
@@ -184,6 +184,7 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 
 	pfree(json_request);
 	pfree(url);
+	pfree(auth_header);
 	pfree(response.data);
 	return embeddings;
 }

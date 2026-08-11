@@ -250,8 +250,22 @@ provider_parse_float_array(const char **pos, float *output, int dim)
 		while (*p && (isdigit((unsigned char) *p) || *p == '.' || *p == '-' ||
 					  *p == '+' || *p == 'e' || *p == 'E'))
 		{
-			if (value_pos < (int) sizeof(value_buf) - 1)
-				value_buf[value_pos++] = *p;
+			/*
+			 * Stop rather than truncate.  No double needs this many
+			 * characters -- %.17g never exceeds 24 -- so a longer run means a
+			 * malformed response, and keeping only the leading digits would
+			 * feed atof() a number of an entirely different magnitude and
+			 * score on it silently.  Every caller treats a short count as a
+			 * dimension mismatch, so returning here reports the response as
+			 * bad instead.
+			 */
+			if (value_pos >= (int) sizeof(value_buf) - 1)
+			{
+				*pos = p;
+				return idx;
+			}
+
+			value_buf[value_pos++] = *p;
 			p++;
 		}
 		value_buf[value_pos] = '\0';
