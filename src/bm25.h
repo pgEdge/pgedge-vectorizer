@@ -63,7 +63,8 @@ extern double pgedge_vectorizer_bm25_b;
  */
 BM25Term *bm25_tokenize(const char *text, int *ntokens);
 HTAB     *bm25_load_idf_stats(const char *chunk_table,
-							  BM25Term *tokens, int ntokens);
+							  BM25Term *tokens, int ntokens,
+							  float8 *avg_doc_len);
 char     *bm25_compute_sparse_str(BM25Term *tokens, int ntokens,
 								  HTAB *idf_htab,
 								  float8 k1, float8 b,

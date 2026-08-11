@@ -70,7 +70,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so deletes of unrelated rows serialised against each other, and it ran even
   for statements that removed nothing. A delete now updates only the terms
   belonging to the rows it removed. The weights are computed when the
-  statistics are read and search results are unchanged.
+  statistics are read, so ranking is equivalent wherever a stored weight was
+  current, and corrected wherever it had gone stale — which is the situation
+  this change exists to fix.
 
 ### Removed
 
@@ -89,6 +91,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Fixed BM25 length normalisation being driven by an incorrect average document
+  length, which suppressed the sparse half of hybrid search. `AVG()` over the
+  integer `token_count` column returns `numeric`, whose `Datum` is a pointer,
+  and the result was read as a `float8` — so `bm25_avg_doc_len()` returned a
+  denormal (around `1e-315`) rather than the real mean, and passed the
+  non-negative guard because a denormal is positive. Dividing document length
+  by that value made every term's frequency component collapse toward zero,
+  so sparse scores were effectively flat and contributed almost nothing to
+  the fused ranking. Present since hybrid search was introduced.
 - Fixed databases beyond `pgedge_vectorizer.num_workers` never being processed
   ([#23](https://github.com/pgEdge/pgedge-vectorizer/issues/23)). Workers were
   assigned to databases by `worker_id % db_count`, and because `worker_id` only

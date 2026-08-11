@@ -221,27 +221,21 @@ bm25_tokenize(const char *text, int *ntokens)
 }
 
 /*
- * bm25_load_idf_stats
+ * bm25_corpus_stats — corpus size N and mean document length, in one pass.
  *
- * Load all rows from {chunk_table}_idf_stats via SPI and return them as
- * a dynahash keyed on term for O(1) IDF lookups.  Returns NULL (not an
- * error) if the stats table does not exist yet.
+ * Both come from the same scan: taken separately they made two passes over
+ * the chunk table for every search.  Returns N, clamped to a minimum of 1 so
+ * that callers dividing or taking logarithms never see zero, and leaves
+ * *avg_doc_len untouched unless a usable average was read.
  *
- * Uses a subtransaction so a missing table does not abort the outer
- * worker transaction.  Re-throws all errors except ERRCODE_UNDEFINED_TABLE.
+ * count(*) is left uncast because ::int would raise "integer out of range"
+ * past 2^31 rows.  AVG() over an integer column yields numeric, so the cast
+ * to float8 is required before DatumGetFloat8().
+ *
  * Caller must have an active SPI connection.
- * Caller should call hash_destroy() on the returned HTAB when done.
- */
-
-/*
- * bm25_chunk_count — number of rows in the chunk table, i.e. the BM25
- * corpus size N.  Clamped to a minimum of 1 so that callers dividing or
- * taking logarithms never see zero.  Caller must have an active SPI
- * connection.  count(*) is left uncast because ::int would raise
- * "integer out of range" past 2^31 rows.
  */
 static int64
-bm25_chunk_count(const char *chunk_table)
+bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 {
 	char   *sql;
 	int     ret;
@@ -249,7 +243,7 @@ bm25_chunk_count(const char *chunk_table)
 	bool    isnull;
 	Datum   val;
 
-	sql = psprintf("SELECT count(*) FROM %s",
+	sql = psprintf("SELECT count(*), AVG(token_count)::float8 FROM %s",
 				   quote_identifier(chunk_table));
 	ret = SPI_execute(sql, true, 1);
 	pfree(sql);
@@ -260,6 +254,16 @@ bm25_chunk_count(const char *chunk_table)
 							SPI_tuptable->tupdesc, 1, &isnull);
 		if (!isnull)
 			total = DatumGetInt64(val);
+
+		val = SPI_getbinval(SPI_tuptable->vals[0],
+							SPI_tuptable->tupdesc, 2, &isnull);
+		if (!isnull)
+		{
+			float8  avg = DatumGetFloat8(val);
+
+			if (avg > 0.0)
+				*avg_doc_len = avg;
+		}
 	}
 
 	return (total <= 0) ? 1 : total;
@@ -284,8 +288,23 @@ read_idf_row(SPITupleTable *tuptable, int i)
 	return s;
 }
 
+/*
+ * bm25_load_idf_stats
+ *
+ * Load the rows of {chunk_table}_idf_stats matching the caller's terms via
+ * SPI and return them as a dynahash keyed on term for O(1) IDF lookups.
+ * Returns NULL (not an error) if the stats table does not exist yet, or if
+ * there are no terms to look up.  Sets *avg_doc_len to the mean document
+ * length, or 1.0 when none could be read.
+ *
+ * Uses a subtransaction so a missing table does not abort the outer
+ * worker transaction.  Re-throws all errors except ERRCODE_UNDEFINED_TABLE.
+ * Caller must have an active SPI connection.
+ * Caller should call hash_destroy() on the returned HTAB when done.
+ */
 HTAB *
-bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens)
+bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens,
+					float8 *avg_doc_len)
 {
 	char            *sql;
 	int              ret;
@@ -298,8 +317,31 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens)
 	Datum            terms;
 	Oid              argtype = TEXTARRAYOID;
 
+	/*
+	 * Set before anything can fail, so every return path below leaves the
+	 * caller with a usable length.  Written through the pointer rather than
+	 * kept in a local, so a value read before the stats query survives the
+	 * catch.
+	 */
+	*avg_doc_len = 1.0;
+
 	if (tokens == NULL || ntokens <= 0)
 		return NULL;
+
+	/*
+	 * Read the corpus figures first, and outside the subtransaction below.
+	 *
+	 * First because SPI_execute() replaces SPI_tuptable, so reading them
+	 * after the stats query would leave the loop decoding that result as
+	 * (term, doc_freq).
+	 *
+	 * Outside because the subtransaction deliberately tolerates a missing
+	 * table, which is the right answer for the stats table but not for the
+	 * chunk table: that means the registry points at something that no
+	 * longer exists, and it should surface rather than quietly degrade the
+	 * ranking.
+	 */
+	total_docs = bm25_corpus_stats(chunk_table, avg_doc_len);
 
 	/*
 	 * Only the caller's own terms are ever looked up, so fetch only those
@@ -337,13 +379,6 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens)
 	BeginInternalSubTransaction(NULL);
 	PG_TRY();
 	{
-		/*
-		 * Must precede the stats query: SPI_execute() replaces SPI_tuptable,
-		 * so counting after would leave the loop reading the count(*) result
-		 * as (term, doc_freq).
-		 */
-		total_docs = bm25_chunk_count(chunk_table);
-
 		ret = SPI_execute_with_args(sql, 1, &argtype, &terms, NULL, true, 0);
 		ok  = true;
 
@@ -439,7 +474,12 @@ bm25_avg_doc_len_internal(const char *chunk_table)
 	Datum   val;
 	float8  result = 1.0;
 
-	sql = psprintf("SELECT AVG(token_count) FROM %s",
+	/*
+	 * AVG() over an integer column yields numeric, whose Datum is a pointer.
+	 * Without the cast DatumGetFloat8() reinterprets those bits as a double,
+	 * producing a denormal that passes the <= 0.0 guard below.
+	 */
+	sql = psprintf("SELECT AVG(token_count)::float8 FROM %s",
 				   quote_identifier(chunk_table));
 	ret = SPI_execute(sql, true, 1);
 	pfree(sql);
@@ -768,8 +808,8 @@ pgedge_vectorizer_bm25_query_vector(PG_FUNCTION_ARGS)
 	SPI_connect();
 
 	tokens      = bm25_tokenize(query, &ntokens);
-	idf_htab    = bm25_load_idf_stats(chunk_table, tokens, ntokens);
-	avg_doc_len = bm25_avg_doc_len_internal(chunk_table);
+	idf_htab    = bm25_load_idf_stats(chunk_table, tokens, ntokens,
+									  &avg_doc_len);
 
 	result = bm25_compute_sparse_vector(
 				 tokens, ntokens,
