@@ -34,6 +34,27 @@ static volatile sig_atomic_t got_sighup = false;
 static time_t last_cleanup_time = 0;
 
 /*
+ * Queue item whose processing was under way when an error escaped.
+ *
+ * A batch runs inside one transaction, so an error anywhere in it aborts the
+ * lot: the 'processing' marks, any chunk rows already written, and any attempt
+ * to record the failure. Bookkeeping written before the abort therefore cannot
+ * survive it, which left attempts stuck at its original value however many
+ * times an item was tried. max_attempts never tripped, next_retry_at was never
+ * set, and a deterministically failing item was reclaimed on every poll.
+ *
+ * The identity of the item is kept here instead, in process-local memory that
+ * the abort cannot touch, and the failure is recorded afterwards in a fresh
+ * transaction. That is enough to restart the machinery the queue already has:
+ * next_retry_at holds the item out of the claim, a non-zero attempts count
+ * makes the worker process claimed items one at a time, and max_attempts
+ * eventually moves it to 'failed'.
+ */
+static int64 failed_item_queue_id = -1;
+static int	failed_item_attempts = 0;
+static int	failed_item_max_attempts = 0;
+
+/*
  * Launcher state
  *
  * All of this is process-local: there is deliberately no shared memory
@@ -42,8 +63,11 @@ static time_t last_cleanup_time = 0;
  *
  * The cost is that a restarted launcher cannot rediscover workers started by
  * its predecessor, so a launcher crash may briefly leave two workers on one
- * database. That is harmless: queue rows are claimed with FOR UPDATE SKIP
- * LOCKED, so concurrent workers simply take disjoint rows.
+ * database. Queue rows are claimed with FOR UPDATE SKIP LOCKED, so concurrent
+ * workers take disjoint rows for as long as they hold their claims. A claim
+ * does not outlive an abort, though, so a row whose worker failed can be taken
+ * up by the other before the first records the failure; queue_item_record_failure()
+ * matches on the state it last saw rather than on the row id alone.
  */
 typedef struct LauncherSlot
 {
@@ -128,6 +152,9 @@ static int	launcher_backoffs_size = 0;
 /* Forward declarations */
 static void worker_sigterm(SIGNAL_ARGS);
 static void worker_sighup(SIGNAL_ARGS);
+static void queue_item_begin(int64 queue_id, int attempts, int max_attempts);
+static void queue_item_done(void);
+static void queue_item_record_failure(void);
 static void process_queue_batch(const char *dbname);
 static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
@@ -171,6 +198,117 @@ worker_sighup(SIGNAL_ARGS)
 	got_sighup = true;
 	SetLatch(MyLatch);
 	errno = save_errno;
+}
+
+/*
+ * queue_item_begin — note the item about to be worked on.
+ *
+ * Called before anything that could raise, so that a failure can be charged to
+ * the right row once the aborted transaction has been cleaned up.
+ */
+static void
+queue_item_begin(int64 queue_id, int attempts, int max_attempts)
+{
+	failed_item_queue_id = queue_id;
+	failed_item_attempts = attempts;
+	failed_item_max_attempts = max_attempts;
+}
+
+/*
+ * queue_item_done — the item completed, so there is nothing to charge.
+ */
+static void
+queue_item_done(void)
+{
+	failed_item_queue_id = -1;
+}
+
+/*
+ * queue_item_record_failure — charge the noted item for a failed attempt.
+ *
+ * Must run after the failed transaction has been aborted, since it opens one
+ * of its own. Errors here are swallowed: this is already the error path, and
+ * losing the bookkeeping is preferable to taking the worker down with it. The
+ * item is cleared either way, so a persistent problem recording failures
+ * cannot make the worker retry the same row forever on that account.
+ */
+static void
+queue_item_record_failure(void)
+{
+	int64	queue_id = failed_item_queue_id;
+	int		attempts = failed_item_attempts;
+	bool	exhausted;
+
+	if (queue_id < 0)
+		return;
+
+	exhausted = (failed_item_attempts + 1 >= failed_item_max_attempts);
+	queue_item_done();
+
+	/*
+	 * Everything, including the transaction setup, sits inside the handler:
+	 * this runs from the worker's own PG_CATCH, which is not a handler for
+	 * errors raised within it, so anything escaping here would take the
+	 * worker down rather than being swallowed as intended.
+	 */
+	PG_TRY();
+	{
+		SetCurrentStatementStartTimestamp();
+		StartTransactionCommand();
+		PushActiveSnapshot(GetTransactionSnapshot());
+		SPI_connect();
+
+		/*
+		 * Match on the state this worker last saw.  A launcher restart can
+		 * briefly leave two workers on one database, and the abort that
+		 * brought us here released this row's lock, so another worker may
+		 * have claimed and finished it in the meantime.  Updating on id
+		 * alone would then revive a completed item as pending, or mark a
+		 * succeeded one failed.
+		 *
+		 * The qualified UPDATE is sufficient on its own: under READ
+		 * COMMITTED it takes the row lock and re-checks its WHERE clause
+		 * against the newest version of the row, so a row that has moved on
+		 * simply fails the match and is left alone.
+		 */
+		if (exhausted)
+			SPI_execute(psprintf(
+				"UPDATE pgedge_vectorizer.queue "
+				"SET status = 'failed', "
+				"    attempts = attempts + 1, "
+				"    error_message = 'Processing failed', "
+				"    next_retry_at = NULL "
+				"WHERE id = " INT64_FORMAT
+				"  AND status = 'pending' AND attempts = %d",
+				queue_id, attempts), false, 0);
+		else
+			SPI_execute(psprintf(
+				"UPDATE pgedge_vectorizer.queue "
+				"SET status = 'pending', "
+				"    attempts = attempts + 1, "
+				"    error_message = 'Processing failed', "
+				"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
+				"WHERE id = " INT64_FORMAT
+				"  AND status = 'pending' AND attempts = %d",
+				queue_id, attempts), false, 0);
+
+		if (SPI_processed == 0)
+			elog(DEBUG1, "pgedge_vectorizer worker: queue item " INT64_FORMAT
+				 " changed underneath, leaving it alone", queue_id);
+
+		SPI_finish();
+		PopActiveSnapshot();
+		CommitTransactionCommand();
+	}
+	PG_CATCH();
+	{
+		EmitErrorReport();
+		FlushErrorState();
+		AbortCurrentTransaction();
+		elog(LOG, "pgedge_vectorizer worker: could not record failure for "
+			 "queue item " INT64_FORMAT, queue_id);
+	}
+	PG_END_TRY();
 }
 
 /*
@@ -1060,6 +1198,15 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 			/* Abort any transaction */
 			AbortCurrentTransaction();
 
+			/*
+			 * Charge the item that was in flight.  The abort above has to
+			 * come first, since the record is written in a transaction of
+			 * its own and none can be started until this one is cleared.
+			 * Without it the attempt is discarded along with everything else
+			 * and the same row is reclaimed on the next poll, indefinitely.
+			 */
+			queue_item_record_failure();
+
 			/* Recheck extension status on error */
 			extension_exists = false;
 		}
@@ -1160,6 +1307,14 @@ process_queue_batch(const char *dbname)
 			int		ret_dense;
 			Datum	val;
 
+			/*
+			 * Charge this row if the probe raises.  A chunk table named by
+			 * the queue but since dropped fails here, well before the loop
+			 * that processes the items, so noting the item only there would
+			 * leave this failure uncharged.
+			 */
+			queue_item_begin(queue_ids[i], attempts[i], max_attempts[i]);
+
 			ret_dense = SPI_execute(psprintf(
 				"SELECT embedding IS NOT NULL FROM %s WHERE id = %ld",
 				quote_identifier(chunk_tables[i]),
@@ -1176,6 +1331,17 @@ process_queue_batch(const char *dbname)
 			if (sparse_only[i])
 				has_sparse_only = true;
 		}
+
+		/*
+		 * Stop charging the last probed item.  What follows — marking the
+		 * batch, resolving the provider, generating embeddings — either
+		 * fails for the whole batch or for no single item in particular, and
+		 * leaving one noted here would bill it for a fault that is not its
+		 * own.  A misconfigured provider raises for every batch, so left
+		 * uncleared it would work through the queue marking one blameless
+		 * item failed per max_attempts cycles.
+		 */
+		queue_item_done();
 
 		/* If any items have been retried, process individually to isolate failures */
 		if (has_retries && n_items > 1)
@@ -1321,170 +1487,145 @@ process_queue_batch(const char *dbname)
 				for (int i = 0; i < batch_count; i++)
 				{
 					int idx = batch_start + i;
-					PG_TRY();
+
+					/*
+					 * No handler here: a failure is charged to this item by
+					 * the worker's own handler, from the identity noted
+					 * below, once it has aborted the transaction.  Catching
+					 * it locally could achieve nothing, since the queue
+					 * cannot be updated from inside the aborted transaction
+					 * and a re-throw would discard the update in any case.
+					 */
+					queue_item_begin(queue_ids[idx], attempts[idx],
+									 max_attempts[idx]);
+					if (!sparse_only[idx])
+						update_embedding(chunk_ids[idx], chunk_tables[idx], embeddings[i], dim);
+					else if (!pgedge_vectorizer_enable_hybrid)
+						elog(ERROR, "cannot process sparse-only queue item while pgedge_vectorizer.enable_hybrid is disabled");
+
+					/*
+					 * BM25 sparse vector update (opt-in via
+					 * pgedge_vectorizer.enable_hybrid GUC).
+					 */
+					if (pgedge_vectorizer_enable_hybrid)
 					{
-						if (!sparse_only[idx])
-							update_embedding(chunk_ids[idx], chunk_tables[idx], embeddings[i], dim);
-						else if (!pgedge_vectorizer_enable_hybrid)
-							elog(ERROR, "cannot process sparse-only queue item while pgedge_vectorizer.enable_hybrid is disabled");
+						int			ntokens;
+						int			token_count = 0;
+						bool		is_first_process = true;
+						BM25Term   *tokens;
+						HTAB	   *idf_htab;
+						float8		avg_doc_len;
+						char	   *sparse_str;
+						int			ret_bm25;
+						char	   *chunk_sql;
 
 						/*
-						 * BM25 sparse vector update (opt-in via
-						 * pgedge_vectorizer.enable_hybrid GUC).
+						 * Fetch token_count and check whether
+						 * sparse_embedding is already set (for
+						 * idempotency — skip IDF update on retry).
 						 */
-						if (pgedge_vectorizer_enable_hybrid)
+						chunk_sql = psprintf(
+							"SELECT token_count, "
+							"sparse_embedding IS NOT NULL "
+							"FROM %s WHERE id = %ld",
+							quote_identifier(chunk_tables[idx]),
+							chunk_ids[idx]);
+						ret_bm25 = SPI_execute(chunk_sql,
+											   true, 1);
+						pfree(chunk_sql);
+
+						if (ret_bm25 == SPI_OK_SELECT &&
+							SPI_processed > 0)
 						{
-							int			ntokens;
-							int			token_count = 0;
-							bool		is_first_process = true;
-							BM25Term   *tokens;
-							HTAB	   *idf_htab;
-							float8		avg_doc_len;
-							char	   *sparse_str;
-							int			ret_bm25;
-							char	   *chunk_sql;
+							bool   isnull;
+							Datum  v;
+
+							v = SPI_getbinval(
+								SPI_tuptable->vals[0],
+								SPI_tuptable->tupdesc,
+								1, &isnull);
+							if (!isnull)
+								token_count = DatumGetInt32(v);
+
+							v = SPI_getbinval(
+								SPI_tuptable->vals[0],
+								SPI_tuptable->tupdesc,
+								2, &isnull);
+							if (!isnull)
+								is_first_process =
+									!DatumGetBool(v);
 
 							/*
-							 * Fetch token_count and check whether
-							 * sparse_embedding is already set (for
-							 * idempotency — skip IDF update on retry).
+							 * Chunk row exists — proceed with BM25
+							 * scoring and IDF stats update.
+							 * Keeping this inside the SPI_processed > 0
+							 * block ensures we bail out cleanly when
+							 * the chunk has been concurrently deleted.
 							 */
-							chunk_sql = psprintf(
-								"SELECT token_count, "
-								"sparse_embedding IS NOT NULL "
-								"FROM %s WHERE id = %ld",
-								quote_identifier(chunk_tables[idx]),
-								chunk_ids[idx]);
-							ret_bm25 = SPI_execute(chunk_sql,
-												   true, 1);
-							pfree(chunk_sql);
+							if (token_count <= 0)
+								token_count = 1;
 
-							if (ret_bm25 == SPI_OK_SELECT &&
-								SPI_processed > 0)
-							{
-								bool   isnull;
-								Datum  v;
+							tokens = bm25_tokenize(contents[idx],
+												   &ntokens);
+							idf_htab = bm25_load_idf_stats(
+									chunk_tables[idx], tokens, ntokens);
+							avg_doc_len = bm25_avg_doc_len_internal(
+									chunk_tables[idx]);
+							sparse_str = bm25_compute_sparse_str(
+									tokens, ntokens,
+									idf_htab,
+									pgedge_vectorizer_bm25_k1,
+									pgedge_vectorizer_bm25_b,
+									avg_doc_len,
+									token_count);
 
-								v = SPI_getbinval(
-									SPI_tuptable->vals[0],
-									SPI_tuptable->tupdesc,
-									1, &isnull);
-								if (!isnull)
-									token_count = DatumGetInt32(v);
+							ret_bm25 = SPI_execute(
+								psprintf(
+									"UPDATE %s SET "
+									"sparse_embedding = "
+									"%s::sparsevec "
+									"WHERE id = %ld",
+									quote_identifier(chunk_tables[idx]),
+									quote_literal_cstr(sparse_str),
+									chunk_ids[idx]),
+								false, 0);
 
-								v = SPI_getbinval(
-									SPI_tuptable->vals[0],
-									SPI_tuptable->tupdesc,
-									2, &isnull);
-								if (!isnull)
-									is_first_process =
-										!DatumGetBool(v);
+							if (ret_bm25 != SPI_OK_UPDATE)
+								elog(WARNING,
+									 "Failed to update "
+									 "sparse_embedding for "
+									 "chunk " INT64_FORMAT,
+									 chunk_ids[idx]);
 
-								/*
-								 * Chunk row exists — proceed with BM25
-								 * scoring and IDF stats update.
-								 * Keeping this inside the SPI_processed > 0
-								 * block ensures we bail out cleanly when
-								 * the chunk has been concurrently deleted.
-								 */
-								if (token_count <= 0)
-									token_count = 1;
+							if (idf_htab != NULL)
+								hash_destroy(idf_htab);
 
-								tokens = bm25_tokenize(contents[idx],
-													   &ntokens);
-								idf_htab = bm25_load_idf_stats(
-										chunk_tables[idx], tokens, ntokens);
-								avg_doc_len = bm25_avg_doc_len_internal(
-										chunk_tables[idx]);
-								sparse_str = bm25_compute_sparse_str(
-										tokens, ntokens,
-										idf_htab,
-										pgedge_vectorizer_bm25_k1,
-										pgedge_vectorizer_bm25_b,
-										avg_doc_len,
-										token_count);
-
-								ret_bm25 = SPI_execute(
-									psprintf(
-										"UPDATE %s SET "
-										"sparse_embedding = "
-										"%s::sparsevec "
-										"WHERE id = %ld",
-										quote_identifier(chunk_tables[idx]),
-										quote_literal_cstr(sparse_str),
-										chunk_ids[idx]),
-									false, 0);
-
-								if (ret_bm25 != SPI_OK_UPDATE)
-									elog(WARNING,
-										 "Failed to update "
-										 "sparse_embedding for "
-										 "chunk " INT64_FORMAT,
-										 chunk_ids[idx]);
-
-								if (idf_htab != NULL)
-									hash_destroy(idf_htab);
-
-								/*
-								 * Only update IDF stats the first time
-								 * this chunk is processed — retries must
-								 * not increment doc_freq again.
-								 */
-								if (is_first_process)
-									bm25_update_idf_stats(
-										chunk_tables[idx],
-										tokens, ntokens);
-							}
-							/* else: chunk row gone (concurrent delete) —
-							 * skip BM25 entirely to avoid inflating
-							 * corpus stats for a nonexistent chunk.
+							/*
+							 * Only update IDF stats the first time
+							 * this chunk is processed — retries must
+							 * not increment doc_freq again.
 							 */
+							if (is_first_process)
+								bm25_update_idf_stats(
+									chunk_tables[idx],
+									tokens, ntokens);
 						}
-
-						/* Mark as completed */
-						SPI_execute(psprintf(
-							"UPDATE pgedge_vectorizer.queue "
-							"SET status = 'completed', processed_at = NOW() "
-							"WHERE id = %ld",
-							queue_ids[idx]),
-							false, 0);
-
-						elog(DEBUG2, "Successfully processed queue item %ld", queue_ids[idx]);
+						/* else: chunk row gone (concurrent delete) —
+						 * skip BM25 entirely to avoid inflating
+						 * corpus stats for a nonexistent chunk.
+						 */
 					}
-					PG_CATCH();
-					{
-						/* Check if retries remain */
-						if (attempts[idx] + 1 >= max_attempts[idx])
-						{
-							/* No retries left - mark as permanently failed */
-							SPI_execute(psprintf(
-								"UPDATE pgedge_vectorizer.queue "
-								"SET status = 'failed', "
-								"    attempts = attempts + 1, "
-								"    error_message = 'Failed to update embedding', "
-								"    next_retry_at = NULL "
-								"WHERE id = %ld",
-								queue_ids[idx]),
-								false, 0);
-						}
-						else
-						{
-							/* Retries remain - set back to pending with delay */
-							SPI_execute(psprintf(
-								"UPDATE pgedge_vectorizer.queue "
-								"SET status = 'pending', "
-								"    attempts = attempts + 1, "
-								"    error_message = 'Failed to update embedding', "
-								"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
-								"WHERE id = %ld",
-								queue_ids[idx]),
-								false, 0);
-						}
 
-						/* Re-throw */
-						PG_RE_THROW();
-					}
-					PG_END_TRY();
+					/* Mark as completed */
+					SPI_execute(psprintf(
+						"UPDATE pgedge_vectorizer.queue "
+						"SET status = 'completed', processed_at = NOW() "
+						"WHERE id = %ld",
+						queue_ids[idx]),
+						false, 0);
+
+					elog(DEBUG2, "Successfully processed queue item %ld", queue_ids[idx]);
+					queue_item_done();
 				}
 
 				/* Free embeddings */
