@@ -19,7 +19,8 @@
 typedef struct
 {
 	char   *data;
-	size_t  size;
+	size_t  size;		/* bytes of response held, excluding the terminator */
+	size_t  capacity;	/* bytes allocated in data, including the terminator */
 } ResponseBuffer;
 
 /*

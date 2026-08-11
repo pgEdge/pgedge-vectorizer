@@ -18,6 +18,15 @@
 #include "utils/memutils.h"
 
 /*
+ * Per-backend curl handle, kept so that its connection pool outlives a
+ * single request.  See provider_do_curl_request() for why.
+ */
+static CURL *cached_curl = NULL;
+
+/* Initial response buffer size; embedding responses run to megabytes. */
+#define RESPONSE_BUFFER_INITIAL	32768
+
+/*
  * Curl write callback - accumulates response data into a ResponseBuffer.
  */
 size_t
@@ -25,10 +34,28 @@ provider_write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 {
 	size_t realsize = size * nmemb;
 	ResponseBuffer *mem = (ResponseBuffer *) userp;
+	size_t needed = mem->size + realsize + 1;
 
-	/* repalloc never returns NULL - it throws on allocation failure */
-	mem->data = repalloc(mem->data, mem->size + realsize + 1);
-	/* flawfinder: ignore - buffer was realloced to mem->size + realsize + 1 */
+	/*
+	 * Grow geometrically rather than to the exact size wanted.  curl hands
+	 * the body over in chunks of its own choosing, so sizing precisely meant
+	 * a repalloc per chunk for the whole response: an embedding batch runs to
+	 * megabytes, which is hundreds of them, each liable to copy everything
+	 * received so far.  Doubling makes that a handful.
+	 */
+	if (needed > mem->capacity)
+	{
+		size_t newcap = (mem->capacity > 0) ? mem->capacity : needed;
+
+		while (newcap < needed)
+			newcap *= 2;
+
+		/* repalloc never returns NULL - it throws on allocation failure */
+		mem->data = repalloc(mem->data, newcap);
+		mem->capacity = newcap;
+	}
+
+	/* flawfinder: ignore - buffer holds at least mem->size + realsize + 1 */
 	memcpy(&(mem->data[mem->size]), contents, realsize);  /* nosemgrep */
 	mem->size += realsize;
 	mem->data[mem->size] = 0;
@@ -366,18 +393,42 @@ provider_do_curl_request(const char *url, const char *auth_header,
 	long response_code;
 
 	/* Initialize response buffer */
-	response_out->data = palloc(1);
+	response_out->capacity = RESPONSE_BUFFER_INITIAL;
+	response_out->data = palloc(response_out->capacity);
 	response_out->data[0] = '\0';
 	response_out->size = 0;
 
-	curl = curl_easy_init();
-	if (!curl)
+	/*
+	 * Reuse this backend's handle rather than making a new one per request.
+	 * A fresh handle knows nothing of any connection, so every batch paid for
+	 * a TCP connection and, against a real provider, a TLS handshake as well:
+	 * one or two extra round trips to a host that is usually not nearby, on
+	 * every batch of a table that may have thousands. Keeping the handle
+	 * keeps curl's connection pool with it, so subsequent batches to the same
+	 * endpoint reuse the established connection.
+	 *
+	 * curl_easy_reset() clears the options set below without disturbing that
+	 * pool, which is what makes reuse survive the reset.
+	 *
+	 * The handle is deliberately never cleaned up: it lives as long as the
+	 * backend, and an idle keep-alive connection is closed by the server at
+	 * its own timeout, so nothing is held open indefinitely.
+	 */
+	if (cached_curl == NULL)
 	{
-		*error_msg = pstrdup("Failed to initialize libcurl");
-		pfree(response_out->data);
-		response_out->data = NULL;
-		return false;
+		cached_curl = curl_easy_init();
+		if (!cached_curl)
+		{
+			*error_msg = pstrdup("Failed to initialize libcurl");
+			pfree(response_out->data);
+			response_out->data = NULL;
+			return false;
+		}
 	}
+	else
+		curl_easy_reset(cached_curl);
+
+	curl = cached_curl;
 
 	/* Set up headers */
 	headers = curl_slist_append(headers, "Content-Type: application/json; charset=utf-8");
@@ -402,13 +453,11 @@ provider_do_curl_request(const char *url, const char *auth_header,
 		*error_msg = psprintf("curl_easy_perform() failed: %s",
 							  curl_easy_strerror(res));
 		curl_slist_free_all(headers);
-		curl_easy_cleanup(curl);
 		return false;
 	}
 
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
 	curl_slist_free_all(headers);
-	curl_easy_cleanup(curl);
 
 	if (response_code != 200)
 	{
