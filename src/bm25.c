@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_type.h"
 #include "lib/stringinfo.h"
 #include "utils/array.h"
@@ -224,12 +225,19 @@ bm25_tokenize(const char *text, int *ntokens)
 /*
  * Cached corpus figures for one chunk table.
  *
- * Keyed on the chunk table name, which is bounded by NAMEDATALEN because it
- * names a relation.  Key must be first for dynahash.
+ * Keyed on the relation's OID rather than the name it was reached by.  The
+ * name is resolved through search_path, so one string can mean different
+ * relations at different moments: a schema-per-tenant deployment gives every
+ * tenant a chunk table of the same name, and a pooled backend that switches
+ * search_path between requests would otherwise be handed whichever tenant's
+ * figures it saw first.  Dropping and recreating a chunk table under the same
+ * name has the same shape, and an OID changes in both cases.
+ *
+ * Key must be first for dynahash.
  */
 typedef struct
 {
-	char		key[NAMEDATALEN];
+	Oid			key;
 	int64		total_docs;
 	float8		avg_doc_len;
 	TimestampTz	read_at;
@@ -316,8 +324,19 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 	CorpusStatsEntry   *entry;
 	bool				found;
 	TimestampTz			now;
+	Oid					relid;
 
 	if (pgedge_vectorizer_corpus_stats_cache_ttl <= 0)
+		return bm25_corpus_stats_uncached(chunk_table, avg_doc_len);
+
+	/*
+	 * Resolve the name the same way the query below will, through
+	 * search_path.  A name that resolves to nothing is left to the uncached
+	 * read, which raises the "relation does not exist" the caller expects
+	 * rather than inventing a different error here.
+	 */
+	relid = RelnameGetRelid(chunk_table);
+	if (!OidIsValid(relid))
 		return bm25_corpus_stats_uncached(chunk_table, avg_doc_len);
 
 	if (corpus_stats_cache == NULL)
@@ -325,15 +344,15 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 		HASHCTL		ctl;
 
 		memset(&ctl, 0, sizeof(ctl));
-		ctl.keysize = NAMEDATALEN;
+		ctl.keysize = sizeof(Oid);
 		ctl.entrysize = sizeof(CorpusStatsEntry);
 		ctl.hcxt = TopMemoryContext;
 		corpus_stats_cache = hash_create("bm25_corpus_stats", 8, &ctl,
-										 HASH_ELEM | HASH_STRINGS |
+										 HASH_ELEM | HASH_BLOBS |
 										 HASH_CONTEXT);
 	}
 
-	entry = hash_search(corpus_stats_cache, chunk_table, HASH_ENTER, &found);
+	entry = hash_search(corpus_stats_cache, &relid, HASH_ENTER, &found);
 	now = GetCurrentTimestamp();
 
 	if (found &&

@@ -510,6 +510,52 @@ SELECT pgedge_vectorizer.disable_vectorization('cache_docs', 'body', true);
 DROP TABLE cache_docs;
 
 ---------------------------------------------------------------------------
+-- Test 21: the corpus statistics cache is keyed by relation, not by name
+---------------------------------------------------------------------------
+
+-- A chunk table is named unqualified and resolved through search_path, so one
+-- string means different relations in a schema-per-tenant deployment. Keyed by
+-- name, a pooled backend that switched tenants was handed whichever tenant's
+-- corpus it had seen first, and scored the second tenant's queries against the
+-- first one's statistics. The two corpora below differ only in document
+-- length, so the vectors must differ; keyed by name they came back identical.
+
+CREATE SCHEMA cache_tenant_a;
+CREATE SCHEMA cache_tenant_b;
+
+CREATE TABLE cache_tenant_a.t_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                                      token_count INT);
+CREATE TABLE cache_tenant_b.t_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                                      token_count INT);
+INSERT INTO cache_tenant_a.t_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 50);
+INSERT INTO cache_tenant_b.t_chunks (content, token_count)
+SELECT 'alpha', 900 FROM generate_series(1, 50);
+
+CREATE TABLE cache_tenant_a.t_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                                doc_freq INT NOT NULL);
+CREATE TABLE cache_tenant_b.t_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                                doc_freq INT NOT NULL);
+INSERT INTO cache_tenant_a.t_chunks_idf_stats VALUES ('alpha', 5);
+INSERT INTO cache_tenant_b.t_chunks_idf_stats VALUES ('alpha', 5);
+
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 60;
+
+SET search_path = cache_tenant_a, public;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 't_chunks') AS tenant_a \gset
+
+SET search_path = cache_tenant_b, public;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 't_chunks') AS tenant_b \gset
+
+SET search_path = public;
+SELECT :'tenant_a'::sparsevec <> :'tenant_b'::sparsevec
+    AS same_name_different_schema_not_confused;
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+DROP SCHEMA cache_tenant_a CASCADE;
+DROP SCHEMA cache_tenant_b CASCADE;
+
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 
