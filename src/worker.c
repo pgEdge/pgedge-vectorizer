@@ -1259,6 +1259,9 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		 * its failure: the backoff would double again, and the interval
 		 * logged would be the stale one rather than the fresh start the
 		 * reload earns.
+		 *
+		 * This defers the quantum check below by one wait, which is harmless:
+		 * the quantum has no deadline, and a reload is what may have changed it.
 		 */
 		if (got_sighup)
 			continue;
@@ -1342,9 +1345,16 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 					? BATCH_RETRY_MIN
 					: Min(batch_retry_interval * 2, BATCH_RETRY_MAX);
 
+				/*
+				 * Report the wait actually taken, floored at the poll interval
+				 * just as the wait below is; the raw backoff would understate
+				 * a long poll.
+				 */
 				elog(LOG, "pgedge_vectorizer worker for database \"%s\": batch "
 					 "failed with nothing to charge it to, waiting %ds before "
-					 "trying again", dbname, batch_retry_interval / 1000);
+					 "trying again", dbname,
+					 Max(batch_retry_interval,
+						 pgedge_vectorizer_worker_poll_interval) / 1000);
 			}
 
 			/* Recheck extension status on error */
