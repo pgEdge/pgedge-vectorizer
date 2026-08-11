@@ -37,9 +37,11 @@ Effective data management ensures clean operations and provides flexibility when
 - Settle on an embedding model before enabling vectorization, because the
   model's dimension is fixed into the chunk table when the table is
   created.
-- Rebuild the vectorizer with `disable_vectorization()` and
-  `enable_vectorization()` after changing to a model of a different
-  dimension, since `recreate_chunks()` deletes chunk rows without
-  altering the column.
+- Rebuild the vectorizer with `disable_vectorization(...,
+  drop_chunk_table => TRUE)` and then `enable_vectorization()` after
+  changing to a model of a different dimension, repeating this for every
+  vectorized column. Neither `recreate_chunks()` nor a
+  `disable_vectorization()` that keeps the chunk table alters the column,
+  so neither resolves the mismatch.
 - Budget for the provider cost of re-embedding an entire table before
   changing the model on a populated one.
