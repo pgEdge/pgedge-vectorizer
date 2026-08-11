@@ -14,6 +14,20 @@ These settings configure the connection to your embedding provider, including th
 | `pgedge_vectorizer.model` | `text-embedding-3-small` | Model name | No | No | No |
 | `pgedge_vectorizer.extra_headers` | (empty) | Semicolon-separated `key: value` HTTP headers added to all API requests | No | No | No |
 
+!!! warning "The model fixes the vector dimension of a chunk table"
+
+    The model determines how many dimensions the provider returns, and
+    `enable_vectorization()` fixes that number into the chunk table's
+    `embedding vector(N)` column when the table is created. Changing
+    `pgedge_vectorizer.model` to a model with a different dimension does
+    not migrate an existing chunk table. The background worker compares
+    the dimensions before writing, so nothing is corrupted, but it marks
+    the affected queue items `failed` with the message
+    `Dimension mismatch: model=N, table=M` and no new embeddings are
+    stored for that table until you act. The
+    [Troubleshooting](troubleshooting.md) document describes how to
+    recover.
+
 ## Worker Settings
 
 These settings control the background workers that process the embedding queue, including concurrency, batch sizes, and retry behavior.
