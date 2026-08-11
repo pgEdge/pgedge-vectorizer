@@ -51,6 +51,7 @@ int pgedge_vectorizer_auto_cleanup_hours = 24;
 bool   pgedge_vectorizer_enable_hybrid = false;
 double pgedge_vectorizer_bm25_k1       = 1.2;
 double pgedge_vectorizer_bm25_b        = 0.75;
+int    pgedge_vectorizer_corpus_stats_cache_ttl = 60;
 
 /*
  * Initialize all GUC variables
@@ -310,6 +311,23 @@ pgedge_vectorizer_init_guc(void)
 		1.0,    /* max */
 		PGC_USERSET,
 		0,
+		NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+		"pgedge_vectorizer.corpus_stats_cache_ttl",
+		"Seconds a backend may reuse a chunk table's cached corpus figures",
+		"BM25 needs the corpus size and the mean document length, which "
+		"together cost one unindexable scan of the chunk table. Both feed a "
+		"ranking heuristic rather than an account that has to balance, so "
+		"each backend holds them for this long instead of reading them "
+		"again on every search and every queue item. Set to 0 to read them "
+		"afresh every time.",
+		&pgedge_vectorizer_corpus_stats_cache_ttl,
+		60,     /* default */
+		0,      /* min: 0 disables the cache */
+		3600,   /* max */
+		PGC_USERSET,
+		GUC_UNIT_S,
 		NULL, NULL, NULL);
 
 	elog(DEBUG1, "pgedge_vectorizer GUC variables initialized");

@@ -473,6 +473,43 @@ SELECT pgedge_vectorizer.disable_vectorization(
 DROP TABLE hybrid_multi_test;
 
 ---------------------------------------------------------------------------
+-- Test 20: the corpus statistics cache does not change results
+---------------------------------------------------------------------------
+
+-- N and the mean document length feed a ranking heuristic, and reading them
+-- costs an unindexable scan of the chunk table on every call. Each backend
+-- therefore holds them for corpus_stats_cache_ttl seconds. Whatever the
+-- setting, the vector produced for a given corpus must be the same, so this
+-- compares the two paths directly rather than asserting on either alone.
+
+CREATE TABLE cache_docs (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO cache_docs (body)
+SELECT 'alpha beta gamma document number ' || g FROM generate_series(1, 25) g;
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'cache_docs', 'body', embedding_dimension => 3);
+
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha beta', 'cache_docs_body_chunks')
+    AS uncached \gset
+
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 60;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha beta', 'cache_docs_body_chunks')
+    AS cached \gset
+
+SELECT :'uncached'::sparsevec = :'cached'::sparsevec AS cache_matches_uncached;
+
+-- A second table must not read the first one's cached figures.
+SELECT pgedge_vectorizer.bm25_avg_doc_len('cache_docs_body_chunks')
+    <> pgedge_vectorizer.bm25_avg_doc_len('hybrid_test_docs_content_chunks')
+    AS each_table_cached_separately;
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+
+SELECT pgedge_vectorizer.disable_vectorization('cache_docs', 'body', true);
+DROP TABLE cache_docs;
+
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 

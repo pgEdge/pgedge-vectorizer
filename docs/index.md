@@ -173,6 +173,7 @@ different use cases.
 | `pgedge_vectorizer.enable_hybrid` | `false` | -- | Enable BM25 sparse vectors alongside dense embeddings |
 | `pgedge_vectorizer.bm25_k1` | `1.2` | `0.0-3.0` | BM25 term-frequency saturation |
 | `pgedge_vectorizer.bm25_b` | `0.75` | `0.0-1.0` | BM25 document-length normalization |
+| `pgedge_vectorizer.corpus_stats_cache_ttl` | `60s` | `0-3600` | Seconds a backend reuses a chunk table's corpus size and mean document length before reading them again. Set to 0 to read them on every call |
 
 For more information or to download Vectorizer visit:
 
