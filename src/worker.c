@@ -1638,7 +1638,18 @@ process_queue_batch(const char *dbname)
 			}
 			else
 			{
-				/* Failed to generate embeddings - update status based on remaining retries */
+				/*
+				 * Failed to generate embeddings - update status based on
+				 * remaining retries.
+				 *
+				 * error_msg is quoted with quote_literal_cstr() rather than
+				 * wrapped in quotes by hand.  A provider's message is
+				 * arbitrary text and several carry an apostrophe of their
+				 * own -- "Invalid response: 'data' field not found", for one
+				 * -- which built invalid SQL and raised from the very code
+				 * meant to record the failure, leaving the batch aborted with
+				 * nothing charged and the items reclaimed on the next poll.
+				 */
 				for (int i = 0; i < batch_count; i++)
 				{
 					int idx = batch_start + i;
@@ -1654,7 +1665,7 @@ process_queue_batch(const char *dbname)
 							"    error_message = %s, "
 							"    next_retry_at = NULL "
 							"WHERE id = %ld",
-							error_msg ? psprintf("'%s'", error_msg) : "NULL",
+							error_msg ? quote_literal_cstr(error_msg) : "NULL",
 							queue_ids[idx]),
 							false, 0);
 					}
@@ -1668,7 +1679,7 @@ process_queue_batch(const char *dbname)
 							"    error_message = %s, "
 							"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
 							"WHERE id = %ld",
-							error_msg ? psprintf("'%s'", error_msg) : "NULL",
+							error_msg ? quote_literal_cstr(error_msg) : "NULL",
 							queue_ids[idx]),
 							false, 0);
 					}
