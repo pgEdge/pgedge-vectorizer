@@ -42,16 +42,43 @@ provider_write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 	 * a repalloc per chunk for the whole response: an embedding batch runs to
 	 * megabytes, which is hundreds of them, each liable to copy everything
 	 * received so far.  Doubling makes that a handful.
+	 *
+	 * Nothing here may throw.  This runs inside curl_easy_perform(), and a
+	 * PostgreSQL error is a longjmp, which would abandon curl's handle and its
+	 * connection mid-transfer.  The handle is cached for the life of the
+	 * backend, so every later request would go on reusing the wreckage.  On
+	 * failure we record why and return short instead, which curl reports as
+	 * CURLE_WRITE_ERROR through the caller's existing error path.
 	 */
 	if (needed > mem->capacity)
 	{
 		size_t newcap = (mem->capacity > 0) ? mem->capacity : needed;
+		char *newdata;
 
 		while (newcap < needed)
 			newcap *= 2;
 
-		/* repalloc never returns NULL - it throws on allocation failure */
-		mem->data = repalloc(mem->data, newcap);
+		/*
+		 * Doubling can overshoot MaxAllocSize while the response itself would
+		 * still fit, so try the exact size before giving up on it.
+		 */
+		if (!AllocSizeIsValid(newcap))
+			newcap = needed;
+
+		if (!AllocSizeIsValid(newcap))
+		{
+			mem->alloc_failed = true;
+			return 0;
+		}
+
+		newdata = repalloc_extended(mem->data, newcap, MCXT_ALLOC_NO_OOM);
+		if (newdata == NULL)
+		{
+			mem->alloc_failed = true;
+			return 0;
+		}
+
+		mem->data = newdata;
 		mem->capacity = newcap;
 	}
 
@@ -397,6 +424,7 @@ provider_do_curl_request(const char *url, const char *auth_header,
 	response_out->data = palloc(response_out->capacity);
 	response_out->data[0] = '\0';
 	response_out->size = 0;
+	response_out->alloc_failed = false;
 
 	/*
 	 * Reuse this backend's handle rather than making a new one per request.
@@ -450,8 +478,18 @@ provider_do_curl_request(const char *url, const char *auth_header,
 
 	if (res != CURLE_OK)
 	{
-		*error_msg = psprintf("curl_easy_perform() failed: %s",
-							  curl_easy_strerror(res));
+		/*
+		 * A buffer we could not grow aborts the transfer, so check it first:
+		 * curl only knows the write callback returned short, and would report
+		 * that as a generic write failure.
+		 */
+		if (response_out->alloc_failed)
+			*error_msg = psprintf("Response from %s is too large to buffer "
+								  "(stopped after %zu bytes)",
+								  provider_name, response_out->size);
+		else
+			*error_msg = psprintf("curl_easy_perform() failed: %s",
+								  curl_easy_strerror(res));
 		curl_slist_free_all(headers);
 		return false;
 	}
