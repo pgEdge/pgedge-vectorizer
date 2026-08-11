@@ -165,7 +165,7 @@ static void worker_sighup(SIGNAL_ARGS);
 static void queue_item_begin(int64 queue_id, int attempts, int max_attempts);
 static void queue_item_done(void);
 static void queue_item_note_error(void);
-static void queue_item_record_failure(void);
+static bool queue_item_record_failure(void);
 static void process_queue_batch(const char *dbname);
 static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
@@ -267,8 +267,13 @@ queue_item_done(void)
  * losing the bookkeeping is preferable to taking the worker down with it. The
  * item is cleared either way, so a persistent problem recording failures
  * cannot make the worker retry the same row forever on that account.
+ *
+ * Returns whether the failure belonged to a particular item. False means the
+ * fault was the batch's rather than any one row's, so nothing was charged and
+ * none of the queue's own machinery will hold the work back; the caller backs
+ * off instead. See the batch backoff in pgedge_vectorizer_worker_main().
  */
-static void
+static bool
 queue_item_record_failure(void)
 {
 	int64		queue_id = failed_item_queue_id;
@@ -278,7 +283,7 @@ queue_item_record_failure(void)
 	char	   *quoted_reason;
 
 	if (queue_id < 0)
-		return;
+		return false;
 
 	exhausted = (failed_item_attempts + 1 >= failed_item_max_attempts);
 	reason = (failed_item_error[0] != '\0') ? failed_item_error
@@ -357,6 +362,14 @@ queue_item_record_failure(void)
 			 "queue item " INT64_FORMAT, queue_id);
 	}
 	PG_END_TRY();
+
+	/*
+	 * The fault was this item's whether or not the record survived. A failure
+	 * to write it is reported above and leaves the row to be tried again,
+	 * which is the same position an uncharged attempt leaves it in, but it is
+	 * not the batch-wide fault that the caller's backoff exists for.
+	 */
+	return true;
 }
 
 /*
@@ -1082,6 +1095,28 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	bool first_ext_check = true;
 #define EXT_RETRY_MAX	300000		/* Cap at 5 minutes */
 
+	/*
+	 * Batch failure backoff.
+	 *
+	 * A failure belonging to a particular queue item is charged to it, and the
+	 * queue's own machinery then holds it back: next_retry_at keeps it out of
+	 * the claim and max_attempts eventually retires it. A failure belonging to
+	 * the batch rather than to any one row has none of that. Nothing is
+	 * charged, deliberately, because billing a blameless item for a
+	 * misconfigured provider would work through the queue retiring one
+	 * innocent row per max_attempts cycles. So the same rows are reclaimed and
+	 * fail identically on the very next poll, indefinitely, filling the log at
+	 * whatever rate worker_poll_interval allows. An unset or misspelled
+	 * pgedge_vectorizer.provider is enough to provoke it.
+	 *
+	 * Nothing in the queue can help here, since all of it is keyed on attempts
+	 * moving and there is no item to move it against, so the wait itself is
+	 * lengthened instead. Zero means no batch failure is outstanding.
+	 */
+	int batch_retry_interval = 0;
+#define BATCH_RETRY_MIN	5000		/* First backoff: 5 seconds */
+#define BATCH_RETRY_MAX	300000		/* Cap at 5 minutes */
+
 	/* Setup signal handlers */
 	pqsignal(SIGTERM, worker_sigterm);
 	pqsignal(SIGHUP, worker_sighup);
@@ -1130,6 +1165,14 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 			/* Recheck extension status after config reload */
 			extension_exists = false;
 			ext_retry_interval = 5000;
+
+			/*
+			 * Retry the queue at once. A reload is how a misconfigured
+			 * provider gets fixed, so making the operator wait out a backoff
+			 * that their correction has already invalidated would be
+			 * needlessly obtuse.
+			 */
+			batch_retry_interval = 0;
 
 			/*
 			 * Re-evaluate our quantum: a reload may have added databases or
@@ -1182,8 +1225,19 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		/* Update process status */
 		pgstat_report_activity(STATE_IDLE, NULL);
 
-		/* Use longer wait time if extension not installed */
-		wait_time = extension_exists ? pgedge_vectorizer_worker_poll_interval : ext_retry_interval;
+		/*
+		 * Use a longer wait if the extension is not installed, or if the last
+		 * batch failed for a reason no single item can be charged for. The
+		 * backoff is floored at the poll interval so that a configuration
+		 * with a long poll is never made to poll faster by failing.
+		 */
+		if (!extension_exists)
+			wait_time = ext_retry_interval;
+		else if (batch_retry_interval > 0)
+			wait_time = Max(batch_retry_interval,
+							pgedge_vectorizer_worker_poll_interval);
+		else
+			wait_time = pgedge_vectorizer_worker_poll_interval;
 
 		/* Wait for work or timeout */
 		rc = WaitLatch(MyLatch,
@@ -1196,6 +1250,18 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		/* Emergency bailout if postmaster has died */
 		if (rc & WL_POSTMASTER_DEATH)
 			proc_exit(1);
+
+		/*
+		 * Apply a reload that arrived during the wait before doing any
+		 * further work, by going back to the top where it is handled.
+		 * Processing first would run one more batch against the
+		 * configuration the operator has just corrected and charge them for
+		 * its failure: the backoff would double again, and the interval
+		 * logged would be the stale one rather than the fresh start the
+		 * reload earns.
+		 */
+		if (got_sighup)
+			continue;
 
 		/*
 		 * Yield our slot once the service quantum expires, so that the
@@ -1233,6 +1299,12 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 
 			/* Perform automatic cleanup if enabled */
 			cleanup_completed_items(dbname);
+
+			/*
+			 * A batch that got through clears any backoff: whatever was wrong
+			 * is no longer wrong, and there is no reason to keep waiting.
+			 */
+			batch_retry_interval = 0;
 		}
 		PG_CATCH();
 		{
@@ -1259,8 +1331,21 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 			 * its own and none can be started until this one is cleared.
 			 * Without it the attempt is discarded along with everything else
 			 * and the same row is reclaimed on the next poll, indefinitely.
+			 *
+			 * Nothing to charge means the fault was the batch's, so back off
+			 * rather than spin: see the batch backoff declared at the top of
+			 * this function.
 			 */
-			queue_item_record_failure();
+			if (!queue_item_record_failure())
+			{
+				batch_retry_interval = (batch_retry_interval == 0)
+					? BATCH_RETRY_MIN
+					: Min(batch_retry_interval * 2, BATCH_RETRY_MAX);
+
+				elog(LOG, "pgedge_vectorizer worker for database \"%s\": batch "
+					 "failed with nothing to charge it to, waiting %ds before "
+					 "trying again", dbname, batch_retry_interval / 1000);
+			}
 
 			/* Recheck extension status on error */
 			extension_exists = false;
