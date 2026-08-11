@@ -178,9 +178,12 @@ bm25_tokenize(const char *text, int *ntokens)
 		 * BM25_MAX_TERM_LEN bytes, so two distinct terms sharing that much of
 		 * a prefix would otherwise merge into one entry, giving a combined
 		 * term frequency and a shared weight.  Dropping them costs nothing a
-		 * truncating match was giving: an alphabetic run this long is not a
-		 * term anyone searches for, and both the indexing and query paths
-		 * tokenize through here, so they are excluded consistently.
+		 * truncating match was giving: normalize_text_inplace() has already
+		 * turned every non-alpha byte into a space, so a token this long is
+		 * an unbroken run of letters rather than a URL, a hash or a path,
+		 * and is not a term anyone searches for.  Both the indexing and
+		 * query paths tokenize through here, so they are excluded
+		 * consistently.
 		 */
 		if (!is_stopword(tok) &&
 			strnlen(tok, BM25_MAX_TERM_LEN) < BM25_MAX_TERM_LEN)

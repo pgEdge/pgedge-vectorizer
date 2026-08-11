@@ -245,6 +245,18 @@ SELECT COALESCE(
     0
 ) AS max_length_term_kept;
 
+-- The other side of the boundary: two distinct terms just inside the limit
+-- must stay distinct. Dropping what does not fit is only correct if nothing
+-- below the limit merges, so this is what would catch a guard that shortened
+-- the effective key rather than one that failed to apply.
+SELECT COALESCE(
+    array_length(
+        pgedge_vectorizer.bm25_tokenize(
+            repeat('a', 126) || 'x ' || repeat('a', 126) || 'y'),
+        1),
+    0
+) AS max_length_pair_distinct;
+
 ---------------------------------------------------------------------------
 -- Test 18: bm25_decrement_idf_stats handles NULL/empty terms gracefully
 ---------------------------------------------------------------------------
