@@ -49,10 +49,20 @@ static time_t last_cleanup_time = 0;
  * next_retry_at holds the item out of the claim, a non-zero attempts count
  * makes the worker process claimed items one at a time, and max_attempts
  * eventually moves it to 'failed'.
+ *
+ * The message that caused the abort is kept here too. It is only readable
+ * before FlushErrorState(), which runs long before the failure is recorded,
+ * and it is what an operator reading pgedge_vectorizer.queue actually needs:
+ * a fixed string tells them the item failed, which they can already see from
+ * its status, but not why. A fixed buffer rather than a palloc'd copy, since
+ * the transaction context this is captured in does not survive the abort.
  */
+#define FAILED_ITEM_ERROR_LEN	1024
+
 static int64 failed_item_queue_id = -1;
 static int	failed_item_attempts = 0;
 static int	failed_item_max_attempts = 0;
+static char failed_item_error[FAILED_ITEM_ERROR_LEN] = "";
 
 /*
  * Launcher state
@@ -154,6 +164,7 @@ static void worker_sigterm(SIGNAL_ARGS);
 static void worker_sighup(SIGNAL_ARGS);
 static void queue_item_begin(int64 queue_id, int attempts, int max_attempts);
 static void queue_item_done(void);
+static void queue_item_note_error(void);
 static void queue_item_record_failure(void);
 static void process_queue_batch(const char *dbname);
 static void cleanup_completed_items(const char *dbname);
@@ -212,6 +223,31 @@ queue_item_begin(int64 queue_id, int attempts, int max_attempts)
 	failed_item_queue_id = queue_id;
 	failed_item_attempts = attempts;
 	failed_item_max_attempts = max_attempts;
+	failed_item_error[0] = '\0';
+}
+
+/*
+ * queue_item_note_error -- keep the message that is about to be discarded.
+ *
+ * Must be called from a PG_CATCH() and before FlushErrorState(), which frees
+ * the error data.  Copied into static storage rather than kept as the palloc'd
+ * ErrorData, because the context it is allocated in does not survive the abort
+ * that has to happen before the failure can be recorded.
+ */
+static void
+queue_item_note_error(void)
+{
+	ErrorData  *edata;
+
+	if (failed_item_queue_id < 0)
+		return;
+
+	edata = CopyErrorData();
+
+	if (edata->message != NULL)
+		strlcpy(failed_item_error, edata->message, sizeof(failed_item_error));
+
+	FreeErrorData(edata);
 }
 
 /*
@@ -235,14 +271,18 @@ queue_item_done(void)
 static void
 queue_item_record_failure(void)
 {
-	int64	queue_id = failed_item_queue_id;
-	int		attempts = failed_item_attempts;
-	bool	exhausted;
+	int64		queue_id = failed_item_queue_id;
+	int			attempts = failed_item_attempts;
+	bool		exhausted;
+	const char *reason;
+	char	   *quoted_reason;
 
 	if (queue_id < 0)
 		return;
 
 	exhausted = (failed_item_attempts + 1 >= failed_item_max_attempts);
+	reason = (failed_item_error[0] != '\0') ? failed_item_error
+											: "Processing failed";
 	queue_item_done();
 
 	/*
@@ -257,6 +297,14 @@ queue_item_record_failure(void)
 		StartTransactionCommand();
 		PushActiveSnapshot(GetTransactionSnapshot());
 		SPI_connect();
+
+		/*
+		 * Quoted here rather than before the transaction, so the copy lives
+		 * in the transaction's context and goes away with it.  An error
+		 * message is arbitrary text and routinely contains an apostrophe, so
+		 * wrapping it in quotes by hand would build invalid SQL.
+		 */
+		quoted_reason = quote_literal_cstr(reason);
 
 		/*
 		 * Match on the state this worker last saw.  A launcher restart can
@@ -276,21 +324,21 @@ queue_item_record_failure(void)
 				"UPDATE pgedge_vectorizer.queue "
 				"SET status = 'failed', "
 				"    attempts = attempts + 1, "
-				"    error_message = 'Processing failed', "
+				"    error_message = %s, "
 				"    next_retry_at = NULL "
 				"WHERE id = " INT64_FORMAT
 				"  AND status = 'pending' AND attempts = %d",
-				queue_id, attempts), false, 0);
+				quoted_reason, queue_id, attempts), false, 0);
 		else
 			SPI_execute(psprintf(
 				"UPDATE pgedge_vectorizer.queue "
 				"SET status = 'pending', "
 				"    attempts = attempts + 1, "
-				"    error_message = 'Processing failed', "
+				"    error_message = %s, "
 				"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
 				"WHERE id = " INT64_FORMAT
 				"  AND status = 'pending' AND attempts = %d",
-				queue_id, attempts), false, 0);
+				quoted_reason, queue_id, attempts), false, 0);
 
 		if (SPI_processed == 0)
 			elog(DEBUG1, "pgedge_vectorizer worker: queue item " INT64_FORMAT
@@ -1188,6 +1236,13 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		}
 		PG_CATCH();
 		{
+			/*
+			 * Take the message before FlushErrorState() frees it, so that the
+			 * queue row records why the item failed rather than merely that
+			 * it did.
+			 */
+			queue_item_note_error();
+
 			EmitErrorReport();
 			FlushErrorState();
 

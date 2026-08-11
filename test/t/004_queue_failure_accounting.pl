@@ -132,6 +132,12 @@ while (time() < $deadline)
 is($status, 'failed',
 	'the item is retired once max_attempts is reached');
 
+my $reason = $node->safe_psql($dbname,
+	"SELECT COALESCE(error_message, '') FROM pgedge_vectorizer.queue WHERE chunk_table = 'no_such_chunk_table'");
+
+like($reason, qr/no_such_chunk_table/,
+	'the recorded reason is the error itself, not a fixed string');
+
 my $claimable = $node->safe_psql($dbname, q(
 SELECT count(*) FROM pgedge_vectorizer.queue
  WHERE status = 'pending'
@@ -140,6 +146,38 @@ SELECT count(*) FROM pgedge_vectorizer.queue
 
 is($claimable, '0',
 	'a retired item is no longer claimed');
+
+# An error message is arbitrary text, and plenty of them carry an apostrophe:
+# an identifier with one in it puts it straight into "relation ... does not
+# exist", and several provider messages quote a JSON field name the same way.
+# Interpolated into the UPDATE without quoting that is invalid SQL, and it
+# would raise from the very statement meant to record the failure -- leaving
+# the batch aborted with nothing charged, which is the behaviour this whole
+# test exists to rule out. Injected after the assertions above so that the
+# earlier counts are not disturbed by a second failing item.
+$node->safe_psql(
+	$dbname, qq(
+INSERT INTO pgedge_vectorizer.queue
+    (chunk_id, chunk_table, content, status, metadata, max_attempts)
+VALUES (1, 'no_such''table', 'alpha beta gamma', 'pending',
+        '{"sparse_only": true}'::jsonb, 2)
+));
+
+my $quoted_reason = '';
+$deadline = time() + 30;
+
+while (time() < $deadline)
+{
+	$quoted_reason = $node->safe_psql($dbname,
+		"SELECT COALESCE(error_message, '') FROM pgedge_vectorizer.queue WHERE chunk_table = 'no_such''table'");
+
+	last if $quoted_reason ne '';
+
+	sleep 1;
+}
+
+like($quoted_reason, qr/no_such'table/,
+	'a reason containing an apostrophe is recorded rather than breaking the update');
 
 $node->stop;
 done_testing();
