@@ -21,6 +21,9 @@ typedef struct
 	char   *data;
 	size_t  size;		/* bytes of response held, excluding the terminator */
 	size_t  capacity;	/* bytes allocated in data, including the terminator */
+	bool    alloc_failed;	/* write callback could not grow data; see
+							 * provider_write_callback() for why it may not
+							 * simply raise an error */
 } ResponseBuffer;
 
 /*
