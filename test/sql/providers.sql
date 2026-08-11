@@ -67,3 +67,35 @@ RESET pgedge_vectorizer.api_url;
 RESET pgedge_vectorizer.model;
 SHOW pgedge_vectorizer.provider;
 SHOW pgedge_vectorizer.api_url;
+
+---------------------------------------------------------------------------
+-- GUC privilege boundary
+---------------------------------------------------------------------------
+
+-- api_key_file names a file the backend opens as the server's OS user, and
+-- api_url and extra_headers decide where its contents are sent and what goes
+-- with them; provider decides which vendor endpoint and header format the
+-- configured key is presented to. Together, settable by anyone, they are an
+-- arbitrary local file read delivered to a chosen host in an Authorization
+-- header, so all four are superuser-only. model and the scoring knobs affect
+-- only the calling session's own results and stay open.
+
+CREATE ROLE pgv_guc_unpriv;
+SET SESSION AUTHORIZATION pgv_guc_unpriv;
+
+SELECT current_setting('is_superuser') AS unprivileged_session;
+
+\set ON_ERROR_STOP off
+SET pgedge_vectorizer.api_key_file = '/etc/passwd';
+SET pgedge_vectorizer.api_url = 'http://example.invalid';
+SET pgedge_vectorizer.extra_headers = 'x-evil: 1';
+SET pgedge_vectorizer.provider = 'gemini';
+\set ON_ERROR_STOP on
+
+-- Settings scoped to the caller's own results stay available.
+SET pgedge_vectorizer.model = 'text-embedding-3-large';
+SET pgedge_vectorizer.bm25_k1 = 1.5;
+SHOW pgedge_vectorizer.model;
+
+RESET SESSION AUTHORIZATION;
+DROP ROLE pgv_guc_unpriv;
