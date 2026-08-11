@@ -1297,7 +1297,14 @@ process_queue_batch(const char *dbname)
 		"FROM pgedge_vectorizer.queue "
 		"WHERE status = 'pending' "
 		"AND (next_retry_at IS NULL OR next_retry_at <= NOW()) "
-		"ORDER BY attempts DESC, created_at "
+		/*
+		 * Oldest first.  Ordering by attempts DESC put the items that had
+		 * failed most at the head of every batch, so a provider outage left
+		 * its retry backlog jumping ahead of newly queued work until those
+		 * items exhausted max_attempts.  next_retry_at already spaces retries
+		 * out; age is the only ordering the queue needs.
+		 */
+		"ORDER BY created_at "
 		"LIMIT %d "
 		"FOR UPDATE SKIP LOCKED",
 		batch_size),
