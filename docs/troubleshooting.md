@@ -13,7 +13,13 @@ SHOW shared_preload_libraries;
 
 ## Workers Not Processing After CREATE EXTENSION
 
-Background workers start with PostgreSQL, before the extension is created. Workers automatically detect the extension using exponential backoff (checking every 5s, 10s, 20s, ... up to 5 minutes). After running `CREATE EXTENSION pgedge_vectorizer`, workers should discover it within seconds.
+Background workers start with PostgreSQL, before the extension is
+created. A worker checks for the extension on an exponential backoff,
+waiting 5s, then 10s, then 20s, and so on up to a ceiling of 5 minutes.
+After running `CREATE EXTENSION pgedge_vectorizer`, a worker discovers it
+on its next check, so a database configured long before the extension was
+created can wait up to 5 minutes. Reload the configuration to have the
+workers check immediately.
 
 If workers don't start processing:
 
@@ -94,13 +100,18 @@ the chunk table expects. The server log carries a matching warning that
 names the table.
 
 Restoring the previous model is the quicker of the two remedies, and is
-the right one if the change was accidental:
+the right one if the change was accidental. Substitute the model that
+built the table rather than the name shown here, because setting any
+other model leaves the dimensions mismatched:
 
 ```sql
-ALTER SYSTEM SET pgedge_vectorizer.model = 'text-embedding-3-small';
+ALTER SYSTEM SET pgedge_vectorizer.model = 'the-previous-model';
 SELECT pg_reload_conf();
 SELECT pgedge_vectorizer.retry_failed();
 ```
+
+The `table=M` figure in the error gives the dimension the chunk table
+expects, so the model you restore must be one that returns M dimensions.
 
 Rebuilding the vectorizer keeps the new model and re-embeds the table
 under it. Note that `recreate_chunks()` does not resolve a dimension
@@ -130,6 +141,16 @@ altering the type of the column. Follow these steps instead:
     SELECT pgedge_vectorizer.enable_vectorization('docs', 'body');
     ```
 
-Re-embedding calls the provider for every chunk in the table, so confirm
-the cost against your provider's pricing before starting on a large
-table.
+Repeat those steps for every vectorized column, not just the one you
+noticed. The model is a single global setting while chunk tables are
+independent per column, so changing it affects every vectorizer whose
+dimension no longer matches. The following query lists them:
+
+```sql
+SELECT source_table, source_column, chunk_table
+  FROM pgedge_vectorizer.vectorizers
+ ORDER BY source_table, source_column;
+```
+
+Re-embedding calls the provider for every chunk in every table rebuilt,
+so confirm the cost against your provider's pricing before starting.
