@@ -75,7 +75,14 @@ float **provider_parse_openai_embedding_response(const char *json_response,
 /* Count dimensions by counting commas in a JSON float array (after '[') */
 int provider_count_array_dimensions(const char *p);
 
-/* Parse a JSON float array into pre-allocated output; returns count parsed */
+/*
+ * Parse a JSON float array into pre-allocated output; returns count parsed,
+ * or PROVIDER_PARSE_MALFORMED if a numeric literal was too long to be one.
+ * Callers that only compare against the expected count still reject that,
+ * since it can never equal a dimension.
+ */
+#define PROVIDER_PARSE_MALFORMED	(-1)
+
 int provider_parse_float_array(const char **pos, float *output, int dim);
 
 /* Append extra headers from GUC to a curl header list */

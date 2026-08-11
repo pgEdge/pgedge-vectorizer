@@ -226,7 +226,9 @@ provider_count_array_dimensions(const char *p)
  *
  * Reads up to `dim` float values from the current position (after '[').
  * Advances *pos past the parsed values (to ']' or end of parsed data).
- * Returns the number of values successfully parsed.
+ * Returns the number of values successfully parsed, or
+ * PROVIDER_PARSE_MALFORMED on a numeric literal too long to be one, in which
+ * case *pos is left on the offending run rather than past it.
  */
 int
 provider_parse_float_array(const char **pos, float *output, int dim)
@@ -255,14 +257,12 @@ provider_parse_float_array(const char **pos, float *output, int dim)
 			 * characters -- %.17g never exceeds 24 -- so a longer run means a
 			 * malformed response, and keeping only the leading digits would
 			 * feed atof() a number of an entirely different magnitude and
-			 * score on it silently.  Every caller treats a short count as a
-			 * dimension mismatch, so returning here reports the response as
-			 * bad instead.
+			 * score on it silently.
 			 */
 			if (value_pos >= (int) sizeof(value_buf) - 1)
 			{
 				*pos = p;
-				return idx;
+				return PROVIDER_PARSE_MALFORMED;
 			}
 
 			value_buf[value_pos++] = *p;
@@ -471,8 +471,11 @@ provider_parse_openai_embedding_response(const char *json_response, int count,
 
 		if (parsed != *dim)
 		{
-			*error_msg = psprintf("Dimension mismatch: expected %d, got %d",
-								  *dim, parsed);
+			*error_msg = (parsed == PROVIDER_PARSE_MALFORMED)
+				? pstrdup("Malformed embedding response: numeric literal too "
+						  "long to be a number")
+				: psprintf("Dimension mismatch: expected %d, got %d",
+						   *dim, parsed);
 			provider_free_embeddings(embeddings, embedding_idx + 1);
 			return NULL;
 		}

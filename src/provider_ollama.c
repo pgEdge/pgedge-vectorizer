@@ -205,8 +205,11 @@ parse_ollama_embedding_response(const char *json_response, int *dim,
 
 	if (parsed != *dim)
 	{
-		*error_msg = psprintf("Dimension mismatch: expected %d, got %d",
-							  *dim, parsed);
+		*error_msg = (parsed == PROVIDER_PARSE_MALFORMED)
+			? pstrdup("Malformed embedding response: numeric literal too "
+					  "long to be a number")
+			: psprintf("Dimension mismatch: expected %d, got %d",
+					   *dim, parsed);
 		pfree(embedding);
 		return NULL;
 	}

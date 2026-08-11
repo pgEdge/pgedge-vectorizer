@@ -237,8 +237,11 @@ parse_gemini_batch_embedding_response(const char *json_response, int count,
 
 		if (parsed != *dim)
 		{
-			*error_msg = psprintf("Dimension mismatch: expected %d, got %d",
-								  *dim, parsed);
+			*error_msg = (parsed == PROVIDER_PARSE_MALFORMED)
+				? pstrdup("Malformed embedding response: numeric literal too "
+						  "long to be a number")
+				: psprintf("Dimension mismatch: expected %d, got %d",
+						   *dim, parsed);
 			provider_free_embeddings(embeddings, embedding_idx + 1);
 			return NULL;
 		}
