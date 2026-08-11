@@ -116,7 +116,7 @@ voyage_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	char *json_request;
 	char *url;
 	const char *base_url;
-	char auth_header[512];
+	char *auth_header;
 	ResponseBuffer response;
 	float **embeddings;
 
@@ -138,8 +138,7 @@ voyage_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	url = psprintf("%s/embeddings", base_url);
 
 	/* Build auth header */
-	snprintf(auth_header, sizeof(auth_header),
-			 "Authorization: Bearer %s", api_key);
+	auth_header = psprintf("Authorization: Bearer %s", api_key);
 
 	/* Perform request */
 	if (!provider_do_curl_request(url, auth_header, json_request,
@@ -147,6 +146,7 @@ voyage_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	{
 		pfree(json_request);
 		pfree(url);
+		pfree(auth_header);
 		if (response.data)
 			pfree(response.data);
 		return NULL;
@@ -158,6 +158,7 @@ voyage_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 
 	pfree(json_request);
 	pfree(url);
+	pfree(auth_header);
 	pfree(response.data);
 	return embeddings;
 }
