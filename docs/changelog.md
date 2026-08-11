@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- Restricted `pgedge_vectorizer.provider`, `api_key_file`, `api_url` and
+  `extra_headers` to superusers (`PGC_SUSET`); they were settable by any
+  session ([#30](https://github.com/pgEdge/pgedge-vectorizer/issues/30)).
+  `api_key_file` names a file the backend opens as the server's operating
+  system user, and `api_url` and `extra_headers` decide where its contents are
+  sent and what accompanies them, so together they allowed a user who could
+  reach the embedding functions to read any file the `postgres` user could read
+  and have it delivered to a host of their choosing in an `Authorization`
+  header. Changing `provider` alone was enough to present a superuser-configured
+  key to a different vendor's endpoint. This is a behaviour change: an
+  application relying on setting any of the four per session must now either run
+  as a superuser, have the parameter delegated with `GRANT SET ON PARAMETER`
+  (PostgreSQL 15 and later), or set it in `postgresql.conf`.
 - Hardened API key file loading in OpenAI and Voyage providers (#17)
     - Reject API key files larger than 4096 bytes (`MAX_API_KEY_FILE_SIZE`) before
       reading, preventing unbounded memory allocation (CWE-20 / CWE-120)

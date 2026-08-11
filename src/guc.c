@@ -54,6 +54,31 @@ double pgedge_vectorizer_bm25_b        = 0.75;
 
 /*
  * Initialize all GUC variables
+ *
+ * The contexts used here, and why.
+ *
+ * PGC_SUSET for anything that decides what the server reads from its own
+ * filesystem or where it sends an outbound request. api_key_file names a file
+ * the backend opens as the server's OS user; api_url and extra_headers decide
+ * where its contents are sent and what accompanies them; provider selects
+ * which vendor endpoint and header format the configured key is presented to.
+ * Left settable by any session, those combine into arbitrary local file
+ * disclosure: SET api_key_file to any file the postgres user can read, SET
+ * api_url to a host you control, and the file arrives in an Authorization
+ * header. Nothing else has to be misconfigured for that to work, and a
+ * superuser-set key is exfiltrated to a third party just by changing provider.
+ *
+ * PGC_SUSET rather than PGC_POSTMASTER or PGC_SIGHUP because these are
+ * legitimately per-session settings for an administrator; it withholds them
+ * from unprivileged users without making them static. From PostgreSQL 15 a
+ * superuser can still delegate one with GRANT SET ON PARAMETER.
+ *
+ * PGC_USERSET for settings whose blast radius is the calling session's own
+ * results: model, and the hybrid search scoring knobs.
+ *
+ * PGC_SIGHUP for everything the background workers read, since the launcher
+ * and its workers are not attached to any session and a per-session value
+ * would be meaningless to them.
  */
 void
 pgedge_vectorizer_init_guc(void)
@@ -64,7 +89,7 @@ pgedge_vectorizer_init_guc(void)
 								"Determines which API provider is used for generating embeddings.",
 								&pgedge_vectorizer_provider,
 								"openai",
-								PGC_USERSET,
+								PGC_SUSET,
 								0,
 								NULL, NULL, NULL);
 
@@ -74,7 +99,7 @@ pgedge_vectorizer_init_guc(void)
 								"Tilde (~) expands to home directory.",
 								&pgedge_vectorizer_api_key_file,
 								"~/.pgedge-vectorizer-llm-api-key",
-								PGC_USERSET,
+								PGC_SUSET,
 								0,
 								NULL, NULL, NULL);
 
@@ -89,7 +114,7 @@ pgedge_vectorizer_init_guc(void)
 								"(LM Studio, Docker Model Runner, EXO) or proxies (Portkey).",
 								&pgedge_vectorizer_api_url,
 								"",
-								PGC_USERSET,
+								PGC_SUSET,
 								0,
 								NULL, NULL, NULL);
 
@@ -112,7 +137,7 @@ pgedge_vectorizer_init_guc(void)
 								"'x-portkey-provider: openai; x-custom: value'",
 								&pgedge_vectorizer_extra_headers,
 								"",
-								PGC_USERSET,
+								PGC_SUSET,
 								0,
 								NULL, NULL, NULL);
 
