@@ -72,6 +72,7 @@ extern int pgedge_vectorizer_auto_cleanup_hours;
 extern bool   pgedge_vectorizer_enable_hybrid;
 extern double pgedge_vectorizer_bm25_k1;
 extern double pgedge_vectorizer_bm25_b;
+extern int    pgedge_vectorizer_corpus_stats_cache_ttl;
 
 /*
  * Chunking strategy enumeration

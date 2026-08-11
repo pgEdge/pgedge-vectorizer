@@ -27,6 +27,7 @@
 #include "utils/errcodes.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
+#include "utils/timestamp.h"
 
 /* ----------------------------------------------------------------
  * English stopword list — must stay sorted (used with bsearch)
@@ -221,7 +222,23 @@ bm25_tokenize(const char *text, int *ntokens)
 }
 
 /*
- * bm25_corpus_stats — corpus size N and mean document length, in one pass.
+ * Cached corpus figures for one chunk table.
+ *
+ * Keyed on the chunk table name, which is bounded by NAMEDATALEN because it
+ * names a relation.  Key must be first for dynahash.
+ */
+typedef struct
+{
+	char		key[NAMEDATALEN];
+	int64		total_docs;
+	float8		avg_doc_len;
+	TimestampTz	read_at;
+} CorpusStatsEntry;
+
+static HTAB *corpus_stats_cache = NULL;
+
+/*
+ * bm25_corpus_stats_uncached — read N and the mean document length.
  *
  * Both come from the same scan: taken separately they made two passes over
  * the chunk table for every search.  Returns N, clamped to a minimum of 1 so
@@ -235,7 +252,7 @@ bm25_tokenize(const char *text, int *ntokens)
  * Caller must have an active SPI connection.
  */
 static int64
-bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
+bm25_corpus_stats_uncached(const char *chunk_table, float8 *avg_doc_len)
 {
 	char   *sql;
 	int     ret;
@@ -267,6 +284,77 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 	}
 
 	return (total <= 0) ? 1 : total;
+}
+
+/*
+ * bm25_corpus_stats — corpus size N and mean document length, cached.
+ *
+ * The underlying read is an unindexable aggregate over the whole chunk table,
+ * and it was paid on every call: once per search, and once per queue item in
+ * the worker, so a batch of ten scanned the table ten times over.  At 300,000
+ * chunks that is around 33ms a time and it grows with the corpus.
+ *
+ * These two figures are inputs to a ranking heuristic rather than an account
+ * that has to balance, and during ingest they are a moving target in any
+ * case, since every chunk written changes them.  Holding a value for a few
+ * seconds therefore costs a little precision in a number that was never
+ * precise, and buys the removal of a scan from the hot path of every search.
+ *
+ * Cached per backend rather than shared, which suits both callers: a worker
+ * is a long-lived process working one database, and searches arrive on
+ * pooled connections that are also long-lived.  A short-lived backend that
+ * runs a single search pays the scan exactly as it did before.
+ *
+ * Set pgedge_vectorizer.corpus_stats_cache_ttl to 0 to read afresh every
+ * time, which restores the previous behaviour exactly.
+ *
+ * Caller must have an active SPI connection.
+ */
+static int64
+bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
+{
+	CorpusStatsEntry   *entry;
+	bool				found;
+	TimestampTz			now;
+
+	if (pgedge_vectorizer_corpus_stats_cache_ttl <= 0)
+		return bm25_corpus_stats_uncached(chunk_table, avg_doc_len);
+
+	if (corpus_stats_cache == NULL)
+	{
+		HASHCTL		ctl;
+
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = NAMEDATALEN;
+		ctl.entrysize = sizeof(CorpusStatsEntry);
+		ctl.hcxt = TopMemoryContext;
+		corpus_stats_cache = hash_create("bm25_corpus_stats", 8, &ctl,
+										 HASH_ELEM | HASH_STRINGS |
+										 HASH_CONTEXT);
+	}
+
+	entry = hash_search(corpus_stats_cache, chunk_table, HASH_ENTER, &found);
+	now = GetCurrentTimestamp();
+
+	if (found &&
+		!TimestampDifferenceExceeds(entry->read_at, now,
+									pgedge_vectorizer_corpus_stats_cache_ttl
+									* 1000))
+	{
+		*avg_doc_len = entry->avg_doc_len;
+		return entry->total_docs;
+	}
+
+	/*
+	 * Seed the entry from the caller's default before reading, so that a
+	 * table whose average cannot be determined caches that default rather
+	 * than whatever the previous caller happened to leave behind.
+	 */
+	entry->total_docs = bm25_corpus_stats_uncached(chunk_table, avg_doc_len);
+	entry->avg_doc_len = *avg_doc_len;
+	entry->read_at = now;
+
+	return entry->total_docs;
 }
 
 /*
