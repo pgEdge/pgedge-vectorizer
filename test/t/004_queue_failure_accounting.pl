@@ -35,23 +35,31 @@ use Test::More;
 
 my $dbname = 'queue_accounting';
 
+# Deliberately no pgedge_vectorizer.databases yet. A worker that reaches a
+# database before its extension exists backs off for five seconds and then for
+# five minutes, which would otherwise decide this test by timing: the database
+# is named only once it is ready, so there is no window in which a worker can
+# look too early.
 my $node = PostgreSQL::Test::Cluster->new('vectorizer_queue_accounting');
 $node->init;
 $node->append_conf(
 	'postgresql.conf', qq(
 shared_preload_libraries = 'pgedge_vectorizer'
-pgedge_vectorizer.databases = '$dbname'
 pgedge_vectorizer.worker_poll_interval = 200
 max_worker_processes = 16
 ));
 
 $node->start;
 
-# Create the extension before the worker's first look, so it does not fall into
-# the extension-not-installed backoff and sit out the window below.
 $node->safe_psql('postgres', "CREATE DATABASE $dbname");
 $node->safe_psql($dbname, 'CREATE EXTENSION vector');
 $node->safe_psql($dbname, 'CREATE EXTENSION pgedge_vectorizer');
+
+# Now that there is something to service, tell the launcher about it. The
+# database list is SIGHUP, so a reload is enough.
+$node->append_conf('postgresql.conf',
+	"pgedge_vectorizer.databases = '$dbname'\n");
+$node->reload;
 
 my $log_offset = (-s $node->logfile) // 0;
 
@@ -64,11 +72,22 @@ VALUES (1, 'no_such_chunk_table', 'alpha beta gamma', 'pending',
         '{"sparse_only": true}'::jsonb, 2)
 ));
 
-# One poll interval is 200ms, so this is many chances to try the row.
-sleep 5;
+# Wait for the attempt rather than assuming one has happened by now, so that
+# worker startup timing cannot decide the result. An unfixed build never
+# records one, so this waits out the timeout and the assertion below fails on
+# the value it did see.
+my $attempts = 0;
+my $deadline = time() + 30;
 
-my $attempts = $node->safe_psql($dbname,
-	"SELECT attempts FROM pgedge_vectorizer.queue WHERE chunk_table = 'no_such_chunk_table'");
+while (time() < $deadline)
+{
+	$attempts = $node->safe_psql($dbname,
+		"SELECT attempts FROM pgedge_vectorizer.queue WHERE chunk_table = 'no_such_chunk_table'");
+
+	last if $attempts > 0;
+
+	sleep 1;
+}
 
 cmp_ok($attempts, '>', 0,
 	'a failed attempt is recorded against the item');
@@ -79,20 +98,22 @@ my $backoff = $node->safe_psql($dbname,
 is($backoff, 't',
 	'the item is held out of the claim until its retry time');
 
-# The point of the backoff: without it the worker retries as fast as it polls.
-# Counting the worker's own "error in processing" line is the most direct
-# measure of that, and the margin is large -- an unfixed build produces of the
-# order of twenty five of these in the window above, a fixed one produces one.
-my $log = slurp_file($node->logfile, $log_offset);
-my @cycles = ($log =~ /error in processing, continuing/g);
+# The point of the backoff: while the retry time is in the future the item
+# should not be touched at all. Counting from here rather than from the insert
+# keeps this independent of how long the wait above took; at a 200ms poll an
+# unfixed build manages of the order of fifteen failures in this window.
+my $quiet_offset = (-s $node->logfile) // 0;
+sleep 3;
+my $quiet = slurp_file($node->logfile, $quiet_offset);
+my @cycles = ($quiet =~ /error in processing, continuing/g);
 
-cmp_ok(scalar(@cycles), '<', 5,
-	'the item is not retried on every poll');
+is(scalar(@cycles), 0,
+	'a backed off item is left alone until its retry time');
 
 # Walk it to the end of its retries. Clearing next_retry_at makes it eligible
 # again immediately rather than waiting out the backoff, which would make this
 # test take minutes.
-my $deadline = time() + 60;
+$deadline = time() + 60;
 my $status = '';
 
 while (time() < $deadline)
