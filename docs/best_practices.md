@@ -34,3 +34,12 @@ Effective data management ensures clean operations and provides flexibility when
 - Use the `reprocess_chunks()` function to queue existing chunks that are missing embeddings.
 - Use the `recreate_chunks()` function for a complete chunk regeneration, which deletes all existing chunks first.
 - Each column gets independent chunk tables and triggers, so you can disable them selectively as needed.
+- Settle on an embedding model before enabling vectorization, because the
+  model's dimension is fixed into the chunk table when the table is
+  created.
+- Rebuild the vectorizer with `disable_vectorization()` and
+  `enable_vectorization()` after changing to a model of a different
+  dimension, since `recreate_chunks()` deletes chunk rows without
+  altering the column.
+- Budget for the provider cost of re-embedding an entire table before
+  changing the model on a populated one.
