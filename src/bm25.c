@@ -322,9 +322,9 @@ static int64
 bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 {
 	CorpusStatsEntry   *entry;
-	bool				found;
 	TimestampTz			now;
 	Oid					relid;
+	int64				total_docs;
 
 	if (pgedge_vectorizer_corpus_stats_cache_ttl <= 0)
 		return bm25_corpus_stats_uncached(chunk_table, avg_doc_len);
@@ -352,10 +352,10 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 										 HASH_CONTEXT);
 	}
 
-	entry = hash_search(corpus_stats_cache, &relid, HASH_ENTER, &found);
 	now = GetCurrentTimestamp();
+	entry = hash_search(corpus_stats_cache, &relid, HASH_FIND, NULL);
 
-	if (found &&
+	if (entry != NULL &&
 		!TimestampDifferenceExceeds(entry->read_at, now,
 									pgedge_vectorizer_corpus_stats_cache_ttl
 									* 1000))
@@ -365,15 +365,20 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 	}
 
 	/*
-	 * Seed the entry from the caller's default before reading, so that a
-	 * table whose average cannot be determined caches that default rather
-	 * than whatever the previous caller happened to leave behind.
+	 * Read before entering anything.  HASH_ENTER inserts an entry for the
+	 * caller to fill, and this read can throw, leaving one unfilled in
+	 * TopMemoryContext for a later call to read as figures -- dynahash.c warns
+	 * of exactly this.  The local is what sequences it: assigning the return
+	 * straight into the entry would put HASH_ENTER back before the call.
 	 */
-	entry->total_docs = bm25_corpus_stats_uncached(chunk_table, avg_doc_len);
+	total_docs = bm25_corpus_stats_uncached(chunk_table, avg_doc_len);
+
+	entry = hash_search(corpus_stats_cache, &relid, HASH_ENTER, NULL);
+	entry->total_docs = total_docs;
 	entry->avg_doc_len = *avg_doc_len;
 	entry->read_at = now;
 
-	return entry->total_docs;
+	return total_docs;
 }
 
 /*
