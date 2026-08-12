@@ -67,14 +67,14 @@ provider_write_callback(void *contents, size_t size, size_t nmemb, void *userp)
 
 		if (!AllocSizeIsValid(newcap))
 		{
-			mem->alloc_failed = true;
+			mem->grow_failure = RESPONSE_GROW_TOO_LARGE;
 			return 0;
 		}
 
 		newdata = repalloc_extended(mem->data, newcap, MCXT_ALLOC_NO_OOM);
 		if (newdata == NULL)
 		{
-			mem->alloc_failed = true;
+			mem->grow_failure = RESPONSE_GROW_NO_MEMORY;
 			return 0;
 		}
 
@@ -424,7 +424,7 @@ provider_do_curl_request(const char *url, const char *auth_header,
 	response_out->data = palloc(response_out->capacity);
 	response_out->data[0] = '\0';
 	response_out->size = 0;
-	response_out->alloc_failed = false;
+	response_out->grow_failure = RESPONSE_GROW_OK;
 
 	/*
 	 * Reuse this backend's handle rather than making a new one per request.
@@ -483,9 +483,13 @@ provider_do_curl_request(const char *url, const char *auth_header,
 		 * curl only knows the write callback returned short, and would report
 		 * that as a generic write failure.
 		 */
-		if (response_out->alloc_failed)
-			*error_msg = psprintf("Response from %s is too large to buffer "
-								  "(stopped after %zu bytes)",
+		if (response_out->grow_failure == RESPONSE_GROW_TOO_LARGE)
+			*error_msg = psprintf("Response from %s is larger than can be "
+								  "buffered (stopped after %zu bytes)",
+								  provider_name, response_out->size);
+		else if (response_out->grow_failure == RESPONSE_GROW_NO_MEMORY)
+			*error_msg = psprintf("Out of memory buffering the response from "
+								  "%s (stopped after %zu bytes)",
 								  provider_name, response_out->size);
 		else
 			*error_msg = psprintf("curl_easy_perform() failed: %s",
