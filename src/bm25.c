@@ -278,6 +278,61 @@ corpus_stats_uses_spent(const CorpusStatsEntry *entry)
 	return entry->uses_since_read >= Max(budget, 1);
 }
 
+static int64 bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len);
+
+/*
+ * bm25_corpus_stats_recheck — the data contradicts the cached corpus size.
+ *
+ * A term cannot appear in more documents than exist, so doc_freq above N is
+ * proof that the cached N is stale: doc_freq is read fresh on every call while
+ * N may be up to a TTL old.  Clamping the weight alone would leave the stale
+ * entry in place, so every later chunk in the same window would be scored, and
+ * have persisted into sparse_embedding, against the same wrong corpus.  Drop
+ * the entry and read again, which repairs this document and every one after it.
+ *
+ * If the fresh reading is still below max_df then the statistics are
+ * inconsistent rather than stale — a doc_freq left too high by an earlier
+ * failure, say — and re-reading cannot fix that.  Adopt max_df as this entry's
+ * corpus size in that case: the weights stay sane, and the next call sees a
+ * cached N that the data no longer contradicts, so it does not rescan to no
+ * effect.  A natural expiry re-reads the true N and the check runs again.
+ *
+ * Caller must have an active SPI connection.
+ */
+static int64
+bm25_corpus_stats_recheck(const char *chunk_table, float8 *avg_doc_len,
+						  int64 max_df)
+{
+	Oid			relid;
+	int64		total_docs;
+
+	/* Nothing is cached to be stale, so the reading was already fresh. */
+	if (pgedge_vectorizer_corpus_stats_cache_ttl <= 0 ||
+		corpus_stats_cache == NULL)
+		return max_df;
+
+	relid = RelnameGetRelid(chunk_table);
+	if (!OidIsValid(relid))
+		return max_df;
+
+	hash_search(corpus_stats_cache, &relid, HASH_REMOVE, NULL);
+
+	total_docs = bm25_corpus_stats(chunk_table, avg_doc_len);
+
+	if (max_df > total_docs)
+	{
+		CorpusStatsEntry *entry;
+
+		entry = hash_search(corpus_stats_cache, &relid, HASH_FIND, NULL);
+		if (entry != NULL)
+			entry->total_docs = max_df;
+
+		total_docs = max_df;
+	}
+
+	return total_docs;
+}
+
 /*
  * bm25_corpus_stats_uncached — read N and the mean document length.
  *
@@ -463,6 +518,9 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens,
 	HTAB            *htab = NULL;
 	HASHCTL          ctl;
 	int64            total_docs = 1;
+	int64            max_df = 0;
+	IdfStat         *rows = NULL;
+	int              nrows = 0;
 	Datum            terms;
 	Oid              argtype = TEXTARRAYOID;
 
@@ -581,9 +639,39 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens,
 					   &ctl,
 					   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
-	for (int i = 0; i < (int) SPI_processed; i++)
+	/*
+	 * Take the rows out of SPI_tuptable before anything else runs a query.
+	 * The recheck below reads the corpus again, and SPI_execute() replaces
+	 * SPI_tuptable, so a loop still reading from it would decode that result
+	 * as (term, doc_freq).  read_idf_row() already copies the term, so the
+	 * array outlives the tuptable.
+	 *
+	 * The largest doc_freq is wanted before any weight is computed.  A term
+	 * cannot appear in more documents than exist, so a doc_freq above the
+	 * corpus size means the corpus size is wrong: it may be a cached reading
+	 * while every doc_freq here was read fresh.  Taking one maximum also
+	 * means one corpus size covers the whole document -- weighting each term
+	 * against its own would leave two terms of one chunk scored against
+	 * different corpora, which BM25 does not contemplate.
+	 */
+	nrows = (int) SPI_processed;
+	rows  = (IdfStat *) palloc(nrows * sizeof(IdfStat));
+
+	for (int i = 0; i < nrows; i++)
 	{
-		IdfStat       row   = read_idf_row(SPI_tuptable, i);
+		rows[i] = read_idf_row(SPI_tuptable, i);
+
+		if ((int64) rows[i].doc_freq > max_df)
+			max_df = (int64) rows[i].doc_freq;
+	}
+
+	if (max_df > total_docs)
+		total_docs = bm25_corpus_stats_recheck(chunk_table, avg_doc_len,
+											   max_df);
+
+	for (int i = 0; i < nrows; i++)
+	{
+		IdfStat       row   = rows[i];
 		bool          found;
 		IdfHashEntry *entry;
 
@@ -594,25 +682,17 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens,
 			 * Derived, not stored: the corpus size is identical for every
 			 * term.  Expression shape matches the SQL it replaced so that
 			 * results are bit-identical.
-			 *
-			 * A term cannot appear in more documents than exist, but
-			 * total_docs may be a cached reading while doc_freq is read
-			 * fresh, so doc_freq can outrun it.  Left alone that gives a
-			 * negative weight, and a negative score is dropped from the
-			 * vector, losing the term outright.  Taking the larger changes
-			 * nothing whenever total_docs >= doc_freq, which is every case a
-			 * fresh reading can produce.
 			 */
-			int64	corpus = Max(total_docs, (int64) row.doc_freq);
-
 			entry->idf_weight =
 				(row.doc_freq <= 0)
 					? 0.0
-					: log(1.0 + ((double) corpus - row.doc_freq + 0.5)
+					: log(1.0 + ((double) total_docs - row.doc_freq + 0.5)
 								/ (row.doc_freq + 0.5));
 		}
 		/* Duplicate terms: keep the first weight encountered */
 	}
+
+	pfree(rows);
 
 	return htab;
 }
