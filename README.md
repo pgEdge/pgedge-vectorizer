@@ -215,6 +215,8 @@ SELECT * FROM pgedge_vectorizer.hybrid_search_simple(
 | `pgedge_vectorizer.enable_hybrid` | bool | `false` | — | Enable BM25 sparse vectors alongside dense embeddings |
 | `pgedge_vectorizer.bm25_k1` | real | `1.2` | `0.0–3.0` | Term frequency saturation parameter |
 | `pgedge_vectorizer.bm25_b` | real | `0.75` | `0.0–1.0` | Document length normalization parameter |
+| `pgedge_vectorizer.corpus_stats_cache_ttl` | integer | `60s` | `0–3600` | Seconds a backend may reuse a chunk table's corpus size and mean document length before reading them again. Set to 0 to read them on every call |
+| `pgedge_vectorizer.corpus_stats_cache_max_uses_pct` | integer | `5` | `0–100` | Percent of the cached corpus size that may be spent as uses of those figures before they are re-read, whichever comes first with the TTL. Each use counts as one chunk that may have been added since: a proxy rather than a measurement, so searches spend it too. Set to 0 to bound by time alone |
 
 ## Configuration Parameters
 

@@ -56,6 +56,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   vectorized tables were created under a build predating those triggers.
 - `pgedge_vectorizer.vectorizers` now records the document identifier column and
   its type, so cleanup triggers can be recreated without re-detecting it.
+- BM25 now caches a chunk table's corpus size and mean document length per
+  backend rather than deriving them on every call
+  ([#53](https://github.com/pgEdge/pgedge-vectorizer/issues/53)). Both come
+  from an aggregate that cannot use an index, so it was a full scan of the
+  chunk table for every search and for every queue item the worker processed;
+  a batch of ten scanned the same table ten times under a snapshot in which
+  the answer could not have changed. Two settings bound how stale a cached
+  reading may become, and whichever is reached first triggers a re-read:
+    - `pgedge_vectorizer.corpus_stats_cache_ttl` (default 60 seconds) bounds it
+      in time. Setting it to 0 disables the cache entirely, restoring the
+      previous behaviour exactly.
+    - `pgedge_vectorizer.corpus_stats_cache_max_uses_pct` (default 5) bounds it
+      in proportion to the corpus, which is how staleness actually harms
+      ranking: a thousand chunks added to a million barely move the weights,
+      while the same thousand added to two hundred change them several fold.
+      Each use of a cached reading counts as one chunk that may have been added
+      since — a proxy rather than a measurement, so searches spend the budget
+      too. Setting it to 0 bounds by time alone.
+
+  The figures feed a ranking heuristic rather than an account that has to
+  balance, and during ingest they are a moving target in any case, so holding
+  one briefly costs a little precision in a number that was never precise. They
+  are not maintained incrementally: chunk rows are inserted and deleted from
+  many places across the SQL — chunking, content updates, `recreate_chunks()`,
+  row deletion, truncation and disabling — and counters left wrong in any of
+  them would skew ranking silently and permanently, whereas a cache that
+  expires cannot drift for longer than its bounds and recovers by itself.
 
 ### Changed
 
