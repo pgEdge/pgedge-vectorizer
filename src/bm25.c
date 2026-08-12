@@ -594,11 +594,21 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens,
 			 * Derived, not stored: the corpus size is identical for every
 			 * term.  Expression shape matches the SQL it replaced so that
 			 * results are bit-identical.
+			 *
+			 * A term cannot appear in more documents than exist, but
+			 * total_docs may be a cached reading while doc_freq is read
+			 * fresh, so doc_freq can outrun it.  Left alone that gives a
+			 * negative weight, and a negative score is dropped from the
+			 * vector, losing the term outright.  Taking the larger changes
+			 * nothing whenever total_docs >= doc_freq, which is every case a
+			 * fresh reading can produce.
 			 */
+			int64	corpus = Max(total_docs, (int64) row.doc_freq);
+
 			entry->idf_weight =
 				(row.doc_freq <= 0)
 					? 0.0
-					: log(1.0 + ((double) total_docs - row.doc_freq + 0.5)
+					: log(1.0 + ((double) corpus - row.doc_freq + 0.5)
 								/ (row.doc_freq + 0.5));
 		}
 		/* Duplicate terms: keep the first weight encountered */

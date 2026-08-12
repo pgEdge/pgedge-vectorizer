@@ -773,6 +773,31 @@ RESET pgedge_vectorizer.corpus_stats_cache_ttl;
 RESET pgedge_vectorizer.corpus_stats_cache_max_growth;
 DROP TABLE growth_chunks, growth_chunks_idf_stats;
 ---------------------------------------------------------------------------
+-- Test 25: a doc_freq larger than the corpus does not lose the term
+---------------------------------------------------------------------------
+-- doc_freq is read fresh while the corpus size may be cached, so doc_freq
+-- can outrun it. Unclamped that makes ln((N+1)/(df+0.5)) negative, and a
+-- negative score is dropped, so the term vanishes from the vector rather
+-- than merely being underweighted. The weight below is near zero, which is
+-- what a term appearing in every document should score.
+CREATE TABLE clamp_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                           token_count INT);
+CREATE TABLE clamp_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                     doc_freq INT NOT NULL);
+INSERT INTO clamp_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 10);
+INSERT INTO clamp_chunks_idf_stats VALUES ('alpha', 5000);
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'clamp_chunks')
+           <> '{}/65536'::sparsevec AS term_survives_df_over_n;
+ term_survives_df_over_n 
+-------------------------
+ t
+(1 row)
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+DROP TABLE clamp_chunks, clamp_chunks_idf_stats;
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 SELECT pgedge_vectorizer.disable_vectorization(
