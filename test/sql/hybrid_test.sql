@@ -547,7 +547,10 @@ SELECT pgedge_vectorizer.bm25_query_vector('alpha', 't_chunks') AS tenant_a \gse
 SET search_path = cache_tenant_b, public;
 SELECT pgedge_vectorizer.bm25_query_vector('alpha', 't_chunks') AS tenant_b \gset
 
-SET search_path = public;
+-- RESET rather than SET, so that whatever the session started with is what
+-- the rest of the file runs under. The comparison below needs no relation
+-- lookup of its own.
+RESET search_path;
 SELECT :'tenant_a'::sparsevec <> :'tenant_b'::sparsevec
     AS same_name_different_schema_not_confused;
 
