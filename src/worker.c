@@ -250,11 +250,13 @@ queue_item_note_error(void)
 
 	/*
 	 * CopyErrorData() copies into the current context and asserts it is not
-	 * ErrorContext, which is exactly where a PG_CATCH() body starts: errstart()
-	 * switches there and an error longjmps out without switching back.  Left
-	 * alone this aborts an assert-enabled build outright, and on a release
-	 * build the copy is freed under it by FlushErrorState().  The copy is only
-	 * needed until the message has been taken, so any other context will do.
+	 * ErrorContext, which is exactly where a PG_CATCH() body starts:
+	 * errfinish() switches there and deliberately leaves it set that way when
+	 * it re-throws.  Left alone this aborts an assert-enabled build outright;
+	 * on a release build it instead eats into the space ErrorContext reserves
+	 * so that reporting an error can never itself fail, which is what the
+	 * assertion protects.  The copy is only needed until the message has been
+	 * taken, so any other context will do.
 	 */
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
