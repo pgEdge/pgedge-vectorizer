@@ -112,14 +112,25 @@ SELECT g, 0, 'alpha', 10 FROM generate_series(100, 299) g
 
 # At N = 20 the budget is one cached use, so the second item is served from
 # cache and the third must re-read.
+#
+# Queued one at a time, and waited for in between, because which of the two the
+# worker takes first decides which is the cached use and which the re-read.
+# Inserted together they would share a created_at, and the claim orders by that
+# column alone, so their order would be unspecified.
 $node->safe_psql(
 	$dbname, q(
 INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, status, metadata)
-VALUES (2, 'chunks', 'alpha', 'pending', '{"sparse_only": true}'::jsonb),
-       (3, 'chunks', 'alpha', 'pending', '{"sparse_only": true}'::jsonb)
+VALUES (2, 'chunks', 'alpha', 'pending', '{"sparse_only": true}'::jsonb)
 ));
 
 ok(await_sparse(2), 'the second queued chunk is indexed');
+
+$node->safe_psql(
+	$dbname, q(
+INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, status, metadata)
+VALUES (3, 'chunks', 'alpha', 'pending', '{"sparse_only": true}'::jsonb)
+));
+
 ok(await_sparse(3), 'the third queued chunk is indexed');
 
 my $cached = $node->safe_psql($dbname,
