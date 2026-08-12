@@ -1,6 +1,6 @@
 # Copyright (c) 2025 - 2026, pgEdge, Inc.
 #
-# Verify that the corpus statistics growth bound reaches the vectors the worker
+# Verify that the corpus statistics use bound reaches the vectors the worker
 # stores, not merely the ones a query computes.
 #
 # The regression tests cover the bound through bm25_query_vector(), which
@@ -46,7 +46,7 @@ pgedge_vectorizer.batch_size = 1
 pgedge_vectorizer.provider = 'ollama'
 pgedge_vectorizer.enable_hybrid = true
 pgedge_vectorizer.corpus_stats_cache_ttl = 3600
-pgedge_vectorizer.corpus_stats_cache_max_growth = 5
+pgedge_vectorizer.corpus_stats_cache_max_uses_pct = 5
 max_worker_processes = 16
 ));
 

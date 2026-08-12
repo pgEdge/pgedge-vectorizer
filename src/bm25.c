@@ -247,7 +247,7 @@ typedef struct
 static HTAB *corpus_stats_cache = NULL;
 
 /*
- * corpus_stats_stale_by_growth — has the corpus plausibly moved too far?
+ * corpus_stats_uses_spent — has this entry been leaned on long enough?
  *
  * A wall-clock TTL bounds staleness in time, but the harm is proportional:
  * a thousand chunks added to a million barely move the weights, while the
@@ -265,15 +265,15 @@ static HTAB *corpus_stats_cache = NULL;
  * two-hundred-row one ten, and re-reading a two-hundred-row table is free.
  */
 static bool
-corpus_stats_stale_by_growth(const CorpusStatsEntry *entry)
+corpus_stats_uses_spent(const CorpusStatsEntry *entry)
 {
 	int64		budget;
 
-	if (pgedge_vectorizer_corpus_stats_cache_max_growth <= 0)
-		return false;			/* growth bound disabled; TTL only */
+	if (pgedge_vectorizer_corpus_stats_cache_max_uses_pct <= 0)
+		return false;			/* use bound disabled; TTL only */
 
 	budget = entry->total_docs
-		* pgedge_vectorizer_corpus_stats_cache_max_growth / 100;
+		* pgedge_vectorizer_corpus_stats_cache_max_uses_pct / 100;
 
 	return entry->uses_since_read >= Max(budget, 1);
 }
@@ -393,7 +393,7 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 		!TimestampDifferenceExceeds(entry->read_at, now,
 									pgedge_vectorizer_corpus_stats_cache_ttl
 									* 1000) &&
-		!corpus_stats_stale_by_growth(entry))
+		!corpus_stats_uses_spent(entry))
 	{
 		entry->uses_since_read++;
 		*avg_doc_len = entry->avg_doc_len;
