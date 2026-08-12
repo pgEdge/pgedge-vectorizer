@@ -302,6 +302,13 @@ static int64 bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len);
  * cached N that the data no longer contradicts, so it does not rescan to no
  * effect.  A natural expiry re-reads the true N and the check runs again.
  *
+ * The reading passed in may already have been fresh, in which case the read
+ * below is redundant.  That is left alone deliberately: it costs one extra
+ * scan, only for a table whose statistics are inconsistent, and only until
+ * max_df is adopted below, after which nothing contradicts the entry and the
+ * recheck stops firing.  Reporting cache hits back to the caller to avoid it
+ * would thread a flag through for a case that resolves itself.
+ *
  * Caller must have an active SPI connection.
  */
 static int64

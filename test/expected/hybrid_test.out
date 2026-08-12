@@ -812,6 +812,55 @@ SELECT split_part(split_part(
 RESET pgedge_vectorizer.corpus_stats_cache_ttl;
 DROP TABLE clamp_chunks, clamp_chunks_idf_stats;
 ---------------------------------------------------------------------------
+-- Test 26: a doc_freq above the cached corpus size re-reads it
+---------------------------------------------------------------------------
+-- doc_freq cannot exceed the corpus, so doc_freq above N is proof that the
+-- cached N is stale rather than merely inconvenient. Clamping the weight alone
+-- would leave the stale entry in place, so every later chunk in the window
+-- would be scored against the same wrong corpus and have it persisted. The use
+-- bound is disabled here so that only the re-read can refresh the entry.
+CREATE TABLE reread_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                            token_count INT);
+CREATE TABLE reread_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                      doc_freq INT NOT NULL);
+INSERT INTO reread_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 20);
+INSERT INTO reread_chunks_idf_stats VALUES ('alpha', 5);
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+SET pgedge_vectorizer.corpus_stats_cache_max_uses_pct = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS warm \gset
+-- The corpus grows and doc_freq passes the cached 20, staying under the truth.
+INSERT INTO reread_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 200);
+UPDATE reread_chunks_idf_stats SET doc_freq = 100 WHERE term = 'alpha';
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS r1 \gset
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS fresh \gset
+-- Merely clamping would score against doc_freq, 100, rather than the real 220.
+SELECT :'r1'::sparsevec = :'fresh'::sparsevec AS reread_matches_a_fresh_read;
+ reread_matches_a_fresh_read 
+-----------------------------
+ t
+(1 row)
+
+-- And the entry was repaired, not patched for one call: with doc_freq back
+-- below N nothing triggers a re-read, so this can only match if the cached
+-- corpus size is now the grown one.
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+UPDATE reread_chunks_idf_stats SET doc_freq = 5 WHERE term = 'alpha';
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS r2 \gset
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS fresh2 \gset
+SELECT :'r2'::sparsevec = :'fresh2'::sparsevec AS later_calls_use_the_refreshed_size;
+ later_calls_use_the_refreshed_size 
+------------------------------------
+ t
+(1 row)
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+RESET pgedge_vectorizer.corpus_stats_cache_max_uses_pct;
+DROP TABLE reread_chunks, reread_chunks_idf_stats;
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 SELECT pgedge_vectorizer.disable_vectorization(
