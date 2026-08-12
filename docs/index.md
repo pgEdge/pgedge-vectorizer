@@ -174,6 +174,7 @@ different use cases.
 | `pgedge_vectorizer.bm25_k1` | `1.2` | `0.0-3.0` | BM25 term-frequency saturation |
 | `pgedge_vectorizer.bm25_b` | `0.75` | `0.0-1.0` | BM25 document-length normalization |
 | `pgedge_vectorizer.corpus_stats_cache_ttl` | `60s` | `0-3600` | Seconds a backend reuses a chunk table's corpus size and mean document length before reading them again. Set to 0 to read them on every call |
+| `pgedge_vectorizer.corpus_stats_cache_max_growth` | `5` | `0-100` | Percent the corpus may grow before those cached figures are re-read, applied alongside the TTL so that whichever is reached first wins. Bounds staleness in proportion rather than in time, which matters most while a corpus is small and growing. Set to 0 to bound by time alone |
 
 For more information or to download Vectorizer visit:
 

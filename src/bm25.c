@@ -241,9 +241,42 @@ typedef struct
 	int64		total_docs;
 	float8		avg_doc_len;
 	TimestampTz	read_at;
+	int64		uses_since_read;
 } CorpusStatsEntry;
 
 static HTAB *corpus_stats_cache = NULL;
+
+/*
+ * corpus_stats_stale_by_growth — has the corpus plausibly moved too far?
+ *
+ * A wall-clock TTL bounds staleness in time, but the harm is proportional:
+ * a thousand chunks added to a million barely move the weights, while the
+ * same thousand added to two hundred change them several fold.  Worse, N is
+ * cached while doc_freq is read fresh, so a corpus that outgrows a stale N
+ * gives ln((N+1)/(df+0.5)) < 0 for a common term, and a negative score is
+ * dropped from the stored vector altogether.
+ *
+ * Each use of a cached entry is counted as one chunk that may have been
+ * added since, and the entry is re-read once that count reaches the given
+ * percentage of N.  That is a proxy, not a measurement: the worker does not
+ * insert chunk rows itself, and a search does not grow the corpus at all.
+ * It is deliberately pessimistic in the direction that matters, and it
+ * scales itself — a million-row corpus tolerates fifty thousand uses, a
+ * two-hundred-row one ten, and re-reading a two-hundred-row table is free.
+ */
+static bool
+corpus_stats_stale_by_growth(const CorpusStatsEntry *entry)
+{
+	int64		budget;
+
+	if (pgedge_vectorizer_corpus_stats_cache_max_growth <= 0)
+		return false;			/* growth bound disabled; TTL only */
+
+	budget = entry->total_docs
+		* pgedge_vectorizer_corpus_stats_cache_max_growth / 100;
+
+	return entry->uses_since_read >= Max(budget, 1);
+}
 
 /*
  * bm25_corpus_stats_uncached — read N and the mean document length.
@@ -355,11 +388,14 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 	now = GetCurrentTimestamp();
 	entry = hash_search(corpus_stats_cache, &relid, HASH_FIND, NULL);
 
+	/* Both bounds apply: whichever is reached first forces a re-read. */
 	if (entry != NULL &&
 		!TimestampDifferenceExceeds(entry->read_at, now,
 									pgedge_vectorizer_corpus_stats_cache_ttl
-									* 1000))
+									* 1000) &&
+		!corpus_stats_stale_by_growth(entry))
 	{
+		entry->uses_since_read++;
 		*avg_doc_len = entry->avg_doc_len;
 		return entry->total_docs;
 	}
@@ -377,6 +413,7 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 	entry->total_docs = total_docs;
 	entry->avg_doc_len = *avg_doc_len;
 	entry->read_at = now;
+	entry->uses_since_read = 0;
 
 	return total_docs;
 }

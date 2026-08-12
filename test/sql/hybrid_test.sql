@@ -559,6 +559,56 @@ DROP SCHEMA cache_tenant_a CASCADE;
 DROP SCHEMA cache_tenant_b CASCADE;
 
 ---------------------------------------------------------------------------
+-- Test 24: the corpus statistics cache re-reads once the corpus has grown
+---------------------------------------------------------------------------
+
+-- A time bound alone lets a small, fast-growing corpus go badly stale, and
+-- the figures are written into stored vectors rather than only used for a
+-- query. corpus_stats_cache_max_growth bounds staleness in proportion instead:
+-- at 5% of twenty documents, one cached use is allowed before a re-read.
+
+CREATE TABLE growth_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                            token_count INT);
+CREATE TABLE growth_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                      doc_freq INT NOT NULL);
+INSERT INTO growth_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 20);
+INSERT INTO growth_chunks_idf_stats VALUES ('alpha', 5);
+
+-- Long enough that the time bound cannot be what fires.
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+SET pgedge_vectorizer.corpus_stats_cache_max_growth = 5;
+
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS g1 \gset
+INSERT INTO growth_chunks (content, token_count)
+SELECT 'alpha', 900 FROM generate_series(1, 60);
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS g2 \gset
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS g3 \gset
+
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS gtruth \gset
+
+SELECT :'g1'::sparsevec = :'g2'::sparsevec AS use_within_budget_is_cached,
+       :'g1'::sparsevec <> :'g3'::sparsevec AS budget_spent_forces_reread,
+       :'g3'::sparsevec = :'gtruth'::sparsevec AS reread_matches_uncached;
+
+-- With the growth bound off, the same sequence stays on the stale figures.
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+SET pgedge_vectorizer.corpus_stats_cache_max_growth = 0;
+
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS h1 \gset
+INSERT INTO growth_chunks (content, token_count)
+SELECT 'alpha', 900 FROM generate_series(1, 200);
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS h2 \gset
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS h3 \gset
+
+SELECT :'h1'::sparsevec = :'h3'::sparsevec AS time_bound_alone_stays_stale;
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+RESET pgedge_vectorizer.corpus_stats_cache_max_growth;
+DROP TABLE growth_chunks, growth_chunks_idf_stats;
+
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 

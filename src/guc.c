@@ -52,6 +52,7 @@ bool   pgedge_vectorizer_enable_hybrid = false;
 double pgedge_vectorizer_bm25_k1       = 1.2;
 double pgedge_vectorizer_bm25_b        = 0.75;
 int    pgedge_vectorizer_corpus_stats_cache_ttl = 60;
+int    pgedge_vectorizer_corpus_stats_cache_max_growth = 5;
 
 /*
  * Initialize all GUC variables
@@ -328,6 +329,22 @@ pgedge_vectorizer_init_guc(void)
 		3600,   /* max */
 		PGC_USERSET,
 		GUC_UNIT_S,
+		NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+		"pgedge_vectorizer.corpus_stats_cache_max_growth",
+		"Percent the corpus may grow before cached figures are re-read",
+		"Bounds staleness in proportion rather than in time, which is how it "
+		"harms ranking: a thousand chunks added to a million barely move the "
+		"weights, the same thousand added to two hundred change them several "
+		"fold. Applied alongside corpus_stats_cache_ttl, whichever is reached "
+		"first. Set to 0 to bound by time alone.",
+		&pgedge_vectorizer_corpus_stats_cache_max_growth,
+		5,      /* default */
+		0,      /* min: 0 disables the growth bound */
+		100,    /* max */
+		PGC_USERSET,
+		0,
 		NULL, NULL, NULL);
 
 	elog(DEBUG1, "pgedge_vectorizer GUC variables initialized");
