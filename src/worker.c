@@ -242,10 +242,21 @@ queue_item_begin(int64 queue_id, int attempts, int max_attempts)
 static void
 queue_item_note_error(void)
 {
-	ErrorData  *edata;
+	ErrorData	   *edata;
+	MemoryContext	oldcontext;
 
 	if (failed_item_queue_id < 0)
 		return;
+
+	/*
+	 * CopyErrorData() copies into the current context and asserts it is not
+	 * ErrorContext, which is exactly where a PG_CATCH() body starts: errstart()
+	 * switches there and an error longjmps out without switching back.  Left
+	 * alone this aborts an assert-enabled build outright, and on a release
+	 * build the copy is freed under it by FlushErrorState().  The copy is only
+	 * needed until the message has been taken, so any other context will do.
+	 */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
 	edata = CopyErrorData();
 
@@ -253,6 +264,8 @@ queue_item_note_error(void)
 		strlcpy(failed_item_error, edata->message, sizeof(failed_item_error));
 
 	FreeErrorData(edata);
+
+	MemoryContextSwitchTo(oldcontext);
 }
 
 /*
