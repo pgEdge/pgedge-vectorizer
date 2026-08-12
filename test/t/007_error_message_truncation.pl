@@ -40,7 +40,13 @@ my $dbname = 'message_truncation';
 # Deliberately no pgedge_vectorizer.databases yet; see the comment in 004 about
 # why the database is named only once its extension exists.
 my $node = PostgreSQL::Test::Cluster->new('vectorizer_message_truncation');
-$node->init;
+
+# The encoding is pinned rather than inherited from whatever locale the developer
+# happens to be running under, because this test counts bytes: it relies on
+# U+4E16 occupying three of them, which is true of UTF-8 and not of everything
+# else. The fix under test is encoding-agnostic, since pg_mbcliplen() reads the
+# server encoding, but the arithmetic in the fixture below is not.
+$node->init(extra => [ '--locale=C', '--encoding=UTF8' ]);
 $node->append_conf(
 	'postgresql.conf', qq(
 shared_preload_libraries = 'pgedge_vectorizer'

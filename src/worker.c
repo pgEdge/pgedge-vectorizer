@@ -266,24 +266,32 @@ queue_item_note_error(void)
 	if (edata->message != NULL)
 	{
 		/*
-		 * Clipped on a character boundary rather than with strlcpy(), which
-		 * counts bytes.  A message longer than the buffer whose cut fell inside
-		 * a multi-byte character left a partial one behind, and that went on to
-		 * be stored: nothing between here and the UPDATE in
+		 * Clipped where a character ends rather than where the buffer does.
+		 * Clipping by bytes alone left a partial character behind whenever the
+		 * cut fell inside a multi-byte one, and that partial character went on
+		 * to be stored: nothing between here and the UPDATE in
 		 * queue_item_record_failure() validates the encoding, because SPI does
-		 * not cross the protocol boundary where input from a client is checked.
-		 * The column was left holding text that is invalid in the server
-		 * encoding, so reading it back with anything that walks characters
-		 * rather than bytes -- length(), or a client decoding it strictly --
-		 * fails on that row.  pg_mbcliplen() works in the server encoding and
-		 * allocates nothing, both of which matter here.
+		 * not cross the protocol boundary at which input from a client is
+		 * checked.  The column was left holding text that is invalid in the
+		 * server encoding, so reading it back with anything that walks
+		 * characters rather than bytes -- length(), or a client decoding it
+		 * strictly -- fails on that row.  pg_mbcliplen() works in the server
+		 * encoding and allocates nothing, both of which matter here.
+		 *
+		 * The length handed to it is measured with strnlen() bounded by the
+		 * buffer rather than with strlen(), as trim_whitespace() does and for
+		 * the same reason: nothing longer than the buffer can be kept anyway,
+		 * and the bound means we cannot over-read even if handed a message that
+		 * is somehow not NUL-terminated (CWE-126).  strlcpy() then gets the
+		 * clipped length plus its terminator, so it copies exactly as far as
+		 * pg_mbcliplen() allows.
 		 */
 		int			len = pg_mbcliplen(edata->message,
-									   strlen(edata->message),
+									   strnlen(edata->message,
+											   sizeof(failed_item_error)),
 									   sizeof(failed_item_error) - 1);
 
-		memcpy(failed_item_error, edata->message, len);
-		failed_item_error[len] = '\0';
+		strlcpy(failed_item_error, edata->message, len + 1);
 	}
 
 	FreeErrorData(edata);
