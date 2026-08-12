@@ -16,6 +16,7 @@
 #include <time.h>
 
 #include "commands/dbcommands.h"
+#include "mb/pg_wchar.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
@@ -263,7 +264,27 @@ queue_item_note_error(void)
 	edata = CopyErrorData();
 
 	if (edata->message != NULL)
-		strlcpy(failed_item_error, edata->message, sizeof(failed_item_error));
+	{
+		/*
+		 * Clipped on a character boundary rather than with strlcpy(), which
+		 * counts bytes.  A message longer than the buffer whose cut fell inside
+		 * a multi-byte character left a partial one behind, and that went on to
+		 * be stored: nothing between here and the UPDATE in
+		 * queue_item_record_failure() validates the encoding, because SPI does
+		 * not cross the protocol boundary where input from a client is checked.
+		 * The column was left holding text that is invalid in the server
+		 * encoding, so reading it back with anything that walks characters
+		 * rather than bytes -- length(), or a client decoding it strictly --
+		 * fails on that row.  pg_mbcliplen() works in the server encoding and
+		 * allocates nothing, both of which matter here.
+		 */
+		int			len = pg_mbcliplen(edata->message,
+									   strlen(edata->message),
+									   sizeof(failed_item_error) - 1);
+
+		memcpy(failed_item_error, edata->message, len);
+		failed_item_error[len] = '\0';
+	}
 
 	FreeErrorData(edata);
 
