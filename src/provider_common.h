@@ -14,6 +14,19 @@
 #include <curl/curl.h>
 
 /*
+ * Why the write callback could not grow the response buffer.  Kept apart
+ * because the two want different advice: one says the provider sent more than
+ * can be held, the other says this server is short of memory.  See
+ * provider_write_callback() for why the callback may not simply raise.
+ */
+typedef enum
+{
+	RESPONSE_GROW_OK = 0,
+	RESPONSE_GROW_TOO_LARGE,	/* would exceed MaxAllocSize */
+	RESPONSE_GROW_NO_MEMORY		/* allocation refused */
+} ResponseGrowFailure;
+
+/*
  * Response buffer for libcurl callbacks
  */
 typedef struct
@@ -21,9 +34,7 @@ typedef struct
 	char   *data;
 	size_t  size;		/* bytes of response held, excluding the terminator */
 	size_t  capacity;	/* bytes allocated in data, including the terminator */
-	bool    alloc_failed;	/* write callback could not grow data; see
-							 * provider_write_callback() for why it may not
-							 * simply raise an error */
+	ResponseGrowFailure grow_failure;
 } ResponseBuffer;
 
 /*
