@@ -242,10 +242,23 @@ queue_item_begin(int64 queue_id, int attempts, int max_attempts)
 static void
 queue_item_note_error(void)
 {
-	ErrorData  *edata;
+	ErrorData	   *edata;
+	MemoryContext	oldcontext;
 
 	if (failed_item_queue_id < 0)
 		return;
+
+	/*
+	 * CopyErrorData() copies into the current context and asserts it is not
+	 * ErrorContext, which is exactly where a PG_CATCH() body starts:
+	 * errfinish() switches there and deliberately leaves it set that way when
+	 * it re-throws.  Left alone this aborts an assert-enabled build outright;
+	 * on a release build it instead eats into the space ErrorContext reserves
+	 * so that reporting an error can never itself fail, which is what the
+	 * assertion protects.  The copy is only needed until the message has been
+	 * taken, so any other context will do.
+	 */
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
 	edata = CopyErrorData();
 
@@ -253,6 +266,8 @@ queue_item_note_error(void)
 		strlcpy(failed_item_error, edata->message, sizeof(failed_item_error));
 
 	FreeErrorData(edata);
+
+	MemoryContextSwitchTo(oldcontext);
 }
 
 /*
