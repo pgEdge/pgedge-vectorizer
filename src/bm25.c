@@ -263,6 +263,11 @@ static HTAB *corpus_stats_cache = NULL;
  * It is deliberately pessimistic in the direction that matters, and it
  * scales itself — a million-row corpus tolerates fifty thousand uses, a
  * two-hundred-row one ten, and re-reading a two-hundred-row table is free.
+ *
+ * The call that performs the read is not itself counted, so one read covers
+ * budget + 1 calls.  Counting it would mean no cached use at all wherever the
+ * budget works out to one, which is every corpus below 20 rows at the default
+ * 5%, and the small corpus is the case this bound exists to keep honest.
  */
 static bool
 corpus_stats_uses_spent(const CorpusStatsEntry *entry)

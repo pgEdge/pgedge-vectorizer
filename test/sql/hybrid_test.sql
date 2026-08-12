@@ -602,7 +602,10 @@ SELECT 'alpha', 900 FROM generate_series(1, 200);
 SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS h2 \gset
 SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS h3 \gset
 
-SELECT :'h1'::sparsevec = :'h3'::sparsevec AS time_bound_alone_stays_stale;
+-- All three, not just the ends: with the bound off no number of uses moves the
+-- figures, which is what distinguishes this from the block above.
+SELECT :'h1'::sparsevec = :'h2'::sparsevec
+       AND :'h2'::sparsevec = :'h3'::sparsevec AS time_bound_alone_stays_stale;
 
 RESET pgedge_vectorizer.corpus_stats_cache_ttl;
 RESET pgedge_vectorizer.corpus_stats_cache_max_uses_pct;
@@ -629,6 +632,13 @@ INSERT INTO clamp_chunks_idf_stats VALUES ('alpha', 5000);
 SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
 SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'clamp_chunks')
            <> '{}/65536'::sparsevec AS term_survives_df_over_n;
+
+-- And that it is underweighted rather than merely present: a term in every
+-- document carries almost no information, so bound the weight rather than
+-- restating the claim in a comment.
+SELECT split_part(split_part(
+           pgedge_vectorizer.bm25_query_vector('alpha', 'clamp_chunks')::text,
+           ':', 2), '}', 1)::float8 < 0.001 AS weight_is_near_zero;
 
 RESET pgedge_vectorizer.corpus_stats_cache_ttl;
 DROP TABLE clamp_chunks, clamp_chunks_idf_stats;
