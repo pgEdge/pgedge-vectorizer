@@ -14,10 +14,17 @@
 # that check is reached, though, so it is set to ollama, which is the one
 # provider whose init needs no API key.
 #
-# Every chunk holds the same single term and the same token_count, so
-# avg_doc_len cannot vary and doc_freq is fixed by hand. The corpus size is
-# then the only input that differs between the chunks compared below, and the
-# stored weights differ if and only if it was re-read.
+# Each of the three chunks carries its own single term, seeded at the same
+# doc_freq, and they all share a token_count. avg_doc_len therefore cannot
+# vary, and because the worker increments doc_freq only for the terms of the
+# chunk it just processed, one chunk's indexing cannot move another's. The
+# corpus size is the only input that differs between the weights compared
+# below, and they differ if and only if it was re-read.
+#
+# The idf_stats fixture must match the shape the extension creates, down to
+# updated_at: upsert_term_idf() writes that column, and bm25_update_idf_stats()
+# reduces any failure to a WARNING, so a fixture missing it leaves doc_freq
+# frozen and the test measuring the wrong thing while still passing.
 
 use strict;
 use warnings;
@@ -63,12 +70,14 @@ CREATE TABLE chunks (
     sparse_embedding sparsevec(65536)
 );
 CREATE TABLE chunks_idf_stats (
-    term      TEXT PRIMARY KEY,
-    doc_freq  INT NOT NULL
+    term        TEXT    PRIMARY KEY,
+    doc_freq    INT     NOT NULL DEFAULT 1,
+    updated_at  TIMESTAMPTZ DEFAULT now()
 );
 INSERT INTO chunks (source_id, chunk_index, content, token_count)
 SELECT g, 0, 'alpha', 10 FROM generate_series(1, 20) g;
-INSERT INTO chunks_idf_stats VALUES ('alpha', 5);
+INSERT INTO chunks_idf_stats (term, doc_freq)
+VALUES ('alpha', 5), ('beta', 5), ('gamma', 5);
 ));
 
 $node->append_conf('postgresql.conf',
@@ -120,7 +129,7 @@ SELECT g, 0, 'alpha', 10 FROM generate_series(100, 299) g
 $node->safe_psql(
 	$dbname, q(
 INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, status, metadata)
-VALUES (2, 'chunks', 'alpha', 'pending', '{"sparse_only": true}'::jsonb)
+VALUES (2, 'chunks', 'beta', 'pending', '{"sparse_only": true}'::jsonb)
 ));
 
 ok(await_sparse(2), 'the second queued chunk is indexed');
@@ -128,41 +137,48 @@ ok(await_sparse(2), 'the second queued chunk is indexed');
 $node->safe_psql(
 	$dbname, q(
 INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, status, metadata)
-VALUES (3, 'chunks', 'alpha', 'pending', '{"sparse_only": true}'::jsonb)
+VALUES (3, 'chunks', 'gamma', 'pending', '{"sparse_only": true}'::jsonb)
 ));
 
 ok(await_sparse(3), 'the third queued chunk is indexed');
 
+# Each chunk holds one term, so each vector holds one element, and the weight
+# is that element.  The terms differ between chunks, so the vectors cannot be
+# compared whole -- they occupy different dimensions -- and it is the weights
+# that carry the corpus size.
+my $weights = 'SELECT split_part(split_part(sparse_embedding::text, \':\', 2),
+                                 \'}\', 1)::float8 FROM chunks WHERE id = ';
+
 my $cached = $node->safe_psql($dbname,
-	'SELECT (SELECT sparse_embedding FROM chunks WHERE id = 1)
-          = (SELECT sparse_embedding FROM chunks WHERE id = 2)');
+	"SELECT abs(($weights 1) - ($weights 2)) < 1e-9");
 
 is($cached, 't',
 	'a use inside the budget is served from the cache, so the bound is not simply disabled');
 
-my $rereadd = $node->safe_psql($dbname,
-	'SELECT (SELECT sparse_embedding FROM chunks WHERE id = 1)
-         <> (SELECT sparse_embedding FROM chunks WHERE id = 3)');
+my $reread = $node->safe_psql($dbname,
+	"SELECT abs(($weights 1) - ($weights 3)) > 1e-9");
 
-is($rereadd, 't',
+is($reread, 't',
 	'once the budget is spent the worker re-reads the corpus, and the stored vector reflects it');
 
-# Pin down that the difference is the corpus size and nothing else: the weight
-# is idf * a constant, so the ratio of the two stored weights must be the ratio
-# of ln((N+1)/(df+0.5)) at N = 220 and at N = 20, with df = 5.
-my $ratio = $node->safe_psql(
-	$dbname, q(
-WITH w AS (
-    SELECT (SELECT (sparse_embedding::text)::jsonb IS NOT NULL FROM chunks WHERE id = 1) AS ignored,
-           (SELECT split_part(split_part(sparse_embedding::text, ':', 2), '}', 1)::float8
-              FROM chunks WHERE id = 1) AS w1,
-           (SELECT split_part(split_part(sparse_embedding::text, ':', 2), '}', 1)::float8
-              FROM chunks WHERE id = 3) AS w3
-)
-SELECT abs(w3 / w1 - ln(221.0 / 5.5) / ln(21.0 / 5.5)) < 0.01 FROM w
-));
+# Pin down that the difference is the corpus size and nothing else: the tf
+# factor cancels because tf and token_count match across the three, so the
+# stored weight is exactly the IDF, and the ratio of the two must be that of
+# ln((N+1)/(df+0.5)) at N = 220 and at N = 20, both at the seeded df of 5.
+my $ratio = $node->safe_psql($dbname,
+	"SELECT abs(($weights 3) / ($weights 1)
+	            - ln(221.0 / 5.5) / ln(21.0 / 5.5)) < 0.01");
 
 is($ratio, 't',
 	'the re-read weight is exactly what the grown corpus size gives, not merely different');
+
+# The premise of all of the above: doc_freq must actually be maintained, or the
+# fixture is silently wrong in a way that leaves the weights comparable by
+# accident.  The worker increments each processed chunk's own term.
+my $df = $node->safe_psql($dbname,
+	"SELECT string_agg(doc_freq::text, ',' ORDER BY term) FROM chunks_idf_stats");
+
+is($df, '6,6,6',
+	'doc_freq is incremented for each processed term, so the fixture matches what the extension writes');
 
 done_testing();
