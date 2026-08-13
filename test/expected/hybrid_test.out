@@ -861,6 +861,63 @@ RESET pgedge_vectorizer.corpus_stats_cache_ttl;
 RESET pgedge_vectorizer.corpus_stats_cache_max_uses_pct;
 DROP TABLE reread_chunks, reread_chunks_idf_stats;
 ---------------------------------------------------------------------------
+-- Test 27: statistics a re-read cannot reconcile are adopted, not re-scanned
+---------------------------------------------------------------------------
+-- Test 26 covers the doc_freq that a re-read explains. This covers the one it
+-- does not: a doc_freq left above the true corpus size by an earlier failure,
+-- which no amount of re-reading will bring back under it. Re-reading on every
+-- call would then scan the table forever to reach the same answer, so the
+-- largest doc_freq is adopted as the entry's corpus size and the contradiction
+-- stops. The use bound is off so that only the re-read can refresh the entry.
+CREATE TABLE adopt_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                           token_count INT);
+CREATE TABLE adopt_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                     doc_freq INT NOT NULL);
+INSERT INTO adopt_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 10);
+INSERT INTO adopt_chunks_idf_stats VALUES ('alpha', 5000);
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+SET pgedge_vectorizer.corpus_stats_cache_max_uses_pct = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'adopt_chunks') AS a1 \gset
+-- The term survives, as in test 25, but by the cached path rather than the
+-- uncached one: this is the branch that writes a corpus size the table never
+-- reported into the entry, and a term dropped here would be persisted.
+SELECT :'a1'::sparsevec <> '{}/65536'::sparsevec AS term_survives_when_unreconcilable;
+ term_survives_when_unreconcilable 
+-----------------------------------
+ t
+(1 row)
+
+-- Grow the corpus with documents an order of magnitude longer. The corpus size
+-- alone would not show a second re-read, since a fresh reading is still below
+-- doc_freq and 5000 would be adopted again, but the mean document length would:
+-- it is read by the same scan and is not clamped by anything.
+INSERT INTO adopt_chunks (content, token_count)
+SELECT 'alpha', 1000 FROM generate_series(1, 200);
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'adopt_chunks') AS a2 \gset
+-- Unchanged, so the second call neither re-read nor contradicted the entry:
+-- doc_freq was written into it rather than substituted for one call.
+SELECT :'a1'::sparsevec = :'a2'::sparsevec AS adopted_size_ends_the_rescan;
+ adopted_size_ends_the_rescan 
+------------------------------
+ t
+(1 row)
+
+-- And what was adopted is doc_freq itself, not some other figure: at N = df the
+-- term appears in every document and carries almost no information, so the
+-- weight lands just above zero, where the real size of ten would have put it
+-- below zero and lost the term.
+SELECT split_part(split_part(:'a1', ':', 2), '}', 1)::float8 < 0.001
+           AS adopted_size_is_the_doc_freq;
+ adopted_size_is_the_doc_freq 
+------------------------------
+ t
+(1 row)
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+RESET pgedge_vectorizer.corpus_stats_cache_max_uses_pct;
+DROP TABLE adopt_chunks, adopt_chunks_idf_stats;
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 SELECT pgedge_vectorizer.disable_vectorization(
