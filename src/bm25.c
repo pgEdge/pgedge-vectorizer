@@ -241,9 +241,109 @@ typedef struct
 	int64		total_docs;
 	float8		avg_doc_len;
 	TimestampTz	read_at;
+	int64		uses_since_read;
 } CorpusStatsEntry;
 
 static HTAB *corpus_stats_cache = NULL;
+
+/*
+ * corpus_stats_uses_spent — has this entry been leaned on long enough?
+ *
+ * A wall-clock TTL bounds staleness in time, but the harm is proportional:
+ * a thousand chunks added to a million barely move the weights, while the
+ * same thousand added to two hundred change them several fold.  Worse, N is
+ * cached while doc_freq is read fresh, so a corpus that outgrows a stale N
+ * gives ln((N+1)/(df+0.5)) < 0 for a common term, and a negative score is
+ * dropped from the stored vector altogether.
+ *
+ * Each use of a cached entry is counted as one chunk that may have been
+ * added since, and the entry is re-read once that count reaches the given
+ * percentage of N.  That is a proxy, not a measurement: the worker does not
+ * insert chunk rows itself, and a search does not grow the corpus at all.
+ * It is deliberately pessimistic in the direction that matters, and it
+ * scales itself — a million-row corpus tolerates fifty thousand uses, a
+ * two-hundred-row one ten, and re-reading a two-hundred-row table is free.
+ *
+ * The call that performs the read is not itself counted, so one read covers
+ * budget + 1 calls.  Counting it would mean no cached use at all wherever the
+ * budget works out to one, which is every corpus below 20 rows at the default
+ * 5%, and the small corpus is the case this bound exists to keep honest.
+ */
+static bool
+corpus_stats_uses_spent(const CorpusStatsEntry *entry)
+{
+	int64		budget;
+
+	if (pgedge_vectorizer_corpus_stats_cache_max_uses_pct <= 0)
+		return false;			/* use bound disabled; TTL only */
+
+	budget = entry->total_docs
+		* pgedge_vectorizer_corpus_stats_cache_max_uses_pct / 100;
+
+	return entry->uses_since_read >= Max(budget, 1);
+}
+
+static int64 bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len);
+
+/*
+ * bm25_corpus_stats_recheck — the data contradicts the cached corpus size.
+ *
+ * A term cannot appear in more documents than exist, so doc_freq above N is
+ * proof that the cached N is stale: doc_freq is read fresh on every call while
+ * N may be up to a TTL old.  Clamping the weight alone would leave the stale
+ * entry in place, so every later chunk in the same window would be scored, and
+ * have persisted into sparse_embedding, against the same wrong corpus.  Drop
+ * the entry and read again, which repairs this document and every one after it.
+ *
+ * If the fresh reading is still below max_df then the statistics are
+ * inconsistent rather than stale — a doc_freq left too high by an earlier
+ * failure, say — and re-reading cannot fix that.  Adopt max_df as this entry's
+ * corpus size in that case: the weights stay sane, and the next call sees a
+ * cached N that the data no longer contradicts, so it does not rescan to no
+ * effect.  A natural expiry re-reads the true N and the check runs again.
+ *
+ * The reading passed in may already have been fresh, in which case the read
+ * below is redundant.  That is left alone deliberately: it costs one extra
+ * scan, only for a table whose statistics are inconsistent, and only until
+ * max_df is adopted below, after which nothing contradicts the entry and the
+ * recheck stops firing.  Reporting cache hits back to the caller to avoid it
+ * would thread a flag through for a case that resolves itself.
+ *
+ * Caller must have an active SPI connection.
+ */
+static int64
+bm25_corpus_stats_recheck(const char *chunk_table, float8 *avg_doc_len,
+						  int64 max_df)
+{
+	Oid			relid;
+	int64		total_docs;
+
+	/* Nothing is cached to be stale, so the reading was already fresh. */
+	if (pgedge_vectorizer_corpus_stats_cache_ttl <= 0 ||
+		corpus_stats_cache == NULL)
+		return max_df;
+
+	relid = RelnameGetRelid(chunk_table);
+	if (!OidIsValid(relid))
+		return max_df;
+
+	hash_search(corpus_stats_cache, &relid, HASH_REMOVE, NULL);
+
+	total_docs = bm25_corpus_stats(chunk_table, avg_doc_len);
+
+	if (max_df > total_docs)
+	{
+		CorpusStatsEntry *entry;
+
+		entry = hash_search(corpus_stats_cache, &relid, HASH_FIND, NULL);
+		if (entry != NULL)
+			entry->total_docs = max_df;
+
+		total_docs = max_df;
+	}
+
+	return total_docs;
+}
 
 /*
  * bm25_corpus_stats_uncached — read N and the mean document length.
@@ -355,11 +455,14 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 	now = GetCurrentTimestamp();
 	entry = hash_search(corpus_stats_cache, &relid, HASH_FIND, NULL);
 
+	/* Both bounds apply: whichever is reached first forces a re-read. */
 	if (entry != NULL &&
 		!TimestampDifferenceExceeds(entry->read_at, now,
 									pgedge_vectorizer_corpus_stats_cache_ttl
-									* 1000))
+									* 1000) &&
+		!corpus_stats_uses_spent(entry))
 	{
+		entry->uses_since_read++;
 		*avg_doc_len = entry->avg_doc_len;
 		return entry->total_docs;
 	}
@@ -377,6 +480,7 @@ bm25_corpus_stats(const char *chunk_table, float8 *avg_doc_len)
 	entry->total_docs = total_docs;
 	entry->avg_doc_len = *avg_doc_len;
 	entry->read_at = now;
+	entry->uses_since_read = 0;
 
 	return total_docs;
 }
@@ -426,6 +530,9 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens,
 	HTAB            *htab = NULL;
 	HASHCTL          ctl;
 	int64            total_docs = 1;
+	int64            max_df = 0;
+	IdfStat         *rows = NULL;
+	int              nrows = 0;
 	Datum            terms;
 	Oid              argtype = TEXTARRAYOID;
 
@@ -544,9 +651,39 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens,
 					   &ctl,
 					   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
-	for (int i = 0; i < (int) SPI_processed; i++)
+	/*
+	 * Take the rows out of SPI_tuptable before anything else runs a query.
+	 * The recheck below reads the corpus again, and SPI_execute() replaces
+	 * SPI_tuptable, so a loop still reading from it would decode that result
+	 * as (term, doc_freq).  read_idf_row() already copies the term, so the
+	 * array outlives the tuptable.
+	 *
+	 * The largest doc_freq is wanted before any weight is computed.  A term
+	 * cannot appear in more documents than exist, so a doc_freq above the
+	 * corpus size means the corpus size is wrong: it may be a cached reading
+	 * while every doc_freq here was read fresh.  Taking one maximum also
+	 * means one corpus size covers the whole document -- weighting each term
+	 * against its own would leave two terms of one chunk scored against
+	 * different corpora, which BM25 does not contemplate.
+	 */
+	nrows = (int) SPI_processed;
+	rows  = (IdfStat *) palloc(nrows * sizeof(IdfStat));
+
+	for (int i = 0; i < nrows; i++)
 	{
-		IdfStat       row   = read_idf_row(SPI_tuptable, i);
+		rows[i] = read_idf_row(SPI_tuptable, i);
+
+		if ((int64) rows[i].doc_freq > max_df)
+			max_df = (int64) rows[i].doc_freq;
+	}
+
+	if (max_df > total_docs)
+		total_docs = bm25_corpus_stats_recheck(chunk_table, avg_doc_len,
+											   max_df);
+
+	for (int i = 0; i < nrows; i++)
+	{
+		IdfStat       row   = rows[i];
 		bool          found;
 		IdfHashEntry *entry;
 
@@ -566,6 +703,8 @@ bm25_load_idf_stats(const char *chunk_table, BM25Term *tokens, int ntokens,
 		}
 		/* Duplicate terms: keep the first weight encountered */
 	}
+
+	pfree(rows);
 
 	return htab;
 }

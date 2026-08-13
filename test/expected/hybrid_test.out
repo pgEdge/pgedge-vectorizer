@@ -724,6 +724,200 @@ NOTICE:  drop cascades to 2 other objects
 DETAIL:  drop cascades to table cache_tenant_b.t_chunks
 drop cascades to table cache_tenant_b.t_chunks_idf_stats
 ---------------------------------------------------------------------------
+-- Test 24: the corpus statistics cache re-reads once the corpus has grown
+---------------------------------------------------------------------------
+-- A time bound alone lets a small, fast-growing corpus go badly stale, and
+-- the figures are written into stored vectors rather than only used for a
+-- query. corpus_stats_cache_max_uses_pct bounds staleness in proportion instead:
+-- at 5% of twenty documents, one cached use is allowed before a re-read.
+CREATE TABLE growth_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                            token_count INT);
+CREATE TABLE growth_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                      doc_freq INT NOT NULL);
+INSERT INTO growth_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 20);
+INSERT INTO growth_chunks_idf_stats VALUES ('alpha', 5);
+-- Long enough that the time bound cannot be what fires.
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+SET pgedge_vectorizer.corpus_stats_cache_max_uses_pct = 5;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS g1 \gset
+INSERT INTO growth_chunks (content, token_count)
+SELECT 'alpha', 900 FROM generate_series(1, 60);
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS g2 \gset
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS g3 \gset
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS gtruth \gset
+SELECT :'g1'::sparsevec = :'g2'::sparsevec AS use_within_budget_is_cached,
+       :'g1'::sparsevec <> :'g3'::sparsevec AS budget_spent_forces_reread,
+       :'g3'::sparsevec = :'gtruth'::sparsevec AS reread_matches_uncached;
+ use_within_budget_is_cached | budget_spent_forces_reread | reread_matches_uncached 
+-----------------------------+----------------------------+-------------------------
+ t                           | t                          | t
+(1 row)
+
+-- With the use bound off, the same sequence stays on the stale figures.
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+SET pgedge_vectorizer.corpus_stats_cache_max_uses_pct = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS h1 \gset
+INSERT INTO growth_chunks (content, token_count)
+SELECT 'alpha', 900 FROM generate_series(1, 200);
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS h2 \gset
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'growth_chunks') AS h3 \gset
+-- All three, not just the ends: with the bound off no number of uses moves the
+-- figures, which is what distinguishes this from the block above.
+SELECT :'h1'::sparsevec = :'h2'::sparsevec
+       AND :'h2'::sparsevec = :'h3'::sparsevec AS time_bound_alone_stays_stale;
+ time_bound_alone_stays_stale 
+------------------------------
+ t
+(1 row)
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+RESET pgedge_vectorizer.corpus_stats_cache_max_uses_pct;
+DROP TABLE growth_chunks, growth_chunks_idf_stats;
+---------------------------------------------------------------------------
+-- Test 25: a doc_freq larger than the corpus does not lose the term
+---------------------------------------------------------------------------
+-- doc_freq is read fresh while the corpus size may be cached, so doc_freq
+-- can outrun it. Unclamped that makes ln((N+1)/(df+0.5)) negative, and a
+-- negative score is dropped, so the term vanishes from the vector rather
+-- than merely being underweighted. The weight below is near zero, which is
+-- what a term appearing in every document should score.
+CREATE TABLE clamp_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                           token_count INT);
+CREATE TABLE clamp_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                     doc_freq INT NOT NULL);
+INSERT INTO clamp_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 10);
+INSERT INTO clamp_chunks_idf_stats VALUES ('alpha', 5000);
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'clamp_chunks')
+           <> '{}/65536'::sparsevec AS term_survives_df_over_n;
+ term_survives_df_over_n 
+-------------------------
+ t
+(1 row)
+
+-- And that it is underweighted rather than merely present: a term in every
+-- document carries almost no information, so bound the weight rather than
+-- restating the claim in a comment.
+SELECT split_part(split_part(
+           pgedge_vectorizer.bm25_query_vector('alpha', 'clamp_chunks')::text,
+           ':', 2), '}', 1)::float8 < 0.001 AS weight_is_near_zero;
+ weight_is_near_zero 
+---------------------
+ t
+(1 row)
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+DROP TABLE clamp_chunks, clamp_chunks_idf_stats;
+---------------------------------------------------------------------------
+-- Test 26: a doc_freq above the cached corpus size re-reads it
+---------------------------------------------------------------------------
+-- doc_freq cannot exceed the corpus, so doc_freq above N is proof that the
+-- cached N is stale rather than merely inconvenient. Clamping the weight alone
+-- would leave the stale entry in place, so every later chunk in the window
+-- would be scored against the same wrong corpus and have it persisted. The use
+-- bound is disabled here so that only the re-read can refresh the entry.
+CREATE TABLE reread_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                            token_count INT);
+CREATE TABLE reread_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                      doc_freq INT NOT NULL);
+INSERT INTO reread_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 20);
+INSERT INTO reread_chunks_idf_stats VALUES ('alpha', 5);
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+SET pgedge_vectorizer.corpus_stats_cache_max_uses_pct = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS warm \gset
+-- The corpus grows and doc_freq passes the cached 20, staying under the truth.
+INSERT INTO reread_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 200);
+UPDATE reread_chunks_idf_stats SET doc_freq = 100 WHERE term = 'alpha';
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS r1 \gset
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS fresh \gset
+-- Merely clamping would score against doc_freq, 100, rather than the real 220.
+SELECT :'r1'::sparsevec = :'fresh'::sparsevec AS reread_matches_a_fresh_read;
+ reread_matches_a_fresh_read 
+-----------------------------
+ t
+(1 row)
+
+-- And the entry was repaired, not patched for one call: with doc_freq back
+-- below N nothing triggers a re-read, so this can only match if the cached
+-- corpus size is now the grown one.
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+UPDATE reread_chunks_idf_stats SET doc_freq = 5 WHERE term = 'alpha';
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS r2 \gset
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'reread_chunks') AS fresh2 \gset
+SELECT :'r2'::sparsevec = :'fresh2'::sparsevec AS later_calls_use_the_refreshed_size;
+ later_calls_use_the_refreshed_size 
+------------------------------------
+ t
+(1 row)
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+RESET pgedge_vectorizer.corpus_stats_cache_max_uses_pct;
+DROP TABLE reread_chunks, reread_chunks_idf_stats;
+---------------------------------------------------------------------------
+-- Test 27: statistics a re-read cannot reconcile are adopted, not re-scanned
+---------------------------------------------------------------------------
+-- Test 26 covers the doc_freq that a re-read explains. This covers the one it
+-- does not: a doc_freq left above the true corpus size by an earlier failure,
+-- which no amount of re-reading will bring back under it. Re-reading on every
+-- call would then scan the table forever to reach the same answer, so the
+-- largest doc_freq is adopted as the entry's corpus size and the contradiction
+-- stops. The use bound is off so that only the re-read can refresh the entry.
+CREATE TABLE adopt_chunks (id BIGSERIAL PRIMARY KEY, content TEXT,
+                           token_count INT);
+CREATE TABLE adopt_chunks_idf_stats (term TEXT PRIMARY KEY,
+                                     doc_freq INT NOT NULL);
+INSERT INTO adopt_chunks (content, token_count)
+SELECT 'alpha', 10 FROM generate_series(1, 10);
+INSERT INTO adopt_chunks_idf_stats VALUES ('alpha', 5000);
+SET pgedge_vectorizer.corpus_stats_cache_ttl = 3600;
+SET pgedge_vectorizer.corpus_stats_cache_max_uses_pct = 0;
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'adopt_chunks') AS a1 \gset
+-- The term survives, as in test 25, but by the cached path rather than the
+-- uncached one: this is the branch that writes a corpus size the table never
+-- reported into the entry, and a term dropped here would be persisted.
+SELECT :'a1'::sparsevec <> '{}/65536'::sparsevec AS term_survives_when_unreconcilable;
+ term_survives_when_unreconcilable 
+-----------------------------------
+ t
+(1 row)
+
+-- Grow the corpus with documents an order of magnitude longer. The corpus size
+-- alone would not show a second re-read, since a fresh reading is still below
+-- doc_freq and 5000 would be adopted again, but the mean document length would:
+-- it is read by the same scan and is not clamped by anything.
+INSERT INTO adopt_chunks (content, token_count)
+SELECT 'alpha', 1000 FROM generate_series(1, 200);
+SELECT pgedge_vectorizer.bm25_query_vector('alpha', 'adopt_chunks') AS a2 \gset
+-- Unchanged, so the second call neither re-read nor contradicted the entry:
+-- doc_freq was written into it rather than substituted for one call.
+SELECT :'a1'::sparsevec = :'a2'::sparsevec AS adopted_size_ends_the_rescan;
+ adopted_size_ends_the_rescan 
+------------------------------
+ t
+(1 row)
+
+-- And what was adopted is doc_freq itself, not some other figure: at N = df the
+-- term appears in every document and carries almost no information, so the
+-- weight lands just above zero, where the real size of ten would have put it
+-- below zero and lost the term.
+SELECT split_part(split_part(:'a1', ':', 2), '}', 1)::float8 < 0.001
+           AS adopted_size_is_the_doc_freq;
+ adopted_size_is_the_doc_freq 
+------------------------------
+ t
+(1 row)
+
+RESET pgedge_vectorizer.corpus_stats_cache_ttl;
+RESET pgedge_vectorizer.corpus_stats_cache_max_uses_pct;
+DROP TABLE adopt_chunks, adopt_chunks_idf_stats;
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 SELECT pgedge_vectorizer.disable_vectorization(
