@@ -65,8 +65,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the answer could not have changed. Two settings bound how stale a cached
   reading may become, and whichever is reached first triggers a re-read:
     - `pgedge_vectorizer.corpus_stats_cache_ttl` (default 60 seconds) bounds it
-      in time. Setting it to 0 disables the cache entirely, restoring the
-      previous behaviour exactly.
+      in time. Setting it to 0 disables the cache entirely, so the figures are
+      read afresh on every call as they were before.
     - `pgedge_vectorizer.corpus_stats_cache_max_uses_pct` (default 5) bounds it
       in proportion to the corpus, which is how staleness actually harms
       ranking: a thousand chunks added to a million barely move the weights,
@@ -74,6 +74,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
       Each use of a cached reading counts as one chunk that may have been added
       since — a proxy rather than a measurement, so searches spend the budget
       too. Setting it to 0 bounds by time alone.
+
+  A cached reading is also dropped and read again, whichever of the two bounds
+  it is still within, when a term's document frequency comes back above the
+  cached corpus size: a term cannot appear in more documents than exist, so that
+  is proof the cached size is stale rather than merely old. An operator watching
+  for the scan should expect it from this as well as from the two settings. If
+  the fresh reading still contradicts the data then the statistics are
+  inconsistent rather than stale, and re-reading cannot fix that, so the largest
+  observed document frequency is adopted as the corpus size for the rest of that
+  entry's life; the weights stay sane, and nothing rescans to no effect until
+  the entry expires and the true size is read again.
 
   The figures feed a ranking heuristic rather than an account that has to
   balance, and during ingest they are a moving target in any case, so holding
@@ -131,6 +142,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- A BM25 term whose document frequency exceeded the corpus size is no longer
+  dropped from the sparse vector altogether. The IDF is
+  `ln((N + 1) / (df + 0.5))`, which goes negative once `df` passes `N`, and only
+  scores above zero are kept, so the term vanished rather than merely being
+  underweighted. `df` can outrun `N` whenever the two disagree: the corpus size
+  may be a cached reading whilst every document frequency is read fresh, and a
+  decrement that failed part way through a delete leaves the stored frequency
+  too high indefinitely. The corpus size is now taken as at least the largest
+  document frequency being weighted against it, which changes nothing in the
+  ordinary case where `N >= df`, and a common term is scored at close to zero,
+  which is what a term appearing in every document should carry. Because the
+  worker writes what it computes into `sparse_embedding`, the dropped term was
+  persisted rather than recomputed on the next search.
 - Fixed BM25 length normalisation being driven by an incorrect average document
   length, which suppressed the sparse half of hybrid search. `AVG()` over the
   integer `token_count` column returns `numeric`, whose `Datum` is a pointer,
