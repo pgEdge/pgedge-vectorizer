@@ -32,7 +32,7 @@ DATA = sql/$(EXTENSION)--$(EXTVERSION).sql \
        sql/$(EXTENSION)--1.0-beta3--1.0.sql
 
 # Test configuration for pg_regress
-REGRESS = setup chunking hybrid_chunking queue delete_truncate delete_truncate_pk pk_type_session max_retries vectorization multi_column maintenance edge_cases providers worker cleanup embedding pk_types stale_embeddings hybrid_test
+REGRESS = setup chunking multibyte_chunking hybrid_chunking queue delete_truncate delete_truncate_pk pk_type_session max_retries vectorization multi_column maintenance edge_cases providers worker cleanup embedding pk_types stale_embeddings hybrid_test
 REGRESS_OPTS = --inputdir=test --outputdir=test
 
 # Documentation files (if any)

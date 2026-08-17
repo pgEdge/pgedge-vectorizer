@@ -1,0 +1,230 @@
+-- Multibyte chunking test
+--
+-- Chunk boundaries are byte offsets derived from a character count, so a
+-- boundary can land inside a multi-byte character. Nothing between the chunker
+-- and the chunk table validates the encoding -- cstring_to_text() does not --
+-- so the fragment is stored, and any later read that walks characters rather
+-- than bytes fails on that row. length() is the one used below; a client
+-- decoding strictly fails the same way. This is the fault fixed in
+-- queue_item_note_error() for error messages, one layer up.
+--
+-- Only reachable with pgedge_vectorizer.strip_non_ascii off, which is why it
+-- went unnoticed: the default turns every non-ASCII byte into a space, so
+-- nothing multi-byte ever reaches the boundary arithmetic. Off is what you set
+-- to keep non-English content.
+--
+-- strip_non_ascii is PGC_SIGHUP, so it is changed here with ALTER SYSTEM plus
+-- a reload rather than a plain SET, and \c to pick the new value up in a fresh
+-- backend -- see the longer explanation in max_retries.sql. It is reset at the
+-- end because ALTER SYSTEM is cluster-wide state that must not leak into later
+-- test files.
+--
+-- Two-, three- and four-byte characters are each covered: the overshoot is in
+-- how far past the character's lead byte the cursor stops, so its size is the
+-- variable. Assumes a UTF-8 database, as delete_truncate.sql does.
+---------------------------------------------------------------------------
+-- The default: strip_non_ascii = on
+---------------------------------------------------------------------------
+-- Nothing here asserted the documented default behaviour before, so pin it.
+SHOW pgedge_vectorizer.strip_non_ascii;
+ pgedge_vectorizer.strip_non_ascii 
+-----------------------------------
+ on
+(1 row)
+
+-- A run of non-ASCII becomes a single space, not one per character. The
+-- collapse tests the last byte already written, so a run that already follows
+-- a space contributes nothing and the space on the far side survives: two
+-- spaces here, not one.
+SELECT quote_literal(c) AS run_between_words
+  FROM unnest(pgedge_vectorizer.chunk_text('alpha ★★★ beta',
+                                           'token_based', 100, 0)) c;
+ run_between_words 
+-------------------
+ 'alpha  beta'
+(1 row)
+
+-- With no preceding output to append to, a leading run is dropped rather than
+-- becoming a leading space.
+SELECT quote_literal(c) AS leading_run
+  FROM unnest(pgedge_vectorizer.chunk_text('★★★alpha',
+                                           'token_based', 100, 0)) c;
+ leading_run 
+-------------
+ 'alpha'
+(1 row)
+
+-- A four-byte character between two ASCII ones still yields exactly one space.
+SELECT quote_literal(c) AS four_byte_between_words
+  FROM unnest(pgedge_vectorizer.chunk_text('a🙂b',
+                                           'token_based', 100, 0)) c;
+ four_byte_between_words 
+-------------------------
+ 'a b'
+(1 row)
+
+-- Text that is entirely non-ASCII strips to nothing, so there is no chunk.
+SELECT count(*) AS chunks_for_all_non_ascii
+  FROM unnest(pgedge_vectorizer.chunk_text('★★★',
+                                           'token_based', 100, 0)) c;
+ chunks_for_all_non_ascii 
+--------------------------
+                        0
+(1 row)
+
+---------------------------------------------------------------------------
+-- strip_non_ascii = off: chunks must not split a character in half
+---------------------------------------------------------------------------
+ALTER SYSTEM SET pgedge_vectorizer.strip_non_ascii = off;
+SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+\c
+SHOW pgedge_vectorizer.strip_non_ascii;
+ pgedge_vectorizer.strip_non_ascii 
+-----------------------------------
+ off
+(1 row)
+
+-- Three-byte characters with nothing for the break finder to latch onto, so
+-- every boundary falls where the token estimate put it. length() raises on a
+-- chunk that ends mid-character, so summing it both proves validity and checks
+-- that no characters were lost.
+SELECT count(*) AS nchunks, sum(length(c)) AS total_chars
+  FROM unnest(pgedge_vectorizer.chunk_text(repeat('漢', 200),
+                                           'token_based', 10, 0)) c;
+ nchunks | total_chars 
+---------+-------------
+       5 |         200
+(1 row)
+
+-- Per chunk, so a boundary that is character-aligned but wrongly sized is
+-- caught too. Three bytes per character throughout.
+SELECT n, length(c) AS chars, octet_length(c) AS bytes
+  FROM unnest(pgedge_vectorizer.chunk_text(repeat('漢', 200),
+                                           'token_based', 10, 0))
+       WITH ORDINALITY AS t(c, n)
+ ORDER BY n;
+ n | chars | bytes 
+---+-------+-------
+ 1 |    40 |   120
+ 2 |    40 |   120
+ 3 |    40 |   120
+ 4 |    40 |   120
+ 5 |    40 |   120
+(5 rows)
+
+-- Two-byte characters.
+SELECT count(*) AS nchunks, sum(length(c)) AS total_chars
+  FROM unnest(pgedge_vectorizer.chunk_text(repeat('é', 200),
+                                           'token_based', 10, 0)) c;
+ nchunks | total_chars 
+---------+-------------
+       5 |         200
+(1 row)
+
+-- Four-byte characters.
+SELECT count(*) AS nchunks, sum(length(c)) AS total_chars
+  FROM unnest(pgedge_vectorizer.chunk_text(repeat('🙂', 100),
+                                           'token_based', 10, 0)) c;
+ nchunks | total_chars 
+---------+-------------
+       3 |         100
+(1 row)
+
+-- Control: the same script with ASCII spaces in it already passed, because
+-- find_good_break_point() returns the offset of a space and an ASCII byte
+-- cannot occur inside a multi-byte sequence. Keep it, so a fix that aligns
+-- boundaries by moving them cannot quietly change where the breaks land.
+SELECT count(*) AS nchunks, sum(length(c)) AS total_chars
+  FROM unnest(pgedge_vectorizer.chunk_text(
+                  array_to_string(array_fill('漢字熟語'::text, ARRAY[50]), ' '),
+                  'token_based', 10, 0)) c;
+ nchunks | total_chars 
+---------+-------------
+      10 |         240
+(1 row)
+
+-- Overlap makes the chunker take a second byte offset inside a chunk it has
+-- already cut, so cover it as well.
+SELECT count(*) > 1 AS several_chunks, sum(length(c)) >= 200 AS no_chars_lost
+  FROM unnest(pgedge_vectorizer.chunk_text(repeat('漢', 200),
+                                           'token_based', 10, 4)) c;
+ several_chunks | no_chars_lost 
+----------------+---------------
+ t              | t
+(1 row)
+
+-- The hybrid and markdown strategies split oversized elements through the same
+-- two functions, so they inherit the fault and must inherit the fix.
+SELECT sum(length(c)) > 0 AS hybrid_chunks_valid
+  FROM unnest(pgedge_vectorizer.chunk_text(
+                  '# 見出し' || chr(10) || chr(10) || repeat('漢', 200),
+                  'hybrid', 10, 0)) c;
+ hybrid_chunks_valid 
+---------------------
+ t
+(1 row)
+
+SELECT sum(length(c)) > 0 AS markdown_chunks_valid
+  FROM unnest(pgedge_vectorizer.chunk_text(
+                  '# 見出し' || chr(10) || chr(10) || repeat('漢', 200),
+                  'markdown', 10, 0)) c;
+ markdown_chunks_valid 
+-----------------------
+ t
+(1 row)
+
+-- A chunk that reaches the chunk table must survive being read back, which is
+-- where this actually bites in production rather than in a scalar expression.
+CREATE TABLE mb_docs (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO mb_docs (body) VALUES (repeat('漢', 200));
+SELECT pgedge_vectorizer.enable_vectorization('mb_docs', 'body',
+                                              'token_based', 10, 0, 3);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "mb_docs_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: mb_docs -> mb_docs_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 10, overlap: 0
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT count(*) > 1 AS stored_several_chunks,
+       sum(length(content)) AS total_chars
+  FROM mb_docs_body_chunks;
+ stored_several_chunks | total_chars 
+-----------------------+-------------
+ t                     |         200
+(1 row)
+
+SELECT pgedge_vectorizer.disable_vectorization('mb_docs', 'body', true);
+NOTICE:  Vectorization disabled and chunk table dropped: mb_docs_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE mb_docs;
+---------------------------------------------------------------------------
+-- Restore the cluster-wide setting for later test files
+---------------------------------------------------------------------------
+ALTER SYSTEM RESET pgedge_vectorizer.strip_non_ascii;
+SELECT pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+\c
+SHOW pgedge_vectorizer.strip_non_ascii;
+ pgedge_vectorizer.strip_non_ascii 
+-----------------------------------
+ on
+(1 row)
+
