@@ -34,7 +34,14 @@
 #error "pgedge_vectorizer requires PostgreSQL 14 or later"
 #endif
 
-/* pg_noreturn compatibility for PostgreSQL 18+ */
+/*
+ * pg_noreturn compatibility for PostgreSQL 18+.
+ *
+ * On a C23 compiler (gcc 15 defaults to -std=gnu23) pg_noreturn expands to the
+ * [[noreturn]] attribute, which the standard only allows at the very start of a
+ * declaration. PGEDGE_NORETURN must therefore be written before "extern", not
+ * between the storage class and the return type.
+ */
 #if PG_VERSION_NUM < 180000
 #define PGEDGE_NORETURN
 #define PGEDGE_NORETURN_SUFFIX pg_attribute_noreturn()
@@ -191,8 +198,8 @@ List *parse_markdown_structure(const char *content);
 void free_markdown_elements(List *elements);
 
 /* worker.c */
-extern PGDLLEXPORT PGEDGE_NORETURN void pgedge_vectorizer_launcher_main(Datum main_arg) PGEDGE_NORETURN_SUFFIX;
-extern PGDLLEXPORT PGEDGE_NORETURN void pgedge_vectorizer_worker_main(Datum main_arg) PGEDGE_NORETURN_SUFFIX;
+PGEDGE_NORETURN extern PGDLLEXPORT void pgedge_vectorizer_launcher_main(Datum main_arg) PGEDGE_NORETURN_SUFFIX;
+PGEDGE_NORETURN extern PGDLLEXPORT void pgedge_vectorizer_worker_main(Datum main_arg) PGEDGE_NORETURN_SUFFIX;
 void register_background_workers(void);
 
 /*
