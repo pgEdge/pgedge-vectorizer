@@ -101,7 +101,7 @@ jobs:
             apt_ts:     ${{ steps.detect.outputs.apt_ts }}
         steps:
             - name: Checkout code
-              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   # No job uses the default GITHUB_TOKEN for git operations (the
                   # pgEdge action repos are cloned with an explicit token and
@@ -152,7 +152,7 @@ jobs:
             simulated:          ${{ steps.parse.outputs.simulated }}
         steps:
             - name: Checkout code
-              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   # No job uses the default GITHUB_TOKEN for git operations (the
                   # pgEdge action repos are cloned with an explicit token and
@@ -246,7 +246,7 @@ jobs:
             COMPONENT_BRANCH:   ${{ needs.determine-repo-type.outputs.effective-tag }}
         steps:
             - name: Checkout code
-              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   # No job uses the default GITHUB_TOKEN for git operations (the
                   # pgEdge action repos are cloned with an explicit token and
@@ -340,7 +340,7 @@ jobs:
             RPM_MATRIX:        ${{ needs.detect-matrix.outputs.rpm_matrix }}
         steps:
             - name: Checkout code
-              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   # No job uses the default GITHUB_TOKEN for git operations (the
                   # pgEdge action repos are cloned with an explicit token and
@@ -452,7 +452,7 @@ jobs:
             COMPONENT_BRANCH:   ${{ needs.determine-repo-type.outputs.effective-tag }}
         steps:
             - name: Checkout code
-              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   # No job uses the default GITHUB_TOKEN for git operations (the
                   # pgEdge action repos are cloned with an explicit token and
@@ -541,7 +541,7 @@ jobs:
             DEB_MATRIX:        ${{ needs.detect-matrix.outputs.deb_matrix }}
         steps:
             - name: Checkout code
-              uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   # No job uses the default GITHUB_TOKEN for git operations (the
                   # pgEdge action repos are cloned with an explicit token and
