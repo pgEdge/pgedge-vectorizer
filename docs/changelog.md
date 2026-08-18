@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1-beta1] - 2026-08-18
+
 ### Security
 
 - Restricted `pgedge_vectorizer.provider`, `api_key_file`, `api_url` and
@@ -42,6 +44,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `pgedge_vectorizer.databases` in the background worker; `strtok()` keeps its
   parsing position in a single process-wide static, which any other `strtok()`
   caller reached from the same loop would corrupt (CWE-676)
+- The OpenAI, Voyage and Gemini providers built their `Authorization` header
+  into a fixed 512 byte buffer, leaving roughly 489 bytes for the key itself,
+  whilst the API key file it can be loaded from is accepted up to 4096 bytes;
+  a key longer than the buffer was silently truncated, producing an
+  authentication failure indistinguishable from a wrong credential. JWT-style
+  bearer tokens for OpenAI-compatible gateways routinely exceed a thousand
+  characters, so this was reachable in practice, not theoretical. The header
+  is now built with `psprintf()`, which cannot truncate at any length. A
+  related fixed-size buffer parsing a provider's numeric literals is also
+  removed: `provider_parse_float_array()` kept only the leading 32 characters
+  of an overlong literal and scored on whatever `atof()` made of the fragment
+  rather than reporting a bad response
+  ([#31](https://github.com/pgEdge/pgedge-vectorizer/issues/31)).
 
 ### Added
 
@@ -94,6 +109,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   row deletion, truncation and disabling — and counters left wrong in any of
   them would skew ranking silently and permanently, whereas a cache that
   expires cannot drift for longer than its bounds and recovers by itself.
+- A background worker that exits within a second of being spawned is now
+  treated as having failed to start, and its database is held off with a
+  backoff that doubles from 5 seconds to a 5 minute cap, clearing once a
+  worker for that database outlives the threshold. Without it, a configured
+  database that does not exist, or that cannot be connected to
+  (`datallowconn = false`), sent the launcher straight back round to spawn a
+  replacement as fast as it could fork: measured at roughly 240 forks a
+  second, sustained indefinitely, with nothing short of a restart to stop it
+  ([#48](https://github.com/pgEdge/pgedge-vectorizer/issues/48)).
 
 ### Changed
 
@@ -124,6 +148,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   statistics are read, so ranking is equivalent wherever a stored weight was
   current, and corrected wherever it had gone stale — which is the situation
   this change exists to fix.
+- HTTP requests to embedding providers now reuse one curl handle per backend
+  instead of opening a fresh connection for every request, and grow the
+  response buffer geometrically rather than reallocating to the exact size on
+  every write callback. Measured against a local stub over loopback, 200
+  requests dropped from 200 TCP connections to 1 and wall-clock time fell 31%;
+  against a real provider each avoided connection also avoids a TLS handshake,
+  typically one to two further round trips per batch
+  ([#28](https://github.com/pgEdge/pgedge-vectorizer/issues/28)).
+- Documented that changing `pgedge_vectorizer.model` to a model with a
+  different embedding dimension breaks existing chunk tables, since the
+  dimension is baked into the chunk table's `embedding vector(N)` column when
+  it is created. The worker already detects this safely and marks the batch
+  failed with an actionable `Dimension mismatch` warning, but
+  `recreate_chunks()` cannot repair it: it deletes and requeues rows without
+  touching the column type, so every requeued row fails identically.
+  `configuration.md`, `best_practices.md` and `troubleshooting.md` now cover
+  the constraint and both recovery routes: restoring the previous model, or
+  rebuilding via `disable_vectorization(..., drop_chunk_table => TRUE)`
+  followed by `enable_vectorization()`
+  ([#27](https://github.com/pgEdge/pgedge-vectorizer/issues/27)).
 
 ### Removed
 
@@ -198,6 +242,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   vectorized table whose primary key differed. The failure aborted partway
   through, after the chunk table and trigger had already been created, leaving
   the vectorizer for that column half set up.
+- Querying via `bm25_query_vector()` from inside a statement that owns
+  relations, such as `CREATE TABLE AS`, could crash the backend with
+  `relcache reference ... is not owned by resource owner TopTransaction`,
+  because `bm25_load_idf_stats()` and `bm25_update_idf_stats()` restored the
+  memory context and resource owner on their error path but not on the
+  ordinary return from the IDF subtransaction. Loading the IDF statistics also
+  parented its lookup hash on `TopMemoryContext` rather than the caller's
+  context, so any error reached before the hash was destroyed leaked roughly
+  8 KB for the life of the session; the worker's per-chunk failure handler
+  took this path on every retry of a failing item. Both are fixed by scoping
+  the hash to the caller's context and restoring the saved context and
+  resource owner on every path out of the subtransaction, not only the error
+  path ([#47](https://github.com/pgEdge/pgedge-vectorizer/issues/47)).
+- Fixed the worker claiming queue items ordered by `attempts DESC,
+  created_at`, which put items that had already failed the most at the head
+  of every batch. A provider outage left a backlog of once-failed items
+  jumping ahead of newly queued work on every poll until each exhausted
+  `max_attempts`, so freshly queued embeddings could wait behind a backlog of
+  doomed retries. The claim is now ordered by `created_at` alone;
+  `next_retry_at` already spaces retries out, so age is the only ordering the
+  queue needs ([#49](https://github.com/pgEdge/pgedge-vectorizer/issues/49)).
+- BM25's tokenizer and IDF tables both key terms on `BM25_MAX_TERM_LEN` (128)
+  bytes, and two distinct terms sharing that much of a prefix silently merged
+  into one dynahash entry: a single token carrying their combined frequency,
+  and a query for either term matching the other. Terms that do not fit the
+  key are now skipped at tokenization instead, on both the indexing and query
+  paths, so nothing is matched by a truncation the other side does not
+  produce ([#50](https://github.com/pgEdge/pgedge-vectorizer/issues/50)).
+- A queue item that failed deterministically was reclaimed and retried on
+  every poll forever: the failure was recorded by an `UPDATE` issued from
+  inside the transaction the failure had already aborted, so it never ran,
+  `attempts` never advanced past 0, `next_retry_at` was never set and
+  `max_attempts` was never reached. That in turn defeated the queue's
+  per-item backoff, its one-at-a-time handling of a suspect item, and its
+  eventual retirement of one that cannot succeed, and it billed every item
+  sharing the batch for embeddings fetched and discarded on every cycle. The
+  failure is now noted before the aborting error is raised and recorded in a
+  fresh transaction afterwards, matched against the row's state as this
+  worker last saw it so a row another worker has since claimed or completed
+  is not disturbed. Capturing the message safely took two further
+  corrections: copying it out of `ErrorContext` needed a context switch
+  first, since the copy otherwise landed in the context `FlushErrorState()`
+  was about to reset and could crash the backend outright; and clipping an
+  over-length message into its 1024 byte buffer needed to stop on a
+  character boundary, since a byte-based `strlcpy()` could leave a partial
+  multi-byte character in `queue.error_message`, which then made `length()`,
+  `substring()` and any client-side decoding of that row raise.
+
+  Failures that cannot be attributed to any single item, such as a
+  misconfigured or unreachable provider, are not charged to a row for the
+  same reason as above, and previously spun in exactly the same way: the same
+  batch was reclaimed and failed identically on every poll, filling the log
+  at whatever rate `pgedge_vectorizer.worker_poll_interval` allowed. This case
+  now backs off too, 5 seconds doubling to a 5 minute cap, cleared by any
+  batch that gets through or by a reload
+  ([#51](https://github.com/pgEdge/pgedge-vectorizer/issues/51),
+  [#52](https://github.com/pgEdge/pgedge-vectorizer/issues/52)).
+- Fixed chunk boundaries landing inside a multi-byte character when
+  `pgedge_vectorizer.strip_non_ascii` is disabled. `get_char_offset_for_tokens()`
+  counted UTF-8 lead bytes and returned an offset one byte past the last one,
+  so callers cut the source text there and stored the resulting fragment; a
+  fragment ending mid-character then made `length()` and similar functions
+  raise on the affected chunk, and `enable_vectorization()` could abort
+  partway through processing existing rows. The offset is now clipped to the
+  last character that fits entirely via `pg_mbcharcliplen()`, reading the
+  server's actual encoding rather than assuming UTF-8. This affects
+  `token_based`, `markdown` and `hybrid` chunking alike, all of which reach
+  the boundary through the same function; the default `strip_non_ascii = on`
+  was not affected, since it removes every non-ASCII byte before chunking
+  ([#64](https://github.com/pgEdge/pgedge-vectorizer/issues/64)).
 
 ## [1.0] - 2026-03-13
 
