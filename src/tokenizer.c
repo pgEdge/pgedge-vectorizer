@@ -20,6 +20,8 @@
  */
 #include "pgedge_vectorizer.h"
 
+#include "mb/pg_wchar.h"
+
 /*
  * Approximate token count
  *
@@ -96,32 +98,48 @@ detokenize_tokens(const int *tokens, int token_count, const char *model)
 /*
  * Get character offset for a given token count
  *
- * This function estimates where in the text a certain number of tokens
- * would end. Used for chunking.
+ * Estimates where in the text a certain number of tokens would end, as a byte
+ * offset. Used for chunking.
+ *
+ * The offset must land between characters. Callers cut there with pnstrdup()
+ * and nothing downstream validates the encoding, so an offset inside a
+ * character stores a partial one, and any later read that walks characters
+ * fails on that row. Counting lead bytes by hand stopped one byte past the
+ * last one; pg_mbcharcliplen() clips where a character ends, and does it in
+ * the server encoding rather than assuming UTF-8.
  */
 int
 get_char_offset_for_tokens(const char *text, int target_tokens, const char *model)
 {
-	int estimated_chars;
-	const char *p;
-	int actual_chars = 0;
+	int64		estimated_chars;
+	int64		byte_bound;
+	int			maxlen;
+	int			len;
 
 	if (text == NULL || target_tokens <= 0)
 		return 0;
 
 	/* Estimate character position (4 chars per token) */
-	estimated_chars = target_tokens * 4;
+	estimated_chars = (int64) target_tokens * 4;
 
-	/* Count actual characters (UTF-8 aware) */
-	for (p = text; *p && actual_chars < estimated_chars; p++)
-	{
-		/* Only count the start of each UTF-8 character */
-		if ((*p & 0xC0) != 0x80)
-			actual_chars++;
-	}
+	/*
+	 * Bound the read at what the wanted characters can occupy, so this costs
+	 * one chunk rather than the whole remaining text on every call.
+	 *
+	 * Both bounds saturate at INT_MAX rather than being scaled to fit, and
+	 * they saturate independently: shrinking the character limit to keep the
+	 * byte span in range would return fewer characters than were asked for and
+	 * cut the chunk short.  The SQL entry point takes an unbounded chunk_size,
+	 * so it can ask for more than either bound holds.  A text datum cannot
+	 * exceed 1GB, so a saturated byte bound just means "to the end".  Computed
+	 * in int64 so the product cannot wrap.
+	 */
+	maxlen = pg_database_encoding_max_length();
+	byte_bound = Min(estimated_chars * maxlen, (int64) INT_MAX);
+	len = (int) strnlen(text, (size_t) byte_bound);
 
-	/* Return byte offset */
-	return p - text;
+	return pg_mbcharcliplen(text, len,
+							(int) Min(estimated_chars, (int64) INT_MAX));
 }
 
 /*
