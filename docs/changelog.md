@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1-beta2] - 2026-08-18
+
+### Fixed
+
+- Fixed the extension failing to compile under compilers that default to C23
+  (GCC 15 and later), such as `ubuntu:resolute`'s toolchain. `pgedge_vectorizer.h`
+  declared `pgedge_vectorizer_launcher_main()` and `pgedge_vectorizer_worker_main()`
+  as `extern PGDLLEXPORT PGEDGE_NORETURN void ...`, and on PostgreSQL 18 and
+  later `PGEDGE_NORETURN` expands to PostgreSQL's `pg_noreturn` macro, which
+  under C23 is itself `[[noreturn]]`. A C23 attribute-specifier-sequence must
+  appear at the very start of a declaration, not between `extern` and the
+  return type, so the declarations failed to parse with "expected identifier
+  or '(' before 'void'" wherever the build compiled in C23 mode; under the
+  older C11 `_Noreturn` function-specifier expansion the same ordering was
+  merely unconventional, not an error, which is why this only surfaced now.
+  Both declarations now put `PGEDGE_NORETURN` first, matching the ordering
+  PostgreSQL's own core headers use for `pg_noreturn`
+  ([#65](https://github.com/pgEdge/pgedge-vectorizer/issues/65)).
+
 ## [1.1-beta1] - 2026-08-18
 
 ### Security
