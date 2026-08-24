@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "storage/fd.h"
 #include "utils/memutils.h"
 
 /*
@@ -152,8 +153,13 @@ provider_load_api_key(const char *filepath, char **error_msg)
 	 * reject the path.  Regular files are unaffected by the flag.
 	 *
 	 * No O_NOFOLLOW: secret stores publish credentials through symlinks.
+	 *
+	 * OpenTransientFile() rather than open() so that the descriptor is
+	 * registered with the transaction: the read loop below can now throw, and
+	 * a raw descriptor would be leaked for the life of the backend rather than
+	 * released on abort.
 	 */
-	fd = open(expanded_path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+	fd = OpenTransientFile(expanded_path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
 	if (fd < 0)
 	{
 		if (errno == ENOENT)
@@ -169,7 +175,7 @@ provider_load_api_key(const char *filepath, char **error_msg)
 	{
 		*error_msg = psprintf("Failed to stat API key file %s: %m",
 							  expanded_path);
-		close(fd);
+		CloseTransientFile(fd);
 		pfree(expanded_path);
 		return NULL;
 	}
@@ -179,7 +185,7 @@ provider_load_api_key(const char *filepath, char **error_msg)
 	{
 		*error_msg = psprintf("API key path is not a regular file: %s",
 							  expanded_path);
-		close(fd);
+		CloseTransientFile(fd);
 		pfree(expanded_path);
 		return NULL;
 	}
@@ -190,7 +196,7 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		*error_msg = psprintf("API key file %s is too large (%lld bytes; limit %d)",
 							  expanded_path, (long long) st.st_size,
 							  MAX_API_KEY_FILE_SIZE);
-		close(fd);
+		CloseTransientFile(fd);
 		pfree(expanded_path);
 		return NULL;
 	}
@@ -212,10 +218,19 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		if (n < 0)
 		{
 			if (errno == EINTR)
+			{
+				/*
+				 * A cancellation or statement timeout arriving mid-read
+				 * surfaces here.  Going straight back into read() would defer
+				 * it for as long as the reads keep being interrupted, so act
+				 * on it first; the descriptor is released by the abort.
+				 */
+				CHECK_FOR_INTERRUPTS();
 				continue;
+			}
 			*error_msg = psprintf("Failed to read API key file %s: %m",
 								  expanded_path);
-			close(fd);
+			CloseTransientFile(fd);
 			pfree(expanded_path);
 			explicit_bzero(buf, sizeof(buf));
 			return NULL;
@@ -230,14 +245,14 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		{
 			*error_msg = psprintf("API key file %s is too large (limit %d bytes)",
 								  expanded_path, MAX_API_KEY_FILE_SIZE);
-			close(fd);
+			CloseTransientFile(fd);
 			pfree(expanded_path);
 			explicit_bzero(buf, sizeof(buf));
 			return NULL;
 		}
 	}
 
-	close(fd);
+	CloseTransientFile(fd);
 
 	/* A null byte would cut the key short and look like a wrong credential */
 	for (i = 0; i < nread; i++)
