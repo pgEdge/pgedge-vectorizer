@@ -181,8 +181,17 @@ sub fake_provider
 			last if $line =~ /^\r?\n\z/;
 		}
 
+		# read() can come back short of Content-Length on a socket, and a
+		# partial body would count the wrong number of inputs.
 		($length) = $headers =~ /^content-length:\s*(\d+)/im;
-		read $conn, $body, $length if $length;
+		while ($length && length($body) < $length)
+		{
+			my $chunk = '';
+			my $got = read $conn, $chunk, $length - length($body);
+
+			die 'truncated request body' unless $got;
+			$body .= $chunk;
+		}
 
 		# {"input":["...","..."],"model":"..."}. The chunk text is ours and
 		# has no quotes in it, so counting quoted strings counts the items.

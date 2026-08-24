@@ -91,13 +91,6 @@ static char failed_item_error[FAILED_ITEM_ERROR_LEN] = "";
  */
 #define MAX_RATE_LIMIT_DEFERRALS		100
 
-/*
- * How long the worker stays off a rate-limited provider. Bounded apart from
- * the item's own wait, which may be longer: this only decides when to look at
- * the queue again, and the rest of it may be for another table.
- */
-#define RATE_LIMIT_COOLDOWN_MAX_SECONDS	300
-
 static TimestampTz provider_cooldown_until = 0;
 
 /*
@@ -131,15 +124,19 @@ rate_limit_backoff_expr(int retry_after)
 					RATE_LIMIT_BACKOFF_MAX_SECONDS);
 }
 
-/* Hold the worker off the provider until its limit should have cleared. */
+/*
+ * Hold the worker off the provider until its limit should have cleared.
+ *
+ * The provider's own wait is taken in full, already bounded by
+ * PROVIDER_RETRY_AFTER_MAX, and matches what the deferred items were given.
+ * Coming back before then only earns another refusal, and charges a deferral
+ * to whatever rows the next pull happens to claim.
+ */
 static int
 provider_begin_cooldown(int retry_after)
 {
 	int			seconds = (retry_after != PROVIDER_RETRY_AFTER_UNSET)
-		? retry_after : RATE_LIMIT_BACKOFF_BASE_SECONDS;
-
-	seconds = Max(seconds, 1);
-	seconds = Min(seconds, RATE_LIMIT_COOLDOWN_MAX_SECONDS);
+		? Max(retry_after, 1) : RATE_LIMIT_BACKOFF_BASE_SECONDS;
 
 	provider_cooldown_until =
 		TimestampTzPlusMilliseconds(GetCurrentTimestamp(), seconds * 1000);

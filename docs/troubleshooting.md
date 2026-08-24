@@ -98,7 +98,7 @@ SELECT status, count(*), max(attempts) AS attempts,
 
 Each deferral is logged with the status code and the wait taken:
 
-```
+```text
 LOG:  pgedge_vectorizer worker for database "app": provider rate limited
       (HTTP 429), deferring 22 queue items, next attempt in 4s
 ```
