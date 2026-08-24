@@ -12,6 +12,7 @@
  */
 #include "pgedge_vectorizer.h"
 #include "bm25.h"
+#include "provider_common.h"
 
 #include <time.h>
 
@@ -69,6 +70,82 @@ static int64 failed_item_queue_id = -1;
 static int	failed_item_attempts = 0;
 static int	failed_item_max_attempts = 0;
 static char failed_item_error[FAILED_ITEM_ERROR_LEN] = "";
+
+/*
+ * Retry waits, doubling per attempt and capped. The wait was previously
+ * (attempts + 1) minutes with nothing bounding it, so a fault that cleared in
+ * seconds still left the item idle for minutes.
+ *
+ * A rate limit is scheduled separately: it clears within the provider's
+ * current window, so it starts short and is capped much lower.
+ */
+#define RETRY_BACKOFF_BASE_SECONDS		30
+#define RETRY_BACKOFF_MAX_SECONDS		900		/* Cap at 15 minutes */
+#define RATE_LIMIT_BACKOFF_BASE_SECONDS	5
+#define RATE_LIMIT_BACKOFF_MAX_SECONDS	60
+
+/*
+ * Rate limits are not charged against max_attempts, so they are counted here
+ * instead. The only purpose of the cap is to stop a provider that answers 429
+ * to everything from keeping an item queued forever.
+ */
+#define MAX_RATE_LIMIT_DEFERRALS		100
+
+/*
+ * How long the worker stays off a rate-limited provider. Bounded apart from
+ * the item's own wait, which may be longer: this only decides when to look at
+ * the queue again, and the rest of it may be for another table.
+ */
+#define RATE_LIMIT_COOLDOWN_MAX_SECONDS	300
+
+static TimestampTz provider_cooldown_until = 0;
+
+/*
+ * When a failed item should next be tried. Evaluated in the UPDATE that
+ * increments attempts, so the column still holds the count before this
+ * failure: 0 gives the base wait, and each attempt after that doubles it.
+ */
+static char *
+retry_backoff_expr(void)
+{
+	return psprintf("NOW() + LEAST(%d * power(2, LEAST(attempts, 20)), %d) "
+					"* INTERVAL '1 second'",
+					RETRY_BACKOFF_BASE_SECONDS, RETRY_BACKOFF_MAX_SECONDS);
+}
+
+/*
+ * When a rate-limited item should next be tried. The provider knows when its
+ * window resets and we do not, so its Retry-After wins. Without one, the wait
+ * doubles with the deferrals taken, up to a minute: long enough for a
+ * per-minute quota to roll over.
+ */
+static char *
+rate_limit_backoff_expr(int retry_after)
+{
+	if (retry_after != PROVIDER_RETRY_AFTER_UNSET)
+		return psprintf("NOW() + %d * INTERVAL '1 second'", Max(retry_after, 1));
+
+	return psprintf("NOW() + LEAST(%d * power(2, LEAST(rate_limit_deferrals, 10)), %d) "
+					"* INTERVAL '1 second'",
+					RATE_LIMIT_BACKOFF_BASE_SECONDS,
+					RATE_LIMIT_BACKOFF_MAX_SECONDS);
+}
+
+/* Hold the worker off the provider until its limit should have cleared. */
+static int
+provider_begin_cooldown(int retry_after)
+{
+	int			seconds = (retry_after != PROVIDER_RETRY_AFTER_UNSET)
+		? retry_after : RATE_LIMIT_BACKOFF_BASE_SECONDS;
+
+	seconds = Max(seconds, 1);
+	seconds = Min(seconds, RATE_LIMIT_COOLDOWN_MAX_SECONDS);
+
+	provider_cooldown_until =
+		TimestampTzPlusMilliseconds(GetCurrentTimestamp(), seconds * 1000);
+
+	return seconds;
+}
 
 /*
  * Launcher state
@@ -389,10 +466,11 @@ queue_item_record_failure(void)
 				"SET status = 'pending', "
 				"    attempts = attempts + 1, "
 				"    error_message = %s, "
-				"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
+				"    next_retry_at = %s "
 				"WHERE id = " INT64_FORMAT
 				"  AND status = 'pending' AND attempts = %d",
-				quoted_reason, queue_id, attempts), false, 0);
+				quoted_reason, retry_backoff_expr(), queue_id, attempts),
+				false, 0);
 
 		if (SPI_processed == 0)
 			elog(DEBUG1, "pgedge_vectorizer worker: queue item " INT64_FORMAT
@@ -1418,6 +1496,34 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 }
 
 /*
+ * How many of the items starting at `start` may be sent as one request.
+ *
+ * An item that has already failed goes on its own, so its fault cannot fail
+ * the items around it. Only that item is held back: taking the whole pull one
+ * item at a time cost every other item its batching, which against a provider
+ * that limits requests turns one request into n.
+ *
+ * Sparse-only items are grouped with their like because a request is skipped
+ * only when every item in it already has its dense embedding.
+ */
+static int
+batch_extent(int start, int n_items, const int *attempts,
+			 const bool *sparse_only)
+{
+	int			count = 1;
+
+	if (attempts[start] > 0)
+		return 1;
+
+	while (start + count < n_items &&
+		   attempts[start + count] == 0 &&
+		   sparse_only[start + count] == sparse_only[start])
+		count++;
+
+	return count;
+}
+
+/*
  * Process a batch of queue items
  */
 static void
@@ -1427,6 +1533,23 @@ process_queue_batch(const char *dbname)
 	int batch_size = pgedge_vectorizer_batch_size;
 	EmbeddingProvider *provider = NULL;
 	char *error_msg = NULL;
+
+	/*
+	 * Stay off a provider that has just rate limited us. Without this the
+	 * next poll takes another pull straight into the same limit, so the queue
+	 * advances at the rate the provider refuses work.
+	 */
+	if (provider_cooldown_until != 0)
+	{
+		if (GetCurrentTimestamp() < provider_cooldown_until)
+		{
+			elog(DEBUG1, "Worker for database \"%s\": provider is rate "
+				 "limited, holding off this batch", dbname);
+			return;
+		}
+
+		provider_cooldown_until = 0;
+	}
 
 	/* Start a transaction */
 	SetCurrentStatementStartTimestamp();
@@ -1467,9 +1590,9 @@ process_queue_batch(const char *dbname)
 		bool *sparse_only = palloc(n_items * sizeof(bool));
 		float **embeddings = NULL;
 		int dim = 0;
+		int batch_count = 0;
 		bool has_retries = false;
 		bool has_sparse_only = false;
-		int effective_batch_size = n_items;
 
 		elog(DEBUG1, "Worker for database \"%s\" processing %d queue items",
 			 dbname, n_items);
@@ -1549,19 +1672,13 @@ process_queue_batch(const char *dbname)
 		 */
 		queue_item_done();
 
-		/* If any items have been retried, process individually to isolate failures */
-		if (has_retries && n_items > 1)
-		{
-			effective_batch_size = 1;
+		/* batch_extent() separates these out; the rest still goes together. */
+		if (has_retries)
 			elog(DEBUG1, "Worker for database \"%s\": found retried items, "
-				 "processing individually", dbname);
-		}
-		else if (has_sparse_only && n_items > 1)
-		{
-			effective_batch_size = 1;
+				 "processing those individually", dbname);
+		if (has_sparse_only)
 			elog(DEBUG1, "Worker for database \"%s\": found sparse-only items, "
-				 "processing individually", dbname);
-		}
+				 "processing those apart from the rest", dbname);
 
 		/* Mark all as processing */
 		for (int i = 0; i < n_items; i++)
@@ -1588,16 +1705,11 @@ process_queue_batch(const char *dbname)
 				 error_msg ? error_msg : "unknown error");
 		}
 
-		/* Process items in batches of effective_batch_size */
-		for (int batch_start = 0; batch_start < n_items; batch_start += effective_batch_size)
+		/* Process items in requests as large as batch_extent() allows */
+		for (int batch_start = 0; batch_start < n_items; batch_start += batch_count)
 		{
-			int batch_end;
-			int batch_count;
-
-			batch_end = batch_start + effective_batch_size;
-			if (batch_end > n_items)
-				batch_end = n_items;
-			batch_count = batch_end - batch_start;
+			batch_count = batch_extent(batch_start, n_items, attempts,
+									   sparse_only);
 
 			/* Skip dense generation when every item in this batch is sparse-only. */
 			{
@@ -1621,6 +1733,13 @@ process_queue_batch(const char *dbname)
 				}
 				else
 				{
+					/*
+					 * Cleared so the outcome read below is this request's: a
+					 * provider that fails before reaching the network records
+					 * nothing of its own.
+					 */
+					provider_reset_rate_limit();
+
 					/* Generate embeddings for this batch */
 					embeddings = provider->generate_batch(&contents[batch_start], batch_count, &dim, &error_msg);
 				}
@@ -1855,6 +1974,58 @@ process_queue_batch(const char *dbname)
 				 * meant to record the failure, leaving the batch aborted with
 				 * nothing charged and the items reclaimed on the next poll.
 				 */
+				const ProviderRateLimit *ratelimit = provider_last_rate_limit();
+				char	   *quoted_error = error_msg
+					? quote_literal_cstr(error_msg) : "NULL";
+
+				if (ratelimit->rate_limited)
+				{
+					/*
+					 * The request was refused, not the work in it, so the
+					 * items go back with no attempt charged and wait only as
+					 * long as the limit needs. Only an item that has spent
+					 * every deferral gives up.
+					 */
+					char	   *next_try =
+						rate_limit_backoff_expr(ratelimit->retry_after);
+					int			cooldown;
+					int			deferred = n_items - batch_start;
+
+					/*
+					 * The rest of the pull is deferred too. It would meet the
+					 * same limit, and it was marked 'processing' before the
+					 * loop began: nothing reclaims an item left that way at
+					 * commit.
+					 */
+					for (int idx = batch_start; idx < n_items; idx++)
+					{
+						SPI_execute(psprintf(
+							"UPDATE pgedge_vectorizer.queue "
+							"SET status = CASE WHEN rate_limit_deferrals + 1 >= %d "
+							"                  THEN 'failed' ELSE 'pending' END, "
+							"    rate_limit_deferrals = rate_limit_deferrals + 1, "
+							"    error_message = %s, "
+							"    next_retry_at = CASE WHEN rate_limit_deferrals + 1 >= %d "
+							"                        THEN NULL ELSE %s END "
+							"WHERE id = %ld",
+							MAX_RATE_LIMIT_DEFERRALS, quoted_error,
+							MAX_RATE_LIMIT_DEFERRALS, next_try,
+							queue_ids[idx]),
+							false, 0);
+					}
+
+					cooldown = provider_begin_cooldown(ratelimit->retry_after);
+
+					elog(LOG, "pgedge_vectorizer worker for database \"%s\": "
+						 "provider rate limited (HTTP %ld), deferring %d queue "
+						 "item%s, next attempt in %ds",
+						 dbname, ratelimit->http_status, deferred,
+						 deferred == 1 ? "" : "s", cooldown);
+
+					/* Nothing more can be sent to the provider in this pull. */
+					break;
+				}
+
 				for (int i = 0; i < batch_count; i++)
 				{
 					int idx = batch_start + i;
@@ -1870,8 +2041,7 @@ process_queue_batch(const char *dbname)
 							"    error_message = %s, "
 							"    next_retry_at = NULL "
 							"WHERE id = %ld",
-							error_msg ? quote_literal_cstr(error_msg) : "NULL",
-							queue_ids[idx]),
+							quoted_error, queue_ids[idx]),
 							false, 0);
 					}
 					else
@@ -1882,9 +2052,9 @@ process_queue_batch(const char *dbname)
 							"SET status = 'pending', "
 							"    attempts = attempts + 1, "
 							"    error_message = %s, "
-							"    next_retry_at = NOW() + (attempts + 1) * INTERVAL '1 minute' "
+							"    next_retry_at = %s "
 							"WHERE id = %ld",
-							error_msg ? quote_literal_cstr(error_msg) : "NULL",
+							quoted_error, retry_backoff_expr(),
 							queue_ids[idx]),
 							false, 0);
 					}

@@ -38,6 +38,32 @@ typedef struct
 } ResponseBuffer;
 
 /*
+ * Why a request was refused, beyond the message the caller gets. A rate limit
+ * has to be rescheduled differently from a bad chunk or a bad key, and the
+ * message cannot say so without being parsed.
+ */
+#define PROVIDER_RETRY_AFTER_UNSET	(-1)
+
+/* Longest Retry-After we honour, in seconds. */
+#define PROVIDER_RETRY_AFTER_MAX	3600
+
+typedef struct ProviderRateLimit
+{
+	long	http_status;	/* response code, or 0 if none was received */
+	bool	rate_limited;	/* provider asked us to slow down */
+	int		retry_after;	/* seconds asked for, or _UNSET if not sent */
+} ProviderRateLimit;
+
+/* Outcome of the last request; valid only until the next one. */
+const ProviderRateLimit *provider_last_rate_limit(void);
+
+/*
+ * Clear it before asking for embeddings: a provider that fails without
+ * reaching the network leaves the previous request's outcome in place.
+ */
+void provider_reset_rate_limit(void);
+
+/*
  * Shared provider utility functions
  */
 
