@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -100,9 +101,17 @@ provider_expand_tilde(const char *path)
 {
 	if (path[0] == '~' && (path[1] == '/' || path[1] == '\0'))
 	{
-		const char *home = getenv("HOME");  /* nosemgrep */
-		if (home)
-			return psprintf("%s%s", home, path + 1);
+		struct passwd *pw;
+
+		/*
+		 * Not getenv("HOME"): whatever starts the server decides that, and a
+		 * value pointing elsewhere resolves the key path to a file the server
+		 * was never meant to read (CWE-807).  The passwd entry for the user the
+		 * backend actually runs as cannot be set from the environment.
+		 */
+		pw = getpwuid(geteuid());
+		if (pw != NULL && pw->pw_dir[0] != '\0')
+			return psprintf("%s%s", pw->pw_dir, path + 1);
 	}
 	return pstrdup(path);
 }
