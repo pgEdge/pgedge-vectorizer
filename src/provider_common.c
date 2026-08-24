@@ -12,6 +12,8 @@
  */
 #include "provider_common.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -113,10 +115,12 @@ provider_expand_tilde(const char *path)
 char *
 provider_load_api_key(const char *filepath, char **error_msg)
 {
-	FILE *fp;
+	int fd;
 	char *expanded_path;
-	StringInfoData key_buf;
-	int c;
+	char buf[MAX_API_KEY_FILE_SIZE + 1];
+	size_t nread = 0;
+	size_t len = 0;
+	size_t i;
 	struct stat st;
 	MemoryContext oldcontext;
 	char *persistent_key;
@@ -129,9 +133,44 @@ provider_load_api_key(const char *filepath, char **error_msg)
 
 	expanded_path = provider_expand_tilde(filepath);
 
-	if (stat(expanded_path, &st) != 0)
+	/*
+	 * Check the open descriptor rather than the path, so the file inspected is
+	 * the file read (CWE-367).
+	 *
+	 * O_NONBLOCK matters: open() on a FIFO waits for a writer, and it waits in
+	 * libc, so CHECK_FOR_INTERRUPTS() is never reached and the backend cannot
+	 * be cancelled.  Non-blocking returns instead, leaving S_ISREG() below to
+	 * reject the path.  Regular files are unaffected by the flag.
+	 *
+	 * No O_NOFOLLOW: secret stores publish credentials through symlinks.
+	 */
+	fd = open(expanded_path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+	if (fd < 0)
 	{
-		*error_msg = psprintf("API key file not found: %s", expanded_path);
+		if (errno == ENOENT)
+			*error_msg = psprintf("API key file not found: %s", expanded_path);
+		else
+			*error_msg = psprintf("Failed to open API key file %s: %m",
+								  expanded_path);
+		pfree(expanded_path);
+		return NULL;
+	}
+
+	if (fstat(fd, &st) != 0)
+	{
+		*error_msg = psprintf("Failed to stat API key file %s: %m",
+							  expanded_path);
+		close(fd);
+		pfree(expanded_path);
+		return NULL;
+	}
+
+	/* A FIFO or device would block the read; a directory reads as empty */
+	if (!S_ISREG(st.st_mode))
+	{
+		*error_msg = psprintf("API key path is not a regular file: %s",
+							  expanded_path);
+		close(fd);
 		pfree(expanded_path);
 		return NULL;
 	}
@@ -142,6 +181,7 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		*error_msg = psprintf("API key file %s is too large (%lld bytes; limit %d)",
 							  expanded_path, (long long) st.st_size,
 							  MAX_API_KEY_FILE_SIZE);
+		close(fd);
 		pfree(expanded_path);
 		return NULL;
 	}
@@ -150,37 +190,81 @@ provider_load_api_key(const char *filepath, char **error_msg)
 		elog(WARNING, "API key file %s has permissive permissions (should be 0600)",
 			 expanded_path);
 
-	fp = fopen(expanded_path, "r");
-	if (fp == NULL)
+	/*
+	 * buf holds one byte more than the limit, so a file appended to since the
+	 * fstat() is refused rather than read truncated.
+	 */
+	for (;;)
 	{
-		*error_msg = psprintf("Failed to open API key file: %s", expanded_path);
-		pfree(expanded_path);
-		return NULL;
+		ssize_t n;
+
+		/* flawfinder: ignore - bounded by the space left in buf */
+		n = read(fd, buf + nread, sizeof(buf) - nread);
+		if (n < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			*error_msg = psprintf("Failed to read API key file %s: %m",
+								  expanded_path);
+			close(fd);
+			pfree(expanded_path);
+			explicit_bzero(buf, sizeof(buf));
+			return NULL;
+		}
+
+		if (n == 0)
+			break;
+
+		nread += (size_t) n;
+
+		if (nread == sizeof(buf))
+		{
+			*error_msg = psprintf("API key file %s is too large (limit %d bytes)",
+								  expanded_path, MAX_API_KEY_FILE_SIZE);
+			close(fd);
+			pfree(expanded_path);
+			explicit_bzero(buf, sizeof(buf));
+			return NULL;
+		}
 	}
+
+	close(fd);
+
+	/* A null byte would cut the key short and look like a wrong credential */
+	for (i = 0; i < nread; i++)
+	{
+		char c = buf[i];
+
+		if (c == '\0')
+		{
+			*error_msg = psprintf("API key file %s contains a null byte",
+								  expanded_path);
+			pfree(expanded_path);
+			explicit_bzero(buf, sizeof(buf));
+			return NULL;
+		}
+
+		if (c != '\n' && c != '\r' && c != ' ' && c != '\t')
+			buf[len++] = c;
+	}
+	buf[len] = '\0';
 
 	pfree(expanded_path);
-	initStringInfo(&key_buf);
 
-	/* flawfinder: ignore - fgetc reads into auto-resizing StringInfo */
-	while ((c = fgetc(fp)) != EOF)
-	{
-		if (c != '\n' && c != '\r' && c != ' ' && c != '\t')
-			appendStringInfoChar(&key_buf, c);
-	}
-	fclose(fp);
-
-	if (key_buf.len == 0)
+	if (len == 0)
 	{
 		*error_msg = pstrdup("API key file is empty");
-		pfree(key_buf.data);
+		explicit_bzero(buf, sizeof(buf));
 		return NULL;
 	}
 
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-	persistent_key = pstrdup(key_buf.data);
+	persistent_key = pstrdup(buf);
 	MemoryContextSwitchTo(oldcontext);
 
-	pfree(key_buf.data);
+	/* Keep no copy of the key in the stack frame */
+	explicit_bzero(buf, sizeof(buf));
+
 	return persistent_key;
 }
 
