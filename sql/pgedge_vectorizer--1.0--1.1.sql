@@ -58,8 +58,17 @@ CREATE TABLE IF NOT EXISTS pgedge_vectorizer.queue (
     processing_started_at TIMESTAMPTZ,
     processed_at TIMESTAMPTZ,
     next_retry_at TIMESTAMPTZ,
+    -- Times the provider asked for a slower rate. Counted apart from
+    -- attempts, which max_attempts bounds, so throttling cannot spend an
+    -- item's retries.
+    rate_limit_deferrals INT NOT NULL DEFAULT 0,
     metadata JSONB
 );
+
+-- CREATE TABLE IF NOT EXISTS above does nothing when upgrading, so add the
+-- column directly.
+ALTER TABLE pgedge_vectorizer.queue
+    ADD COLUMN IF NOT EXISTS rate_limit_deferrals INT NOT NULL DEFAULT 0;
 
 -- Indexes for efficient queue processing
 CREATE INDEX IF NOT EXISTS idx_queue_status ON pgedge_vectorizer.queue(status, next_retry_at)
@@ -979,7 +988,8 @@ SELECT
     error_message,
     created_at,
     next_retry_at,
-    LEFT(content, 100) as content_preview
+    LEFT(content, 100) as content_preview,
+    rate_limit_deferrals
 FROM pgedge_vectorizer.queue
 WHERE status = 'failed'
 ORDER BY created_at DESC;
@@ -1013,7 +1023,8 @@ BEGIN
     SET status = 'pending',
         attempts = 0,
         error_message = NULL,
-        next_retry_at = NULL
+        next_retry_at = NULL,
+        rate_limit_deferrals = 0
     WHERE status = 'failed'
       AND attempts < max_attempts
       AND created_at > NOW() - (max_age_hours || ' hours')::INTERVAL;

@@ -31,6 +31,88 @@ static CURL *cached_curl = NULL;
 #define RESPONSE_BUFFER_INITIAL	32768
 
 /*
+ * Kept out of band rather than added to the provider interface, which reports
+ * failure as a message. A backend makes one request at a time and the worker
+ * reads this straight after the call that set it.
+ */
+static ProviderRateLimit last_rate_limit = {
+	0, false, PROVIDER_RETRY_AFTER_UNSET
+};
+
+const ProviderRateLimit *
+provider_last_rate_limit(void)
+{
+	return &last_rate_limit;
+}
+
+void
+provider_reset_rate_limit(void)
+{
+	last_rate_limit.http_status = 0;
+	last_rate_limit.rate_limited = false;
+	last_rate_limit.retry_after = PROVIDER_RETRY_AFTER_UNSET;
+}
+
+/*
+ * Curl header callback - picks the Retry-After hint out of the response.
+ *
+ * Nothing here may throw, for the reason given in provider_write_callback().
+ * Hence the stack buffer, and a header we cannot parse leaving the hint unset.
+ */
+static size_t
+provider_header_callback(char *buffer, size_t size, size_t nitems, void *userp)
+{
+	static const char name[] = "retry-after:";
+	const size_t namelen = sizeof(name) - 1;
+	size_t		len = size * nitems;
+	char		value[128];
+	size_t		vlen;
+	char	   *endptr;
+	long		seconds;
+
+	/*
+	 * Headers arrive as received: no terminator, trailing CRLF intact. The
+	 * field is a small integer or an HTTP-date, so a long line is not one.
+	 */
+	if (len <= namelen || pg_strncasecmp(buffer, name, namelen) != 0)
+		return len;
+
+	vlen = len - namelen;
+	if (vlen >= sizeof(value))
+		return len;
+
+	/* flawfinder: ignore - vlen was bounded against sizeof(value) above */
+	memcpy(value, buffer + namelen, vlen);  /* nosemgrep */
+	value[vlen] = '\0';
+
+	while (vlen > 0 && (value[vlen - 1] == '\r' || value[vlen - 1] == '\n' ||
+						value[vlen - 1] == ' ' || value[vlen - 1] == '\t'))
+		value[--vlen] = '\0';
+
+	seconds = strtol(value, &endptr, 10);
+
+	/* Not a bare number, so try the field's other form, an absolute date. */
+	if (endptr == value || *endptr != '\0')
+	{
+		time_t		when = curl_getdate(value, NULL);
+
+		if (when == (time_t) -1)
+			return len;
+
+		seconds = (long) (when - time(NULL));
+	}
+
+	if (seconds < 0)
+		seconds = 0;
+	if (seconds > PROVIDER_RETRY_AFTER_MAX)
+		seconds = PROVIDER_RETRY_AFTER_MAX;
+
+	last_rate_limit.retry_after = (int) seconds;
+
+	return len;
+}
+
+/*
  * Curl write callback - accumulates response data into a ResponseBuffer.
  */
 size_t
@@ -527,6 +609,9 @@ provider_do_curl_request(const char *url, const char *auth_header,
 	struct curl_slist *headers = NULL;
 	long response_code;
 
+	/* Nothing is known about this request's outcome yet. */
+	provider_reset_rate_limit();
+
 	/* Initialize response buffer */
 	response_out->capacity = RESPONSE_BUFFER_INITIAL;
 	response_out->data = palloc(response_out->capacity);
@@ -580,6 +665,7 @@ provider_do_curl_request(const char *url, const char *auth_header,
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json_request));  /* nosemgrep */
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, provider_write_callback);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, response_out);
+	curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, provider_header_callback);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
 
 	res = curl_easy_perform(curl);
@@ -609,8 +695,19 @@ provider_do_curl_request(const char *url, const char *auth_header,
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
 	curl_slist_free_all(headers);
 
+	last_rate_limit.http_status = response_code;
+
 	if (response_code != 200)
 	{
+		/*
+		 * 503 counts only when it carries a Retry-After; without one it is as
+		 * likely to be a provider that is simply down.
+		 */
+		last_rate_limit.rate_limited =
+			(response_code == 429 ||
+			 (response_code == 503 &&
+			  last_rate_limit.retry_after != PROVIDER_RETRY_AFTER_UNSET));
+
 		*error_msg = psprintf("%s API returned HTTP %ld: %s",
 							  provider_name, response_code, response_out->data);
 		return false;

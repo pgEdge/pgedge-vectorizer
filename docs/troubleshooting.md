@@ -71,6 +71,44 @@ SELECT * FROM pgedge_vectorizer.failed_items;
 SELECT pgedge_vectorizer.retry_failed();
 ```
 
+## Provider Rate Limits
+
+Every hosted provider limits how fast it will answer, and a queue with
+real work in it will reach that limit. This is ordinary traffic, not a
+failure, and the worker treats it as such:
+
+- The refused items go back to `pending` together and are retried as one
+  request.
+- The wait comes from the provider's `Retry-After`, falling back to 5
+  seconds doubling to a minute if it sent none.
+- No attempt is charged, so throttling cannot exhaust an item's
+  `max_attempts`. The deferrals are counted in
+  `queue.rate_limit_deferrals`, and an item is only given up on after a
+  hundred of them.
+- The worker stops sending until the wait has passed.
+
+A queue being throttled looks like this and needs no intervention:
+
+```sql
+SELECT status, count(*), max(attempts) AS attempts,
+       max(rate_limit_deferrals) AS deferrals
+  FROM pgedge_vectorizer.queue
+ GROUP BY status;
+```
+
+Each deferral is logged with the status code and the wait taken:
+
+```text
+LOG:  pgedge_vectorizer worker for database "app": provider rate limited
+      (HTTP 429), deferring 22 queue items, next attempt in 4s
+```
+
+If deferrals climb steadily instead of clearing, work is arriving faster
+than the provider's quota allows. Lower
+`pgedge_vectorizer.num_workers` so fewer requests compete for it, raise
+`pgedge_vectorizer.batch_size` so each request carries more, or move to a
+plan with a higher limit.
+
 ## Dimension Mismatch After Changing the Model
 
 Each chunk table stores its vectors in an `embedding vector(N)` column,

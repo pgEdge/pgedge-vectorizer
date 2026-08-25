@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a rate-limited provider draining the queue 15 to 25 times slower than
+  it should: a job that took eight minutes against a free tier took 36 to 50
+  minutes, with nothing ever failing
+  ([#69](https://github.com/pgEdge/pgedge-vectorizer/issues/69)). Four faults
+  in the retry path compounded each other:
+    - `provider_do_curl_request()` turned every non-200 response into a plain
+      message, discarding the status code and the `Retry-After` header. The
+      worker now sees both, so it can tell a provider asking for a slower rate
+      from an error that will not clear.
+    - A rate limit was charged to the item as an attempt, so throttling spent
+      the `max_attempts` budget of work that was fine. It no longer is;
+      deferrals are counted in a new `queue.rate_limit_deferrals` column, which
+      only bounds how long a provider answering 429 to everything may hold an
+      item.
+    - The retry wait was `(attempts + 1)` minutes with nothing bounding it, so
+      a limit that cleared in seconds still produced waits of one, two, three
+      and eventually eleven minutes. A rate limit now waits as long as
+      `Retry-After` asked, or 5 seconds doubling to a minute if the provider
+      sent no hint. Other failures wait 30 seconds doubling to a 15 minute cap.
+    - The worker dropped to one item per request as soon as any item in the
+      pull had `attempts > 0`, which against a provider that limits requests
+      turned one request into as many as there were items. Only the retried
+      item is separated out now.
+- The worker stays off a provider that has just rate limited it, rather than
+  taking the next pull on the following poll straight into the same limit.
+- `pgedge_vectorizer.retry_failed()` clears `rate_limit_deferrals` along with
+  `attempts`.
+
+None of this was new in 1.1, but 1.1 is where it became visible: the release
+began honouring `pgedge_vectorizer.max_retries`
+([#26](https://github.com/pgEdge/pgedge-vectorizer/issues/26)) where 1.0
+ignored it and gave every item the column default of 3. A configuration
+carrying `max_retries = 10` therefore started putting each throttled item
+through ten rounds of the growing wait above, which is why the slowdown
+appeared on upgrade with no configuration change.
+
 ## [1.1-beta2] - 2026-08-18
 
 ### Fixed
