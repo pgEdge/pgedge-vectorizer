@@ -6,7 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1-beta3] - 2026-08-26
+
 ### Fixed
+
+- Fixed the server hanging forever, uncancellably, when `api_key_file` pointed
+  at a FIFO: the `stat()` that preceded the `fopen()` passed, and the `fopen()`
+  then blocked inside libc waiting for a writer
+  ([#66](https://github.com/pgEdge/pgedge-vectorizer/issues/66)). The checks
+  now run against an already-open, non-blocking descriptor instead.
+- Stopped trusting the `HOME` environment variable when expanding a leading
+  `~` in `api_key_file`: whatever starts the server decides `HOME`, so a value
+  pointing elsewhere read a key file the server was never meant to open and
+  sent its contents to the provider
+  ([#67](https://github.com/pgEdge/pgedge-vectorizer/issues/67)).
+  `getpwuid(geteuid())` is used instead, which cannot be redirected this way.
+  Both this fix and the FIFO fix above were already claimed as shipped in the
+  1.1-beta1 changelog entry below; neither had actually landed until now.
+- A cancellation arriving whilst the API key file was being read could be
+  deferred indefinitely: `read()` returning `EINTR` was retried without
+  checking for interrupts.
 
 - Fixed a rate-limited provider draining the queue 15 to 25 times slower than
   it should: a job that took eight minutes against a free tier took 36 to 50
