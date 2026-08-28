@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1] - 2026-08-28
+
+### Changed
+
+- Promoted the 1.1 line to general availability. There are no functional
+  changes since 1.1-beta3, so the release comprises everything listed in the
+  1.1-beta1, 1.1-beta2 and 1.1-beta3 sections below.
+
 ## [1.1-beta3] - 2026-08-26
 
 ### Fixed
