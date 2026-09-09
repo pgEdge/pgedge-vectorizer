@@ -724,13 +724,13 @@ BEGIN
     -- Compare effective values, not stored ones: moving a table from an
     -- explicit 'openai' to NULL whilst the GUC also says 'openai' changes
     -- nothing, and must not cost a re-embed.
-    old_provider := COALESCE(v_row.provider,
+    old_provider := COALESCE(NULLIF(v_row.provider, ''),
                              current_setting('pgedge_vectorizer.provider'));
-    old_model    := COALESCE(v_row.model,
+    old_model    := COALESCE(NULLIF(v_row.model, ''),
                              current_setting('pgedge_vectorizer.model'));
-    new_provider := COALESCE(set_embedding_model.provider,
+    new_provider := COALESCE(NULLIF(set_embedding_model.provider, ''),
                              current_setting('pgedge_vectorizer.provider'));
-    new_model    := COALESCE(set_embedding_model.model,
+    new_model    := COALESCE(NULLIF(set_embedding_model.model, ''),
                              current_setting('pgedge_vectorizer.model'));
 
     IF old_provider = new_provider AND old_model = new_model THEN
@@ -776,10 +776,12 @@ BEGIN
      * and then fail every embedding the worker tried to write, which is the
      * failure this function exists to prevent.
      */
+    -- The probe asks about the effective values rather than the raw
+    -- arguments: an empty string means inherit everywhere else, and would
+    -- otherwise reach the provider as a model name of ''.
     new_dim := COALESCE(
         set_embedding_model.embedding_dimension,
-        pgedge_vectorizer.detect_embedding_dimension(
-            set_embedding_model.provider, set_embedding_model.model));
+        pgedge_vectorizer.detect_embedding_dimension(new_provider, new_model));
 
     SELECT a.atttypmod INTO current_dim
       FROM pg_attribute a
@@ -1781,6 +1783,8 @@ RETURNS TABLE (
 LANGUAGE plpgsql AS $$
 DECLARE
     v_chunk_table  TEXT;
+    v_provider     TEXT;
+    v_model        TEXT;
     v_query_dense  vector;
     v_query_sparse sparsevec;
 BEGIN
@@ -1795,12 +1799,14 @@ BEGIN
     -- vectorized column to avoid silently returning results from the
     -- wrong chunk table.
     IF p_source_column IS NOT NULL THEN
-        SELECT vz.chunk_table INTO v_chunk_table
+        SELECT vz.chunk_table, vz.provider, vz.model
+          INTO v_chunk_table, v_provider, v_model
         FROM pgedge_vectorizer.vectorizers vz
         WHERE vz.source_table = p_source_table::TEXT
           AND vz.source_column = p_source_column;
     ELSE
-        SELECT vz.chunk_table INTO v_chunk_table
+        SELECT vz.chunk_table, vz.provider, vz.model
+          INTO v_chunk_table, v_provider, v_model
         FROM pgedge_vectorizer.vectorizers vz
         WHERE vz.source_table = p_source_table::TEXT
         LIMIT 1;
@@ -1823,8 +1829,15 @@ BEGIN
             p_source_table;
     END IF;
 
-    -- Generate dense query vector via the existing C function
-    v_query_dense := pgedge_vectorizer.generate_embedding(p_query);
+    /*
+     * Embed the query with this vectorizer's own provider and model rather
+     * than the GUCs. A query embedded by one model and compared against chunks
+     * embedded by another gives meaningless distances, and where the widths
+     * differ it fails outright. NULL passes straight through and means
+     * inherit, so a vectorizer that has pinned nothing behaves as before.
+     */
+    v_query_dense := pgedge_vectorizer.generate_embedding(p_query,
+                                                          v_provider, v_model);
 
     -- Generate sparse BM25 query vector
     v_query_sparse := pgedge_vectorizer.bm25_query_vector(

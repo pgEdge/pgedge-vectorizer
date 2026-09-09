@@ -939,13 +939,13 @@ BEGIN
     -- Compare effective values, not stored ones: moving a table from an
     -- explicit 'openai' to NULL whilst the GUC also says 'openai' changes
     -- nothing, and must not cost a re-embed.
-    old_provider := COALESCE(v_row.provider,
+    old_provider := COALESCE(NULLIF(v_row.provider, ''),
                              current_setting('pgedge_vectorizer.provider'));
-    old_model    := COALESCE(v_row.model,
+    old_model    := COALESCE(NULLIF(v_row.model, ''),
                              current_setting('pgedge_vectorizer.model'));
-    new_provider := COALESCE(set_embedding_model.provider,
+    new_provider := COALESCE(NULLIF(set_embedding_model.provider, ''),
                              current_setting('pgedge_vectorizer.provider'));
-    new_model    := COALESCE(set_embedding_model.model,
+    new_model    := COALESCE(NULLIF(set_embedding_model.model, ''),
                              current_setting('pgedge_vectorizer.model'));
 
     IF old_provider = new_provider AND old_model = new_model THEN
@@ -991,10 +991,12 @@ BEGIN
      * and then fail every embedding the worker tried to write, which is the
      * failure this function exists to prevent.
      */
+    -- The probe asks about the effective values rather than the raw
+    -- arguments: an empty string means inherit everywhere else, and would
+    -- otherwise reach the provider as a model name of ''.
     new_dim := COALESCE(
         set_embedding_model.embedding_dimension,
-        pgedge_vectorizer.detect_embedding_dimension(
-            set_embedding_model.provider, set_embedding_model.model));
+        pgedge_vectorizer.detect_embedding_dimension(new_provider, new_model));
 
     SELECT a.atttypmod INTO current_dim
       FROM pg_attribute a
@@ -1300,3 +1302,172 @@ COMMENT ON FUNCTION pgedge_vectorizer.reembed IS
 'leaving alone any already produced by them. A change of embedding dimension '
 'takes every chunk with it. Returns the number queued';
 
+---------------------------------------------------------------------------
+-- hybrid_search(): embed the query with the vectorizer's own model
+--
+-- The query vector was generated from the GUCs, which was right whilst that
+-- was the only place a model could come from. Now that a vectorizer can pin
+-- its own, a query embedded by one model would be compared against chunks
+-- embedded by another: meaningless distances where the widths match, and an
+-- outright error where they do not. Not redefined by the 1.1 script, so it is
+-- replaced here in full.
+---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION pgedge_vectorizer.hybrid_search(
+    p_source_table   REGCLASS,
+    p_query          TEXT,
+    p_limit          INT     DEFAULT 10,
+    p_alpha          FLOAT8  DEFAULT 0.7,
+    p_rrf_k          INT     DEFAULT 60,
+    p_source_column  NAME    DEFAULT NULL
+)
+RETURNS TABLE (
+    source_id   TEXT,
+    chunk       TEXT,
+    dense_rank  INT,
+    sparse_rank INT,
+    rrf_score   FLOAT8
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_chunk_table  TEXT;
+    v_provider     TEXT;
+    v_model        TEXT;
+    v_query_dense  vector;
+    v_query_sparse sparsevec;
+BEGIN
+    IF COALESCE(current_setting('pgedge_vectorizer.enable_hybrid', true), 'false')::boolean IS NOT TRUE THEN
+        RAISE EXCEPTION
+            'Hybrid search is disabled. Set pgedge_vectorizer.enable_hybrid = true and allow workers to populate sparse_embedding.';
+    END IF;
+
+    -- Look up the chunk table from the vectorizers registry.
+    -- When p_source_column is provided, use the exact mapping.
+    -- When NULL, raise an exception if the table has more than one
+    -- vectorized column to avoid silently returning results from the
+    -- wrong chunk table.
+    IF p_source_column IS NOT NULL THEN
+        SELECT vz.chunk_table, vz.provider, vz.model
+          INTO v_chunk_table, v_provider, v_model
+        FROM pgedge_vectorizer.vectorizers vz
+        WHERE vz.source_table = p_source_table::TEXT
+          AND vz.source_column = p_source_column;
+    ELSE
+        SELECT vz.chunk_table, vz.provider, vz.model
+          INTO v_chunk_table, v_provider, v_model
+        FROM pgedge_vectorizer.vectorizers vz
+        WHERE vz.source_table = p_source_table::TEXT
+        LIMIT 1;
+
+        IF v_chunk_table IS NOT NULL AND
+           (SELECT count(*) FROM pgedge_vectorizer.vectorizers
+            WHERE source_table = p_source_table::TEXT) > 1
+        THEN
+            RAISE EXCEPTION
+                'Table % has multiple vectorized columns. '
+                'Pass p_source_column to disambiguate.',
+                p_source_table;
+        END IF;
+    END IF;
+
+    IF v_chunk_table IS NULL THEN
+        RAISE EXCEPTION
+            'No vectorizer found for table %. '
+            'Call pgedge_vectorizer.enable_vectorization() first.',
+            p_source_table;
+    END IF;
+
+    /*
+     * Embed the query with this vectorizer's own provider and model rather
+     * than the GUCs. A query embedded by one model and compared against chunks
+     * embedded by another gives meaningless distances, and where the widths
+     * differ it fails outright. NULL passes straight through and means
+     * inherit, so a vectorizer that has pinned nothing behaves as before.
+     */
+    v_query_dense := pgedge_vectorizer.generate_embedding(p_query,
+                                                          v_provider, v_model);
+
+    -- Generate sparse BM25 query vector
+    v_query_sparse := pgedge_vectorizer.bm25_query_vector(
+                          p_query, v_chunk_table);
+
+    -- Run both ranked lists and merge with Reciprocal Rank Fusion.
+    -- Join on chunk id (not source_id) to avoid mixing unrelated chunks
+    -- from the same document.  source_id is cast to TEXT to support
+    -- arbitrary PK types (BIGINT, UUID, VARCHAR, etc.).
+    RETURN QUERY EXECUTE format($sql$
+        WITH dense_candidates AS (
+            SELECT
+                id,
+                source_id::text AS source_id,
+                content AS chunk,
+                embedding <=> %L::vector AS dist
+            FROM %I
+            WHERE embedding IS NOT NULL
+            ORDER BY dist
+            LIMIT %s * 3
+        ),
+        dense AS (
+            SELECT
+                id,
+                source_id,
+                chunk,
+                ROW_NUMBER() OVER (ORDER BY dist) AS rnk
+            FROM dense_candidates
+        ),
+        sparse_candidates AS (
+            SELECT
+                id,
+                source_id::text AS source_id,
+                content AS chunk,
+                sparse_embedding <#> %L::sparsevec AS dist
+            FROM %I
+            WHERE sparse_embedding IS NOT NULL
+            ORDER BY dist ASC
+            LIMIT %s * 3
+        ),
+        sparse AS (
+            SELECT
+                id,
+                source_id,
+                chunk,
+                ROW_NUMBER() OVER (ORDER BY dist ASC) AS rnk
+            FROM sparse_candidates
+        ),
+        merged AS (
+            SELECT
+                COALESCE(d.source_id, s.source_id)  AS source_id,
+                COALESCE(d.chunk,     s.chunk)       AS chunk,
+                COALESCE(d.rnk, 9999)::INT           AS dense_rank,
+                COALESCE(s.rnk, 9999)::INT           AS sparse_rank,
+                (
+                      %s::float8  / (%s + COALESCE(d.rnk, 9999))
+                    + (1.0 - %s::float8) / (%s + COALESCE(s.rnk, 9999))
+                )                                    AS rrf_score
+            FROM dense d
+            FULL OUTER JOIN sparse s USING (id)
+        )
+        SELECT
+            source_id,
+            chunk,
+            dense_rank,
+            sparse_rank,
+            rrf_score
+        FROM merged
+        ORDER BY rrf_score DESC
+        LIMIT %s
+    $sql$,
+        v_query_dense,   v_chunk_table, p_limit,
+        v_query_sparse,  v_chunk_table, p_limit,
+        p_alpha, p_rrf_k,
+        p_alpha, p_rrf_k,
+        p_limit
+    );
+END;
+$$;
+
+COMMENT ON FUNCTION pgedge_vectorizer.hybrid_search IS
+'Hybrid BM25 + dense vector search using Reciprocal Rank Fusion.
+ p_alpha controls the weight of dense results (0 = pure sparse, 1 = pure dense).
+ p_rrf_k is the RRF rank smoothing constant (default 60).
+ Requires pgedge_vectorizer.enable_hybrid = true in postgresql.conf.';

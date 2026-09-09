@@ -46,12 +46,26 @@ resolve_provider(const char *name)
 	return provider;
 }
 
-/* As resolve_provider(), for the model name. */
+/*
+ * As resolve_provider(), for the model name.
+ *
+ * An unset model is a configuration error rather than something to send: the
+ * providers interpolate this straight into their request bodies, so an empty
+ * GUC would put "model":"" on the wire and a NULL one would be dereferenced
+ * while escaping it. resolve_provider() already refuses an unset provider for
+ * the same reason.
+ */
 static const char *
 resolve_model(const char *model)
 {
-	return (model != NULL && model[0] != '\0')
-		? model : pgedge_vectorizer_model;
+	const char *use;
+
+	use = (model != NULL && model[0] != '\0') ? model : pgedge_vectorizer_model;
+
+	if (use == NULL || use[0] == '\0')
+		elog(ERROR, "pgedge_vectorizer.model is not set");
+
+	return use;
 }
 
 /* Read an optional text argument as a cstring, or NULL if it was not given. */
