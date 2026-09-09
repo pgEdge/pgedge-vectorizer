@@ -1650,6 +1650,14 @@ process_queue_batch(const char *dbname)
 	 * FOR UPDATE OF q, not a bare FOR UPDATE: the registry rows are not
 	 * being changed, and locking the nullable side of a left join is
 	 * rejected outright.
+	 *
+	 * LATERAL ... LIMIT 1 rather than a plain join, because only
+	 * (source_table, source_column) is unique in the registry: two
+	 * vectorizers pointed at one chunk table by an explicit chunk_table_name
+	 * would otherwise match a queue row twice, and the item would be embedded
+	 * twice and counted twice into the BM25 corpus statistics. That
+	 * configuration is already incoherent, but it must not corrupt the
+	 * statistics of a table that is merely nearby.
 	 */
 	ret = SPI_execute(psprintf(
 		"SELECT q.id, q.chunk_id, q.chunk_table, q.content, q.attempts, "
@@ -1856,6 +1864,15 @@ process_queue_batch(const char *dbname)
 					 * Cleared so the outcome read below is this request's: a
 					 * provider that fails before reaching the network records
 					 * nothing of its own.
+					 */
+					/*
+					 * A provider that cannot be resolved or initialised is a
+					 * fault of the configuration rather than of any item in
+					 * the request, so it is raised rather than charged: see
+					 * 005_batch_failure_backoff.pl, which exists to keep a
+					 * mistyped provider name from retiring the whole queue
+					 * one blameless row at a time. The outer handler backs
+					 * the worker off instead.
 					 */
 					provider = get_embedding_provider(providers[batch_start]);
 					if (provider == NULL)
