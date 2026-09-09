@@ -113,6 +113,32 @@ is($node->safe_psql('upgraded', $views),
 	$node->safe_psql('fresh', $views),
 	'an upgraded install has the same views as a fresh one');
 
+# Chunk tables too, which is a separate trap: enable_vectorization() adds
+# columns to a chunk table it finds without them, but nothing re-runs it on
+# upgrade, so anything the worker writes has to be added by the upgrade script
+# itself. Compare a chunk table created at 1.1 and upgraded against one created
+# fresh at 1.2.
+$node->safe_psql('fresh', q(
+CREATE TABLE docs (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO docs (body) VALUES ('Written on a fresh 1.2 install.');
+));
+$node->safe_psql('fresh',
+	q(SELECT pgedge_vectorizer.enable_vectorization('docs', 'body',
+													'token_based', 100, 10, 1536)));
+
+my $chunk_columns = q(
+	SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod),
+					  E'\n' ORDER BY a.attname)
+	  FROM pg_attribute a
+	 WHERE a.attrelid = 'docs_body_chunks'::regclass
+	   AND a.attnum > 0
+	   AND NOT a.attisdropped
+);
+
+is($node->safe_psql('upgraded', $chunk_columns),
+	$node->safe_psql('fresh', $chunk_columns),
+	'an upgraded chunk table has the same columns as a freshly created one');
+
 # The data that was there before the upgrade is still there, and the new
 # columns default to inheriting.
 is($node->safe_psql('upgraded',

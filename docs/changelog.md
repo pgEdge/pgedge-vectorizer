@@ -35,6 +35,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `generate_embedding()` and `detect_embedding_dimension()` accept an optional
   provider and model, so a query can be embedded with the same model as the
   chunks it will be compared against.
+- Chunk tables now record the provider and model that produced each embedding,
+  and `pgedge_vectorizer.embedding_model_status()` reports where that disagrees
+  with what the vectorizer would use now
+  ([#75](https://github.com/pgEdge/pgedge-vectorizer/issues/75)). A vectorizer
+  that inherits follows `pgedge_vectorizer.model` as it changes, so a chunk
+  table can end up holding vectors from two models with nothing reporting it;
+  where the widths match the existing dimension check cannot see it either.
+  `pgedge_vectorizer.reembed()` repairs it, redoing the chunks that are not
+  known to be current. Rows embedded before this release have nothing recorded
+  and are counted separately, but `reembed()` treats them as needing redoing,
+  so the first call on an upgraded installation re-embeds the whole table.
 
 ### Changed
 

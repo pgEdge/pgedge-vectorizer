@@ -23,6 +23,39 @@ COMMENT ON COLUMN pgedge_vectorizer.vectorizers.model IS
 'Embedding model for this vectorizer; NULL inherits pgedge_vectorizer.model';
 
 ---------------------------------------------------------------------------
+-- Provenance columns on the chunk tables that already exist
+--
+-- enable_vectorization() adds these to a chunk table it finds without them,
+-- but nothing re-runs it on upgrade, and the worker writes both columns in
+-- the same statement as the embedding: an existing installation would fail
+-- every embedding write until someone happened to re-enable the vectorizer.
+-- So the upgrade alters what the registry knows about, here and now.
+---------------------------------------------------------------------------
+
+DO $$
+DECLARE
+    v         RECORD;
+    chunk_oid OID;
+BEGIN
+    FOR v IN SELECT r.chunk_table FROM pgedge_vectorizer.vectorizers r LOOP
+        -- One identifier with a dot in it for a schema-qualified source, not
+        -- a qualified reference.
+        chunk_oid := to_regclass(quote_ident(v.chunk_table));
+
+        -- A chunk table dropped from under the registry is not this script's
+        -- problem to fix, and must not stop the upgrade.
+        CONTINUE WHEN chunk_oid IS NULL;
+
+        EXECUTE format(
+            'ALTER TABLE %s
+                 ADD COLUMN IF NOT EXISTS embedding_provider TEXT,
+                 ADD COLUMN IF NOT EXISTS embedding_model TEXT',
+            chunk_oid::REGCLASS);
+    END LOOP;
+END;
+$$;
+
+---------------------------------------------------------------------------
 -- Approximate token counter, shared with the C chunking code
 --
 -- The chunking engine in C has always sized chunks with this estimate, but
@@ -168,17 +201,37 @@ BEGIN
             token_count INT,
             embedding vector(%s),
             sparse_embedding sparsevec(65536),
+            embedding_provider TEXT,
+            embedding_model TEXT,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(source_id, chunk_index)
         )', chunk_table, pk_col_type, embedding_dimension);
 
-    -- Add sparse columns to pre-existing chunk tables (upgrade path).
-    -- These are no-ops for freshly created tables (columns exist already).
+    -- Add sparse and provenance columns to pre-existing chunk tables (upgrade
+    -- path). These are no-ops for freshly created tables (columns exist
+    -- already).
     EXECUTE format('
         ALTER TABLE %I
         ADD COLUMN IF NOT EXISTS sparse_embedding sparsevec(65536)',
         chunk_table);
+
+    -- Guarded rather than ADD COLUMN IF NOT EXISTS, which would print two
+    -- "already exists, skipping" notices on every call for a table that was
+    -- just created with them, which is every call but an upgrade.
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_attribute a
+         WHERE a.attrelid = to_regclass(quote_ident(chunk_table))
+           AND a.attname = 'embedding_model'
+           AND NOT a.attisdropped
+    ) THEN
+        EXECUTE format('
+            ALTER TABLE %I
+            ADD COLUMN embedding_provider TEXT,
+            ADD COLUMN embedding_model TEXT',
+            chunk_table);
+    END IF;
 
     -- Create vector index for similarity search
     EXECUTE format('
@@ -950,7 +1003,9 @@ BEGIN
 
     IF chunk_count > 0 THEN
         -- NULL first: a vector column cannot change width with values in it.
-        EXECUTE format('UPDATE %s SET embedding = NULL '
+        -- A cleared embedding has no model, so its provenance goes with it.
+        EXECUTE format('UPDATE %s SET embedding = NULL, '
+                       'embedding_provider = NULL, embedding_model = NULL '
                        'WHERE embedding IS NOT NULL', chunk_oid::REGCLASS);
 
         -- Anything already queued was queued against the old model.
@@ -994,4 +1049,254 @@ COMMENT ON FUNCTION pgedge_vectorizer.set_embedding_model IS
 'inherit the GUC. Refuses to change a populated vectorizer unless '
 'force_reembed is true, in which case every embedding is cleared and every '
 'chunk requeued. Returns the number of chunks requeued';
+
+---------------------------------------------------------------------------
+-- embedding_model_status(): what each vectorizer's chunks were embedded with
+--
+-- A vectorizer with NULL provider and model inherits the GUCs, and inheritance
+-- resolves when the work runs rather than being copied at creation. Changing
+-- pgedge_vectorizer.model therefore re-points every inheriting vectorizer at
+-- once, leaving a chunk table holding vectors from the old model beside new
+-- ones from the new. Similarity between two models' vectors is noise, so
+-- search degrades quietly; where the widths match, as they do between
+-- text-embedding-3-small and text-embedding-ada-002, nothing catches it at all.
+--
+-- set_embedding_model() guards the per-vectorizer path and cannot guard this
+-- one: the extension does not own that GUC and cannot intercept every way it
+-- changes. So the chunk table records what produced each vector, and this
+-- reports where that disagrees with what the vectorizer would use now. It
+-- diagnoses rather than prevents, but it catches drift from any cause,
+-- including a setting changed months ago by someone since departed.
+--
+-- Each row costs a scan of one chunk table, so the arguments narrow it.
+---------------------------------------------------------------------------
+
+CREATE FUNCTION pgedge_vectorizer.embedding_model_status(
+    p_source_table  REGCLASS DEFAULT NULL,
+    p_source_column NAME DEFAULT NULL
+) RETURNS TABLE (
+    source_table         TEXT,
+    source_column        NAME,
+    chunk_table          TEXT,
+    effective_provider   TEXT,
+    effective_model      TEXT,
+    chunks_embedded      BIGINT,
+    chunks_current       BIGINT,
+    chunks_other_model   BIGINT,
+    chunks_model_unknown BIGINT,
+    embedded_models      TEXT[]
+) AS $$
+DECLARE
+    v         RECORD;
+    chunk_oid OID;
+BEGIN
+    FOR v IN
+        SELECT r.source_table, r.source_column, r.chunk_table,
+               COALESCE(NULLIF(r.provider, ''),
+                        current_setting('pgedge_vectorizer.provider'))
+                   AS eff_provider,
+               COALESCE(NULLIF(r.model, ''),
+                        current_setting('pgedge_vectorizer.model'))
+                   AS eff_model
+          FROM pgedge_vectorizer.vectorizers r
+         WHERE (p_source_table IS NULL
+                OR to_regclass(r.source_table) = p_source_table)
+           AND (p_source_column IS NULL OR r.source_column = p_source_column)
+         ORDER BY r.source_table, r.source_column
+    LOOP
+        source_table       := v.source_table;
+        source_column      := v.source_column;
+        chunk_table        := v.chunk_table;
+        effective_provider := v.eff_provider;
+        effective_model    := v.eff_model;
+
+        chunks_embedded      := NULL;
+        chunks_current       := NULL;
+        chunks_other_model   := NULL;
+        chunks_model_unknown := NULL;
+        embedded_models      := NULL;
+
+        /*
+         * A chunk table that has been dropped, or that the caller cannot
+         * read, leaves this row's counts NULL rather than failing the whole
+         * result set. The name is one identifier with a dot in it for a
+         * schema-qualified source, so it is quoted rather than parsed.
+         */
+        chunk_oid := to_regclass(quote_ident(v.chunk_table));
+        IF chunk_oid IS NOT NULL
+           AND has_table_privilege(chunk_oid, 'SELECT') THEN
+            /*
+             * Every count is over embedded rows only: a chunk with no vector
+             * has no model to disagree about, and counting it as drifted
+             * would confuse work still to do with work done wrongly.
+             *
+             * A row with no recorded model is reported apart from a mismatch
+             * rather than lumped in with it. It predates these columns, so it
+             * may well be current; the report says what is there, and leaves
+             * the pessimistic reading to reembed(), which has to act.
+             */
+            EXECUTE format(
+                'SELECT count(*) FILTER (WHERE embedding IS NOT NULL),
+                        count(*) FILTER (WHERE embedding IS NOT NULL
+                                           AND embedding_provider = %L
+                                           AND embedding_model = %L),
+                        count(*) FILTER (WHERE embedding IS NOT NULL
+                                           AND embedding_model IS NOT NULL
+                                           AND (embedding_provider
+                                                    IS DISTINCT FROM %L
+                                                OR embedding_model
+                                                    IS DISTINCT FROM %L)),
+                        count(*) FILTER (WHERE embedding IS NOT NULL
+                                           AND embedding_model IS NULL),
+                        (SELECT array_agg(pair ORDER BY pair)
+                           FROM (SELECT DISTINCT
+                                        embedding_provider || ''/'' ||
+                                        embedding_model AS pair
+                                   FROM %s
+                                  WHERE embedding IS NOT NULL
+                                    AND embedding_model IS NOT NULL) d)
+                   FROM %s',
+                v.eff_provider, v.eff_model, v.eff_provider, v.eff_model,
+                chunk_oid::REGCLASS, chunk_oid::REGCLASS)
+              INTO chunks_embedded, chunks_current, chunks_other_model,
+                   chunks_model_unknown, embedded_models;
+        END IF;
+
+        RETURN NEXT;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.embedding_model_status IS
+'Report, per vectorizer, how many embedded chunks were produced by the '
+'provider and model it would use now, how many by something else, and how '
+'many predate the columns that record it. Scans the chunk tables';
+
+---------------------------------------------------------------------------
+-- reembed(): redo the embeddings that are not known to be current
+--
+-- The report above leaves a user with a number and nothing to do about it.
+-- set_embedding_model(..., force_reembed => true) is not the answer, because
+-- an inheriting vectorizer's effective model already is the new one, so that
+-- function sees no change and takes its no-op branch.
+--
+-- No confirmation flag. Unlike set_embedding_model(), whose re-embed is a
+-- surprising consequence of a settings change, this function does what its
+-- name says; it raises a notice with the count, because the cost lands on a
+-- metered provider.
+---------------------------------------------------------------------------
+
+CREATE FUNCTION pgedge_vectorizer.reembed(
+    source_table        REGCLASS,
+    source_column       NAME,
+    embedding_dimension INT DEFAULT NULL
+) RETURNS BIGINT AS $$
+DECLARE
+    v_row        RECORD;
+    chunk_oid    OID;
+    eff_provider TEXT;
+    eff_model    TEXT;
+    new_dim      INT;
+    current_dim  INT;
+    width_change BOOLEAN;
+    requeued     BIGINT := 0;
+BEGIN
+    SELECT r.* INTO v_row
+      FROM pgedge_vectorizer.vectorizers r
+     WHERE r.source_table = reembed.source_table::TEXT
+       AND r.source_column = reembed.source_column;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no vectorizer registered for %.%',
+            reembed.source_table::TEXT, reembed.source_column;
+    END IF;
+
+    eff_provider := COALESCE(NULLIF(v_row.provider, ''),
+                             current_setting('pgedge_vectorizer.provider'));
+    eff_model    := COALESCE(NULLIF(v_row.model, ''),
+                             current_setting('pgedge_vectorizer.model'));
+
+    chunk_oid := to_regclass(quote_ident(v_row.chunk_table));
+    IF chunk_oid IS NULL THEN
+        RAISE EXCEPTION 'chunk table % for %.% no longer exists',
+            v_row.chunk_table,
+            reembed.source_table::TEXT, reembed.source_column;
+    END IF;
+
+    new_dim := COALESCE(
+        reembed.embedding_dimension,
+        pgedge_vectorizer.detect_embedding_dimension(eff_provider, eff_model));
+
+    SELECT a.atttypmod INTO current_dim
+      FROM pg_attribute a
+     WHERE a.attrelid = chunk_oid
+       AND a.attname = 'embedding';
+
+    width_change := new_dim IS DISTINCT FROM current_dim;
+
+    IF width_change THEN
+        /*
+         * A column cannot hold two widths, so a change of width takes every
+         * row with it whether or not it had drifted. Clearing has to come
+         * first: a vector column cannot be altered with values in it.
+         */
+        EXECUTE format('UPDATE %s SET embedding = NULL, '
+                       'embedding_provider = NULL, embedding_model = NULL '
+                       'WHERE embedding IS NOT NULL', chunk_oid::REGCLASS);
+
+        EXECUTE format('ALTER TABLE %s ALTER COLUMN embedding '
+                       'TYPE vector(%s)', chunk_oid::REGCLASS, new_dim);
+
+        RAISE NOTICE 'Embedding dimension changed from % to %, so every chunk '
+                     'is being re-embedded', current_dim, new_dim;
+    ELSE
+        /*
+         * Same width, so rows already produced by this provider and model are
+         * left exactly as they are. Everything else goes, including rows with
+         * nothing recorded: those predate the columns and cannot be shown to
+         * be current, and the safe reading of a row that cannot be proved
+         * current is that it needs doing again. On an installation freshly
+         * upgraded to 1.2 that is every row, which the documentation says.
+         */
+        EXECUTE format(
+            'UPDATE %s SET embedding = NULL, '
+            '              embedding_provider = NULL, embedding_model = NULL '
+            ' WHERE embedding IS NOT NULL '
+            '   AND (embedding_model IS NULL '
+            '        OR embedding_provider IS DISTINCT FROM %L '
+            '        OR embedding_model IS DISTINCT FROM %L)',
+            chunk_oid::REGCLASS, eff_provider, eff_model);
+    END IF;
+
+    -- Anything already queued was queued before this decision was made.
+    DELETE FROM pgedge_vectorizer.queue q
+          WHERE q.chunk_table = v_row.chunk_table;
+
+    /*
+     * Whatever now has no embedding needs one, which after the clearing above
+     * is exactly the set chosen, plus any chunk that was never embedded in
+     * the first place and would have been picked up by reprocess_chunks()
+     * anyway.
+     */
+    EXECUTE format(
+        'INSERT INTO pgedge_vectorizer.queue '
+        '    (chunk_id, chunk_table, content, max_attempts) '
+        'SELECT id, %L, content, %s FROM %s WHERE embedding IS NULL',
+        v_row.chunk_table,
+        current_setting('pgedge_vectorizer.max_retries')::INT,
+        chunk_oid::REGCLASS);
+
+    GET DIAGNOSTICS requeued = ROW_COUNT;
+
+    RAISE NOTICE 'Queued % chunks to be embedded with %/%',
+        requeued, eff_provider, eff_model;
+
+    RETURN requeued;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.reembed IS
+'Re-embed a vectorizer''s chunks with the provider and model it would use now, '
+'leaving alone any already produced by them. A change of embedding dimension '
+'takes every chunk with it. Returns the number queued';
 
