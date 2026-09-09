@@ -149,6 +149,39 @@ SELECT source_table,
   FROM pgedge_vectorizer.vectorizer_status('vstatus_docs'::regclass);
 
 ---------------------------------------------------------------------------
+-- A schema-qualified source table
+--
+-- The chunk table's name is generated as source_table || column || '_chunks'
+-- and created with %I, so here it is a single identifier with a dot in it,
+-- 'vstatus_schema.qualified_body_chunks', rather than a relation in a schema.
+-- Looking that up without quoting finds nothing, and the chunk counts come
+-- back NULL whilst the queue counts still work.
+---------------------------------------------------------------------------
+
+CREATE SCHEMA vstatus_schema;
+
+CREATE TABLE vstatus_schema.qualified (
+    id   BIGSERIAL PRIMARY KEY,
+    body TEXT
+);
+
+INSERT INTO vstatus_schema.qualified (body)
+VALUES ('A document in a table that is not on the search path.');
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'vstatus_schema.qualified'::regclass,
+    'body',
+    'token_based',
+    100,
+    10,
+    1536
+);
+
+SELECT chunk_table, source_rows, chunks_total, queue_pending
+  FROM pgedge_vectorizer.vectorizer_status(
+           'vstatus_schema.qualified'::regclass);
+
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 
@@ -156,6 +189,9 @@ SELECT pgedge_vectorizer.disable_vectorization('vstatus_docs'::regclass,
                                                'body', TRUE);
 SELECT pgedge_vectorizer.disable_vectorization('vstatus_other'::regclass,
                                                'body', TRUE);
+SELECT pgedge_vectorizer.disable_vectorization(
+           'vstatus_schema.qualified'::regclass, 'body', TRUE);
 DROP TABLE vstatus_docs;
 DROP TABLE vstatus_other;
+DROP SCHEMA vstatus_schema CASCADE;
 DELETE FROM pgedge_vectorizer.queue;

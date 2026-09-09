@@ -1093,7 +1093,17 @@ BEGIN
          * the whole result set: one inaccessible vectorizer should not make
          * the view useless for every other one.
          */
-        chunk_oid := to_regclass(v.chunk_table);
+        /*
+         * The chunk table's name is generated as source_table || column ||
+         * '_chunks' and created with %I, so for a schema-qualified source the
+         * dot ends up inside a single identifier rather than separating a
+         * schema from a relation. quote_ident() keeps to_regclass() from
+         * splitting it, matching how quote_identifier() is used for the same
+         * name in bm25.c. The source table's name, by contrast, comes from
+         * regclass output and is a genuine qualified reference, so it is
+         * looked up as it stands.
+         */
+        chunk_oid := to_regclass(quote_ident(v.chunk_table));
         IF chunk_oid IS NOT NULL
            AND has_table_privilege(chunk_oid, 'SELECT') THEN
             EXECUTE format(
