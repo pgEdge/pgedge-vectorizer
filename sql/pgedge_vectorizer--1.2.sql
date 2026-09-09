@@ -754,7 +754,15 @@ BEGIN
             set_embedding_model.source_column;
     END IF;
 
-    EXECUTE format('SELECT count(*) FROM %s', chunk_oid::REGCLASS)
+    /*
+     * Embedded chunks, not chunks. The refusal below exists because vectors
+     * from two models are not comparable, and a chunk with no vector has
+     * nothing to be incomparable with: counting every row made the function
+     * refuse where there was nothing to protect, and say so in a message that
+     * was not true. A vectorizer whose provider was mistyped, so that nothing
+     * ever embedded, is exactly the case that hit it.
+     */
+    EXECUTE format('SELECT count(embedding) FROM %s', chunk_oid::REGCLASS)
        INTO chunk_count;
 
     IF chunk_count > 0 AND NOT force_reembed THEN
