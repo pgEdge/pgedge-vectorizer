@@ -22,6 +22,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `pgedge_vectorizer.count_tokens(text)`, which exposes the chunking engine's
   token estimate so you can see why a piece of text chunked the way it did.
+- A per-vectorizer embedding provider and model
+  ([#27](https://github.com/pgEdge/pgedge-vectorizer/issues/27)). Each
+  vectorizer may now name its own, through new `provider` and `model`
+  parameters on `enable_vectorization()` or through the new
+  `set_embedding_model()`, so one table can be embedded locally whilst another
+  goes to a hosted provider. Both default to `pgedge_vectorizer.provider` and
+  `pgedge_vectorizer.model`, so an existing installation is unaffected.
+  `set_embedding_model()` refuses to change a vectorizer that already has
+  embeddings unless `force_reembed` is passed, because vectors from two models
+  are not comparable and mixing them degrades search without failing.
+- `generate_embedding()` and `detect_embedding_dimension()` accept an optional
+  provider and model, so a query can be embedded with the same model as the
+  chunks it will be compared against.
+
+### Changed
+
+- `generate_embedding(NULL)` now raises an error rather than returning NULL.
+  The function always meant to reject a NULL query, and said so in its own
+  code, but was declared `STRICT`, which returned NULL before that check could
+  run. It can no longer be `STRICT`, because a NULL provider or model has to
+  reach the function to mean "use the GUC".
+- The chunk tables that `disable_vectorization()` drops are now processed in a
+  defined order, so a disable that covers several columns reports them the same
+  way twice.
 
 ## [1.1] - 2026-08-28
 
