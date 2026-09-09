@@ -2,7 +2,9 @@
 -- Tests the generate_embedding() function with actual API calls
 -- Gracefully skips tests if API keys are not available
 -- Test 1: Verify function exists
-SELECT pg_get_functiondef('pgedge_vectorizer.generate_embedding(text)'::regprocedure) IS NOT NULL AS function_exists;
+SELECT pg_get_functiondef(
+           'pgedge_vectorizer.generate_embedding(text, text, text)'::regprocedure
+       ) IS NOT NULL AS function_exists;
  function_exists 
 -----------------
  t
@@ -196,7 +198,7 @@ EXCEPTION WHEN OTHERS THEN
     RAISE NOTICE 'NULL input correctly raises error: %', SQLERRM;
 END;
 $$;
-NOTICE:  WARNING: NULL input should have raised an error
+NOTICE:  NULL input correctly raises error: query text cannot be NULL
 -- Test empty string (should work if API key available)
 -- Configure for empty string test
 SET pgedge_vectorizer.provider = 'openai';
