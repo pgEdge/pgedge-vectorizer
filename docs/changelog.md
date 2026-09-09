@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The `token_count` recorded for each chunk is now computed the same way
+  everywhere. The chunking code in C rounds its four-characters-per-token
+  estimate up, whilst the plpgsql paths that actually write the column
+  open-coded the same estimate as `length(chunk_text) / 4`, which truncates,
+  so the two disagreed by a token on most chunks. Because `token_count` feeds
+  the BM25 document-length normalisation, hybrid search scored chunks written
+  by the trigger slightly differently from chunks written by the C chunker.
+  Both now call the new `count_tokens()` function, so there is one definition
+  of the rule.
+
+### Added
+
+- `pgedge_vectorizer.count_tokens(text)`, which exposes the chunking engine's
+  token estimate so you can see why a piece of text chunked the way it did.
+- `pgedge_vectorizer.vectorizer_status`, a view reporting embedding coverage
+  and queue backlog for each registered vectorizer, so you can tell how far
+  behind the embeddings are before trusting a search over them, and spot a
+  worker that has stalled ([#25](https://github.com/pgEdge/pgedge-vectorizer/issues/25)).
+  A function of the same name narrows the result to a single source table or
+  column. The counts scan the chunk and source tables, so this is a diagnostic
+  to run deliberately rather than something to poll.
+
 ## [1.1] - 2026-08-28
 
 ### Changed

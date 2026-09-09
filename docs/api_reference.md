@@ -328,6 +328,25 @@ SELECT pgedge_vectorizer.bm25_tokenize(query TEXT);
 
 Returns: `TEXT[]` -- Array of distinct non-stopword terms.
 
+### count_tokens()
+
+Approximate the number of tokens in a piece of text. This is the same estimate
+the chunking engine uses when it decides where a chunk ends, and it is what
+gets stored in the `token_count` column of a chunk table, so it is useful for
+working out why a given piece of text chunked the way it did.
+
+```sql
+SELECT pgedge_vectorizer.count_tokens(content TEXT);
+```
+
+Returns: `INT` -- The estimated token count, or `NULL` for `NULL` input.
+
+The estimate counts UTF-8 characters and divides by four, rounding up, which
+is a reasonable rule of thumb for English prose but no more than that: text
+that tokenises unusually, such as code, dense punctuation or languages other
+than English, will be some way out. Do not use it where an exact count
+matters, such as checking a payload against a provider's hard token limit.
+
 ### show_config()
 
 Display all pgedge_vectorizer configuration settings.
@@ -371,4 +390,50 @@ Count of pending items.
 
 ```sql
 SELECT * FROM pgedge_vectorizer.pending_count;
+```
+
+### vectorizer_status
+
+Embedding coverage and queue backlog for every registered vectorizer, one row
+per source table and column. See
+[Check Embedding Coverage](monitoring.md#check-embedding-coverage) for how to
+read the numbers.
+
+```sql
+SELECT * FROM pgedge_vectorizer.vectorizer_status;
+```
+
+Columns:
+
+- `source_table`, `source_column`, `chunk_table`: The vectorizer, as registered
+- `source_rows`: Rows in the source table
+- `source_rows_covered`: Source rows with at least one embedded chunk
+- `source_coverage`: `source_rows_covered / source_rows`, to four decimal
+  places, or `NULL` for an empty source table. A value above 1 means the chunk
+  table holds rows for source rows that no longer exist
+- `chunks_total`, `chunks_embedded`: Rows in the chunk table, and how many have
+  a non-NULL `embedding`
+- `chunk_coverage`: `chunks_embedded / chunks_total`, to four decimal places,
+  or `NULL` for an empty chunk table
+- `queue_pending`, `queue_processing`, `queue_failed`: Queue items for this
+  chunk table in each state
+- `oldest_pending_age`: How long the oldest pending item has been waiting, or
+  `NULL` if nothing is pending
+- `last_processed_at`: When an item was most recently completed. Only queue
+  rows that still exist are considered, so `clear_completed()` moves this
+  backwards
+
+The counts scan the chunk table and the source table, so this costs
+considerably more than the queue views above. If the chunk or source table has
+been dropped, or the caller cannot read it, the corresponding columns are
+`NULL` rather than the query failing.
+
+The function form of the same name narrows the result to one source table, and
+optionally to one column of it:
+
+```sql
+SELECT * FROM pgedge_vectorizer.vectorizer_status(
+    source_table  REGCLASS DEFAULT NULL,
+    source_column NAME DEFAULT NULL
+);
 ```
