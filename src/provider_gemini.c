@@ -28,8 +28,10 @@ static bool provider_initialized = false;
  */
 static bool gemini_init(char **error_msg);
 static void gemini_cleanup(void);
-static float *gemini_generate(const char *text, int *dim, char **error_msg);
-static float **gemini_generate_batch(const char **texts, int count, int *dim,
+static float *gemini_generate(const char *text, const char *model,
+				 int *dim, char **error_msg);
+static float **gemini_generate_batch(const char **texts, int count,
+									   const char *model, int *dim,
 									 char **error_msg);
 
 /* Gemini-specific response parser */
@@ -98,13 +100,14 @@ gemini_cleanup(void)
  * Generate a single embedding
  */
 static float *
-gemini_generate(const char *text, int *dim, char **error_msg)
+gemini_generate(const char *text, const char *model,
+				 int *dim, char **error_msg)
 {
 	const char *texts[1] = {text};
 	float **embeddings;
 	float *result;
 
-	embeddings = gemini_generate_batch(texts, 1, dim, error_msg);
+	embeddings = gemini_generate_batch(texts, 1, model, dim, error_msg);
 	if (embeddings == NULL)
 		return NULL;
 
@@ -122,7 +125,8 @@ gemini_generate(const char *text, int *dim, char **error_msg)
  * Response: {"embeddings":[{"values":[0.1,0.2,...]}, ...]}
  */
 static float **
-gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
+gemini_generate_batch(const char **texts, int count, const char *model,
+					  int *dim, char **error_msg)
 {
 	char *json_request;
 	char *url;
@@ -149,7 +153,7 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 		appendStringInfo(&request_buf,
 						 "{\"model\":\"models/%s\","
 						 "\"content\":{\"parts\":[{\"text\":\"%s\"}]}}",
-						 pgedge_vectorizer_model, escaped);
+						 model, escaped);
 		pfree(escaped);
 	}
 	appendStringInfo(&request_buf, "]}");
@@ -161,7 +165,7 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 		? pgedge_vectorizer_api_url
 		: GEMINI_DEFAULT_BASE_URL;
 	url = psprintf("%s/models/%s:batchEmbedContents", base_url,
-				   pgedge_vectorizer_model);
+				   model);
 
 	/* Build auth header */
 	auth_header = psprintf("x-goog-api-key: %s", api_key);
