@@ -47,6 +47,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and are counted separately, but `reembed()` treats them as needing redoing,
   so the first call on an upgraded installation re-embeds the whole table.
 
+- One provider's trouble no longer becomes every provider's
+  ([#76](https://github.com/pgEdge/pgedge-vectorizer/issues/76)). A rate limit
+  used to hold the worker off entirely, and a vectorizer naming a provider that
+  does not exist used to stop the whole queue, both because the worker still
+  assumed a batch of work belonged to a single provider. Cooldowns are now kept
+  per provider and only that provider's items are held back; a vectorizer whose
+  provider cannot be resolved has its own work skipped, uncharged, whilst
+  everything else carries on. Where nothing at all can be attempted the worker
+  still backs off rather than polling continuously.
+- `set_embedding_model()` refused to change a vectorizer that had chunks but no
+  embeddings, saying it would leave them "embedded with" a model that had never
+  run. It counts embedded chunks now, which is what the refusal was ever about.
+
 ### Changed
 
 - `generate_embedding(NULL)` now raises an error rather than returning NULL.

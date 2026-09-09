@@ -85,7 +85,10 @@ failure, and the worker treats it as such:
   `max_attempts`. The deferrals are counted in
   `queue.rate_limit_deferrals`, and an item is only given up on after a
   hundred of them.
-- The worker stops sending until the wait has passed.
+- The worker stops sending to *that provider* until the wait has passed.
+  Vectorizers using a different provider carry on, including in the same
+  batch: a hosted provider's quota does not hold up a local model that has
+  no quota at all.
 
 A queue being throttled looks like this and needs no intervention:
 
@@ -108,6 +111,58 @@ than the provider's quota allows. Lower
 `pgedge_vectorizer.num_workers` so fewer requests compete for it, raise
 `pgedge_vectorizer.batch_size` so each request carries more, or move to a
 plan with a higher limit.
+
+## A Vectorizer Names a Provider That Does Not Exist
+
+A vectorizer can name its own provider, and a name that does not match one
+the extension knows about, or a provider that cannot start because its API
+key file is unreadable, cannot be embedded against. The worker says so and
+leaves that vectorizer's work alone:
+
+```text
+WARNING:  pgedge_vectorizer worker for database "app": provider "openia" for
+          articles_body_chunks is unavailable, leaving 3 items queued:
+          provider not found
+```
+
+Its items stay `pending` with `attempts` still at zero, because the fault is
+in the configuration rather than in the work, and charging them would retire
+the queue one blameless row at a time. Every other vectorizer in the database
+carries on as normal.
+
+Confirm it with:
+
+```sql
+SELECT source_table, source_column, provider, model
+  FROM pgedge_vectorizer.vectorizers
+ WHERE provider IS NOT NULL;
+
+SELECT status, count(*), max(attempts) AS attempts
+  FROM pgedge_vectorizer.queue
+ WHERE chunk_table = 'articles_body_chunks'
+ GROUP BY status;
+```
+
+The fix is to correct the provider, and nothing else:
+
+```sql
+SELECT pgedge_vectorizer.set_embedding_model(
+    'articles'::regclass, 'body', 'text-embedding-3-small',
+    provider => 'openai');
+```
+
+There is no need to retry anything, because nothing was ever charged; the
+worker picks the items up on its next poll. If every vectorizer in the
+database is affected, which is what a mistyped `pgedge_vectorizer.provider`
+does, the worker also backs off between attempts rather than polling flat
+out, and says so:
+
+```text
+LOG:  pgedge_vectorizer worker for database "app": no usable provider for the
+      queued work, waiting 20s before trying again
+```
+
+That wait resets as soon as the configuration is corrected and reloaded.
 
 ## Dimension Mismatch After Changing the Model
 
