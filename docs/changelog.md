@@ -22,6 +22,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `pgedge_vectorizer.count_tokens(text)`, which exposes the chunking engine's
   token estimate so you can see why a piece of text chunked the way it did.
+- `pgedge_vectorizer.vectorizer_status`, a view reporting embedding coverage
+  and queue backlog for each registered vectorizer, so you can tell how far
+  behind the embeddings are before trusting a search over them, and spot a
+  worker that has stalled ([#25](https://github.com/pgEdge/pgedge-vectorizer/issues/25)).
+  A function of the same name narrows the result to a single source table or
+  column. The counts scan the chunk and source tables, so this is a diagnostic
+  to run deliberately rather than something to poll.
 
 ## [1.1] - 2026-08-28
 
