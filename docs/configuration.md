@@ -80,13 +80,12 @@ SELECT pgedge_vectorizer.set_embedding_model(
 ```
 
 Either call needs `force_reembed => true` if the vectorizer already has
-embeddings and the effective model actually moves, as below.
-
-`set_embedding_model()` refuses to change a vectorizer that already has
-embeddings unless you pass `force_reembed => true`, which clears every
-embedding and requeues every chunk. See
-[Best Practices](best_practices.md) for what that costs and why the refusal
-is not limited to changes of dimension.
+embeddings and the effective model actually moves, in which case every
+embedding is cleared and every chunk requeued. Where the effective model does
+not move, because the value passed matches what was already in force, nothing
+is requeued and no flag is needed. See
+[Best Practices](best_practices.md) for what a re-embed costs and why the
+refusal is not limited to changes of dimension.
 
 !!! warning "Changing the GUC still moves every inheriting vectorizer"
 

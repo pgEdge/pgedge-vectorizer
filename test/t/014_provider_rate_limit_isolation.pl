@@ -64,6 +64,11 @@ if ($server_pid == 0)
 
 $listener->close;
 
+# Kill the provider however this test ends. Without it a failed assertion
+# leaves the child holding the inherited pipe and the bound port, so prove
+# waits on it instead of reporting the failure.
+END { kill 'TERM', $server_pid if $server_pid; }
+
 # Never checked by the socket above, but the providers will not start without it.
 my $keyfile = "$tempdir/api_key";
 open my $kf, '>', $keyfile or die "could not write $keyfile: $!";
