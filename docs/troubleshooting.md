@@ -133,9 +133,16 @@ carries on as normal.
 Confirm it with:
 
 ```sql
-SELECT source_table, source_column, provider, model
+-- The effective provider, not the override: a mistyped
+-- pgedge_vectorizer.provider leaves every override NULL, which is exactly
+-- the case where the whole database is affected.
+SELECT source_table, source_column,
+       COALESCE(provider, current_setting('pgedge_vectorizer.provider'))
+           AS effective_provider,
+       COALESCE(model, current_setting('pgedge_vectorizer.model'))
+           AS effective_model
   FROM pgedge_vectorizer.vectorizers
- WHERE provider IS NOT NULL;
+ ORDER BY source_table, source_column;
 
 SELECT status, count(*), max(attempts) AS attempts
   FROM pgedge_vectorizer.queue

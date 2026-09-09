@@ -215,13 +215,15 @@ with, and where that disagrees with what it would use now.
 
 ```sql
 SELECT * FROM pgedge_vectorizer.embedding_model_status(
-    source_table  REGCLASS DEFAULT NULL,
-    source_column NAME DEFAULT NULL
+    p_source_table  REGCLASS DEFAULT NULL,
+    p_source_column NAME DEFAULT NULL
 );
 ```
 
 **Parameters:** both optional, narrowing the result to one source table or one
-column of it. With neither, every registered vectorizer is reported.
+column of it. With neither, every registered vectorizer is reported. They carry
+the `p_` prefix because the function returns columns of the same names, which
+would otherwise be ambiguous.
 
 Columns:
 

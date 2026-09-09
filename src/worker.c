@@ -1746,6 +1746,18 @@ process_queue_batch(const char *dbname)
 	 * fill every batch and starve everyone behind it, which is the same fault
 	 * one step further along.
 	 */
+	/* Start a transaction */
+	SetCurrentStatementStartTimestamp();
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+	SPI_connect();
+
+	/*
+	 * Built here rather than before the transaction so that the string is
+	 * allocated in a context the transaction reclaims. The worker polls for
+	 * the life of the process, so anything left in its long-lived context
+	 * accumulates a little on every poll for ever.
+	 */
 	initStringInfo(&cooling);
 	if (provider_cooling_names(&cooling) > 0)
 	{
@@ -1757,12 +1769,6 @@ process_queue_batch(const char *dbname)
 		elog(DEBUG1, "Worker for database \"%s\": holding off provider%s %s",
 			 dbname, strchr(cooling.data, ',') ? "s" : "", cooling.data);
 	}
-
-	/* Start a transaction */
-	SetCurrentStatementStartTimestamp();
-	StartTransactionCommand();
-	PushActiveSnapshot(GetTransactionSnapshot());
-	SPI_connect();
 
 	/* Fetch pending items using FOR UPDATE SKIP LOCKED */
 	/*
@@ -1983,6 +1989,15 @@ process_queue_batch(const char *dbname)
 
 				if (batch_sparse_only)
 				{
+					/*
+					 * No provider is needed, but this is still a request the
+					 * pull carried out: the items are scored and completed
+					 * below. Left unset, a pull made entirely of sparse-only
+					 * items would report that it attempted nothing and earn a
+					 * backoff for work that succeeded.
+					 */
+					attempted = true;
+
 					embeddings = palloc0(batch_count * sizeof(float *));
 					dim = 0;
 					error_msg = NULL;
