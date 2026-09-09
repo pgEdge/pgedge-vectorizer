@@ -328,6 +328,25 @@ SELECT pgedge_vectorizer.bm25_tokenize(query TEXT);
 
 Returns: `TEXT[]` -- Array of distinct non-stopword terms.
 
+### count_tokens()
+
+Approximate the number of tokens in a piece of text. This is the same estimate
+the chunking engine uses when it decides where a chunk ends, and it is what
+gets stored in the `token_count` column of a chunk table, so it is useful for
+working out why a given piece of text chunked the way it did.
+
+```sql
+SELECT pgedge_vectorizer.count_tokens(content TEXT);
+```
+
+Returns: `INT` -- The estimated token count, or `NULL` for `NULL` input.
+
+The estimate counts UTF-8 characters and divides by four, rounding up, which
+is a reasonable rule of thumb for English prose but no more than that: text
+that tokenises unusually, such as code, dense punctuation or languages other
+than English, will be some way out. Do not use it where an exact count
+matters, such as checking a payload against a provider's hard token limit.
+
 ### show_config()
 
 Display all pgedge_vectorizer configuration settings.

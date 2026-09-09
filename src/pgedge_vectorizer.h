@@ -181,6 +181,7 @@ extern EmbeddingProvider GeminiProvider;
 
 /* tokenizer.c */
 int count_tokens(const char *text, const char *model);
+Datum pgedge_vectorizer_count_tokens(PG_FUNCTION_ARGS);
 int *tokenize_text(const char *text, const char *model, int *token_count);
 char *detokenize_tokens(const int *tokens, int token_count, const char *model);
 int get_char_offset_for_tokens(const char *text, int target_tokens, const char *model);
