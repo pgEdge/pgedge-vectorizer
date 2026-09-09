@@ -28,6 +28,126 @@ These settings configure the connection to your embedding provider, including th
     [Troubleshooting](troubleshooting.md) document describes how to
     recover.
 
+### Per-vectorizer provider and model
+
+The settings above are the defaults for the whole database, which is the right
+thing when every table wants the same embeddings, and the wrong thing when they
+do not: a table of short product titles and a table of long technical documents
+are rarely well served by one model, and you may want one table embedded
+locally through Ollama whilst another goes to a hosted provider. A vectorizer
+can therefore name its own provider and model, and falls back to the settings
+above where it does not.
+
+Pin them when the vectorizer is created:
+
+```sql
+SELECT pgedge_vectorizer.enable_vectorization(
+    'articles'::regclass, 'body',
+    provider => 'ollama',
+    model    => 'nomic-embed-text'
+);
+```
+
+Or change them afterwards with `set_embedding_model()`, which takes the model
+first because that is the argument you usually want:
+
+```sql
+SELECT pgedge_vectorizer.set_embedding_model(
+    'articles'::regclass, 'body', 'nomic-embed-text', provider => 'ollama');
+```
+
+Both settings live in `pgedge_vectorizer.vectorizers` as nullable columns,
+where NULL means inherit. Inheritance is resolved when the work runs rather
+than copied at creation, so a vectorizer that inherits follows the GUC as the
+GUC changes.
+
+`set_embedding_model()` always writes both columns to exactly what you pass,
+and both default to NULL, so the shortest call resets both to inheriting:
+
+```sql
+-- Back to inheriting the provider and the model
+SELECT pgedge_vectorizer.set_embedding_model('articles'::regclass, 'body', NULL);
+```
+
+That cuts both ways: to change only the model whilst keeping a pinned
+provider, name the provider again, or it reverts to inheriting alongside the
+model.
+
+```sql
+-- Keep the pinned provider, change only the model
+SELECT pgedge_vectorizer.set_embedding_model(
+    'articles'::regclass, 'body', 'mxbai-embed-large', provider => 'ollama');
+```
+
+Either call needs `force_reembed => true` if the vectorizer already has
+embeddings and the effective model actually moves, as below.
+
+`set_embedding_model()` refuses to change a vectorizer that already has
+embeddings unless you pass `force_reembed => true`, which clears every
+embedding and requeues every chunk. See
+[Best Practices](best_practices.md) for what that costs and why the refusal
+is not limited to changes of dimension.
+
+!!! warning "Changing the GUC still moves every inheriting vectorizer"
+
+    The refusal above protects a vectorizer that has pinned its model. A
+    vectorizer that inherits has not, so changing
+    `pgedge_vectorizer.model` globally re-points every inheriting table at
+    once, with no guard and no re-embed, exactly as it did before this
+    setting existed. Pin the model on any vectorizer whose embeddings
+    matter.
+
+    Where it has already happened, it is at least visible and repairable:
+    `embedding_model_status()` reports what each chunk table is a mixture
+    of, and `reembed()` redoes the chunks that are not current. See
+    [Seeing what a table was embedded with](#seeing-what-a-table-was-embedded-with).
+
+### Seeing what a table was embedded with
+
+Every chunk records the provider and model that produced its vector, so a
+disagreement between that and what the vectorizer would use now is visible
+rather than something you discover through poor search results:
+
+```sql
+SELECT * FROM pgedge_vectorizer.embedding_model_status('articles'::regclass);
+```
+
+```
+source_table         | articles
+source_column        | body
+effective_provider   | openai
+effective_model      | text-embedding-3-large
+chunks_embedded      | 12043
+chunks_current       | 9945
+chunks_other_model   | 2098
+chunks_model_unknown | 0
+embedded_models      | {openai/text-embedding-3-large,openai/text-embedding-3-small}
+```
+
+`chunks_other_model` is the count that matters: those rows hold vectors from a
+different model, and similarity between two models' vectors is meaningless, so
+they are effectively invisible to search rather than merely stale.
+`chunks_model_unknown` counts rows embedded before this was recorded, which is
+every row on an installation that has just upgraded; they may well be current,
+so they are reported separately rather than assumed wrong.
+
+To repair it:
+
+```sql
+SELECT pgedge_vectorizer.reembed('articles'::regclass, 'body');
+```
+
+That clears and requeues everything not known to have come from the provider
+and model the vectorizer would use now, which includes the unknown rows, since
+a row that cannot be shown to be current is one that needs doing again. Rows
+that are already current are left alone, unless the new model is a different
+width, in which case the column has to be altered and every chunk goes with it.
+Chunks, token counts, sparse embeddings and the BM25 statistics are untouched
+throughout, because none of them depends on the embedding model.
+
+Both functions scan the chunk table, so give them a source table rather than
+running them across every vectorizer out of habit.
+
 ## Worker Settings
 
 These settings control the background workers that process the embedding queue, including concurrency, batch sizes, and retry behavior.

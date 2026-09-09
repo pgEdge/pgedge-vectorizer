@@ -249,7 +249,8 @@ static bool queue_item_record_failure(void);
 static void process_queue_batch(const char *dbname);
 static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
-							 const float *embedding, int dim);
+							 const float *embedding, int dim,
+							 const char *provider, const char *model);
 static char *trim_whitespace(char *str);
 static int	parse_database_list(char ***names);
 static int	worker_quantum_secs(void);
@@ -1493,6 +1494,73 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 }
 
 /*
+ * Swap two items of a fetched batch, moving every parallel array together.
+ */
+static void
+swap_batch_items(int a, int b, int64 *queue_ids, int64 *chunk_ids,
+				 char **chunk_tables, const char **contents,
+				 int *content_lens, int *attempts, int *max_attempts,
+				 bool *sparse_only, char **providers, char **models)
+{
+#define SWAP(type, arr) do { type tmp_ = (arr)[a]; \
+							 (arr)[a] = (arr)[b];  \
+							 (arr)[b] = tmp_; } while (0)
+	SWAP(int64, queue_ids);
+	SWAP(int64, chunk_ids);
+	SWAP(char *, chunk_tables);
+	SWAP(const char *, contents);
+	SWAP(int, content_lens);
+	SWAP(int, attempts);
+	SWAP(int, max_attempts);
+	SWAP(bool, sparse_only);
+	SWAP(char *, providers);
+	SWAP(char *, models);
+#undef SWAP
+}
+
+/*
+ * Group a fetched batch by (provider, model).
+ *
+ * A batch is selected by age across every vectorizer at once, so items headed
+ * for different models interleave. One request carries one model, and merely
+ * breaking the run wherever the model changes would give requests of one item
+ * whenever two tables' work alternates in time. Sorting first keeps requests
+ * as full as they can be.
+ *
+ * An insertion sort is enough for batch_size items and is stable, so the age
+ * ordering survives within each group. The batch is still selected by
+ * created_at, so this changes only the order of requests within one batch,
+ * not which items are picked up.
+ */
+static void
+sort_batch_by_model(int n_items, int64 *queue_ids, int64 *chunk_ids,
+					char **chunk_tables, const char **contents,
+					int *content_lens, int *attempts, int *max_attempts,
+					bool *sparse_only, char **providers, char **models)
+{
+	for (int i = 1; i < n_items; i++)
+	{
+		int		j = i;
+
+		while (j > 0)
+		{
+			int		cmp = strcmp(providers[j - 1], providers[j]);
+
+			if (cmp == 0)
+				cmp = strcmp(models[j - 1], models[j]);
+
+			if (cmp <= 0)
+				break;
+
+			swap_batch_items(j - 1, j, queue_ids, chunk_ids, chunk_tables,
+							 contents, content_lens, attempts, max_attempts,
+							 sparse_only, providers, models);
+			j--;
+		}
+	}
+}
+
+/*
  * How many of the items starting at `start` may be sent as one request.
  *
  * An item that has already failed goes on its own, so its fault cannot fail
@@ -1502,10 +1570,14 @@ pgedge_vectorizer_worker_main(Datum main_arg)
  *
  * Sparse-only items are grouped with their like because a request is skipped
  * only when every item in it already has its dense embedding.
+ *
+ * A request also carries exactly one provider and model, so the run breaks
+ * where either changes. sort_batch_by_model() has already grouped the batch,
+ * so this only marks the boundaries rather than fragmenting anything.
  */
 static int
 batch_extent(int start, int n_items, const int *attempts,
-			 const bool *sparse_only)
+			 const bool *sparse_only, char **providers, char **models)
 {
 	int			count = 1;
 
@@ -1514,7 +1586,9 @@ batch_extent(int start, int n_items, const int *attempts,
 
 	while (start + count < n_items &&
 		   attempts[start + count] == 0 &&
-		   sparse_only[start + count] == sparse_only[start])
+		   sparse_only[start + count] == sparse_only[start] &&
+		   strcmp(providers[start + count], providers[start]) == 0 &&
+		   strcmp(models[start + count], models[start]) == 0)
 		count++;
 
 	return count;
@@ -1555,12 +1629,47 @@ process_queue_batch(const char *dbname)
 	SPI_connect();
 
 	/* Fetch pending items using FOR UPDATE SKIP LOCKED */
+	/*
+	 * The left join resolves each item's provider and model, with the
+	 * vectorizer's setting overriding the GUC and NULL meaning inherit.
+	 * NULLIF puts an empty string on the same footing as NULL, which is the
+	 * rule resolve_provider() and resolve_model() already apply in embed.c.
+	 * Doing it here keeps the inheritance rule out of the C entirely, and
+	 * an item whose vectorizer has since been disabled falls back to the
+	 * GUCs through the same expression rather than needing a special case.
+	 *
+	 * FOR UPDATE OF q, not a bare FOR UPDATE: the registry rows are not
+	 * being changed, and locking the nullable side of a left join is
+	 * rejected outright.
+	 *
+	 * LATERAL ... LIMIT 1 rather than a plain join, because only
+	 * (source_table, source_column) is unique in the registry: two
+	 * vectorizers pointed at one chunk table by an explicit chunk_table_name
+	 * would otherwise match a queue row twice, and the item would be embedded
+	 * twice and counted twice into the BM25 corpus statistics. That
+	 * configuration is already incoherent, but it must not corrupt the
+	 * statistics of a table that is merely nearby.
+	 */
 	ret = SPI_execute(psprintf(
-		"SELECT id, chunk_id, chunk_table, content, attempts, max_attempts, "
-		"       COALESCE((metadata->>'sparse_only')::boolean, false) AS sparse_only "
-		"FROM pgedge_vectorizer.queue "
-		"WHERE status = 'pending' "
-		"AND (next_retry_at IS NULL OR next_retry_at <= NOW()) "
+		"SELECT q.id, q.chunk_id, q.chunk_table, q.content, q.attempts, "
+		"       q.max_attempts, "
+		"       COALESCE((q.metadata->>'sparse_only')::boolean, false) "
+		"           AS sparse_only, "
+		"       COALESCE(NULLIF(v.provider, ''), "
+		"                current_setting('pgedge_vectorizer.provider')) "
+		"           AS provider, "
+		"       COALESCE(NULLIF(v.model, ''), "
+		"                current_setting('pgedge_vectorizer.model')) "
+		"           AS model "
+		"FROM pgedge_vectorizer.queue q "
+		"LEFT JOIN LATERAL ("
+		"    SELECT r.provider, r.model "
+		"      FROM pgedge_vectorizer.vectorizers r "
+		"     WHERE r.chunk_table = q.chunk_table "
+		"     ORDER BY r.id "
+		"     LIMIT 1) v ON true "
+		"WHERE q.status = 'pending' "
+		"AND (q.next_retry_at IS NULL OR q.next_retry_at <= NOW()) "
 		/*
 		 * Oldest first.  Ordering by attempts DESC put the items that had
 		 * failed most at the head of every batch, so a provider outage left
@@ -1568,9 +1677,9 @@ process_queue_batch(const char *dbname)
 		 * items exhausted max_attempts.  next_retry_at already spaces retries
 		 * out; age is the only ordering the queue needs.
 		 */
-		"ORDER BY created_at "
+		"ORDER BY q.created_at "
 		"LIMIT %d "
-		"FOR UPDATE SKIP LOCKED",
+		"FOR UPDATE OF q SKIP LOCKED",
 		batch_size),
 		false, batch_size);
 
@@ -1585,6 +1694,8 @@ process_queue_batch(const char *dbname)
 		int *attempts = palloc(n_items * sizeof(int));
 		int *max_attempts = palloc(n_items * sizeof(int));
 		bool *sparse_only = palloc(n_items * sizeof(bool));
+		char **providers = palloc(n_items * sizeof(char *));
+		char **models = palloc(n_items * sizeof(char *));
 		float **embeddings = NULL;
 		int dim = 0;
 		int batch_count = 0;
@@ -1621,6 +1732,12 @@ process_queue_batch(const char *dbname)
 
 			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 7, &isnull);
 			sparse_only[i] = (!isnull && DatumGetBool(val));
+
+			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 8, &isnull);
+			providers[i] = TextDatumGetCString(val);
+
+			val = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 9, &isnull);
+			models[i] = TextDatumGetCString(val);
 
 			if (attempts[i] > 0)
 				has_retries = true;
@@ -1659,6 +1776,15 @@ process_queue_batch(const char *dbname)
 		}
 
 		/*
+		 * Group the batch so that each request carries one provider and
+		 * model. Safe here: every item is independent of its neighbours, and
+		 * the arrays move together.
+		 */
+		sort_batch_by_model(n_items, queue_ids, chunk_ids, chunk_tables,
+							contents, content_lens, attempts, max_attempts,
+							sparse_only, providers, models);
+
+		/*
 		 * Stop charging the last probed item.  What follows — marking the
 		 * batch, resolving the provider, generating embeddings — either
 		 * fails for the whole batch or for no single item in particular, and
@@ -1688,25 +1814,19 @@ process_queue_batch(const char *dbname)
 				false, 0);
 		}
 
-		/* Get the provider */
-		provider = get_current_provider();
-		if (provider == NULL)
-		{
-			elog(ERROR, "No provider configured");
-		}
-
-		/* Initialize provider if needed */
-		if (!provider->init(&error_msg))
-		{
-			elog(ERROR, "Failed to initialize provider: %s",
-				 error_msg ? error_msg : "unknown error");
-		}
+		/*
+		 * The provider is resolved per request rather than once per batch,
+		 * because a batch may hold items for vectorizers configured with
+		 * different providers. Each provider caches its own initialisation
+		 * in a file-static, so init() per request costs nothing after the
+		 * first.
+		 */
 
 		/* Process items in requests as large as batch_extent() allows */
 		for (int batch_start = 0; batch_start < n_items; batch_start += batch_count)
 		{
 			batch_count = batch_extent(batch_start, n_items, attempts,
-									   sparse_only);
+									   sparse_only, providers, models);
 
 			/* Skip dense generation when every item in this batch is sparse-only. */
 			{
@@ -1735,10 +1855,32 @@ process_queue_batch(const char *dbname)
 					 * provider that fails before reaching the network records
 					 * nothing of its own.
 					 */
+					/*
+					 * A provider that cannot be resolved or initialised is a
+					 * fault of the configuration rather than of any item in
+					 * the request, so it is raised rather than charged: see
+					 * 005_batch_failure_backoff.pl, which exists to keep a
+					 * mistyped provider name from retiring the whole queue
+					 * one blameless row at a time. The outer handler backs
+					 * the worker off instead.
+					 */
+					provider = get_embedding_provider(providers[batch_start]);
+					if (provider == NULL)
+						elog(ERROR, "embedding provider \"%s\" is not available",
+							 providers[batch_start]);
+
+					if (!provider->init(&error_msg))
+						elog(ERROR, "failed to initialise provider \"%s\": %s",
+							 providers[batch_start],
+							 error_msg ? error_msg : "unknown error");
+
 					provider_reset_rate_limit();
 
-					/* Generate embeddings for this batch */
-					embeddings = provider->generate_batch(&contents[batch_start], batch_count, &dim, &error_msg);
+					/* Generate embeddings for this request */
+					embeddings = provider->generate_batch(&contents[batch_start],
+											  batch_count,
+											  models[batch_start],
+											  &dim, &error_msg);
 				}
 			}
 
@@ -1821,7 +1963,9 @@ process_queue_batch(const char *dbname)
 					queue_item_begin(queue_ids[idx], attempts[idx],
 									 max_attempts[idx]);
 					if (!sparse_only[idx])
-						update_embedding(chunk_ids[idx], chunk_tables[idx], embeddings[i], dim);
+						update_embedding(chunk_ids[idx], chunk_tables[idx],
+										 embeddings[i], dim,
+										 providers[idx], models[idx]);
 					else if (!pgedge_vectorizer_enable_hybrid)
 						elog(ERROR, "cannot process sparse-only queue item while pgedge_vectorizer.enable_hybrid is disabled");
 
@@ -1986,16 +2130,37 @@ process_queue_batch(const char *dbname)
 					char	   *next_try =
 						rate_limit_backoff_expr(ratelimit->retry_after);
 					int			cooldown;
-					int			deferred = n_items - batch_start;
+					int			deferred = 0;
 
 					/*
-					 * The rest of the pull is deferred too. It would meet the
-					 * same limit, and it was marked 'processing' before the
-					 * loop began: nothing reclaims an item left that way at
-					 * commit.
+					 * The rest of this provider's pull is deferred too. It
+					 * would meet the same limit, and it was marked
+					 * 'processing' before the loop began: nothing reclaims an
+					 * item left that way at commit.
+					 *
+					 * Only this provider's items, though. A batch can now
+					 * span providers, and charging another provider's work
+					 * for this one's 429 would spend deferrals it never used
+					 * and, once they ran out, fail it outright. Those items
+					 * go straight back to pending, uncharged, for the next
+					 * pull to take.
 					 */
 					for (int idx = batch_start; idx < n_items; idx++)
 					{
+						if (strcmp(providers[idx],
+								   providers[batch_start]) != 0)
+						{
+							SPI_execute(psprintf(
+								"UPDATE pgedge_vectorizer.queue "
+								"SET status = 'pending' "
+								"WHERE id = %ld",
+								queue_ids[idx]),
+								false, 0);
+							continue;
+						}
+
+						deferred++;
+
 						SPI_execute(psprintf(
 							"UPDATE pgedge_vectorizer.queue "
 							"SET status = CASE WHEN rate_limit_deferrals + 1 >= %d "
@@ -2081,7 +2246,9 @@ process_queue_batch(const char *dbname)
  * Update a chunk table with the generated embedding
  */
 static void
-update_embedding(int64 chunk_id, const char *chunk_table, const float *embedding, int dim)
+update_embedding(int64 chunk_id, const char *chunk_table,
+				 const float *embedding, int dim,
+				 const char *provider, const char *model)
 {
 	StringInfoData vector_str;
 	int ret;
@@ -2097,10 +2264,22 @@ update_embedding(int64 chunk_id, const char *chunk_table, const float *embedding
 	}
 	appendStringInfoChar(&vector_str, ']');
 
-	/* Update the chunk table */
+	/*
+	 * Record what produced the vector in the same statement that writes it,
+	 * so the two cannot disagree. Nothing else writes these columns.
+	 *
+	 * quote_identifier() because the chunk table's generated name is one
+	 * identifier with a dot in it for a schema-qualified source, not a
+	 * schema-qualified reference, which is how every other statement in this
+	 * file spells it.
+	 */
 	ret = SPI_execute(psprintf(
-		"UPDATE %s SET embedding = '%s'::vector WHERE id = %ld",
-		chunk_table, vector_str.data, chunk_id),
+		"UPDATE %s SET embedding = '%s'::vector, "
+		"embedding_provider = %s, embedding_model = %s "
+		"WHERE id = %ld",
+		quote_identifier(chunk_table), vector_str.data,
+		quote_literal_cstr(provider), quote_literal_cstr(model),
+		chunk_id),
 		false, 0);
 
 	if (ret != SPI_OK_UPDATE)

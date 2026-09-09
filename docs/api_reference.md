@@ -15,7 +15,9 @@ SELECT pgedge_vectorizer.enable_vectorization(
     chunk_overlap INT DEFAULT NULL,
     embedding_dimension INT DEFAULT NULL,
     chunk_table_name TEXT DEFAULT NULL,
-    source_pk NAME DEFAULT NULL
+    source_pk NAME DEFAULT NULL,
+    provider TEXT DEFAULT NULL,
+    model TEXT DEFAULT NULL
 );
 ```
 
@@ -29,6 +31,8 @@ SELECT pgedge_vectorizer.enable_vectorization(
 - `embedding_dimension`: Vector dimension. When NULL (the default), the dimension is auto-detected by making a probe call to the configured embedding provider/model. Can be set explicitly to override auto-detection.
 - `chunk_table_name`: Custom chunk table name (default: `{table}_{column}_chunks`)
 - `source_pk`: Primary key column to use as the document identifier in the chunk table. When NULL (the default), the primary key column name and type are auto-detected from the table's primary key index via `pg_index`. Set explicitly to use a specific column (e.g., `'external_id'`).
+- `provider`: Embedding provider for this vectorizer. When NULL (the default), `pgedge_vectorizer.provider` is used, and continues to be used as it changes.
+- `model`: Embedding model for this vectorizer. When NULL (the default), `pgedge_vectorizer.model` is used, and continues to be used as it changes. Where `embedding_dimension` is not given, the probe asks about this model rather than the configured one.
 
 **Primary Key Handling:**
 
@@ -107,15 +111,24 @@ Generate an embedding vector from query text.
 
 ```sql
 SELECT pgedge_vectorizer.generate_embedding(
-    query_text TEXT
+    query_text TEXT,
+    provider   TEXT DEFAULT NULL,
+    model      TEXT DEFAULT NULL
 );
 ```
 
 **Parameters:**
 
 - `query_text`: Text to generate an embedding for
+- `provider`: Provider to use. NULL (the default) uses `pgedge_vectorizer.provider`.
+- `model`: Model to use. NULL (the default) uses `pgedge_vectorizer.model`.
 
-Returns: `vector` - The embedding vector using the configured provider
+Returns: `vector` - The embedding vector
+
+A query embedding must come from the same model as the embeddings it is
+compared against, so name the model explicitly when searching a chunk table
+whose vectorizer pins one. Vectors from two models are not comparable, and
+nothing will report an error if you mix them.
 
 **Example:**
 
@@ -135,15 +148,143 @@ LIMIT 5;
 
 ### detect_embedding_dimension()
 
-Detect the embedding dimension of the currently configured provider/model.
+Detect the embedding dimension of a provider and model.
 
 ```sql
-SELECT pgedge_vectorizer.detect_embedding_dimension();
+SELECT pgedge_vectorizer.detect_embedding_dimension(
+    provider TEXT DEFAULT NULL,
+    model    TEXT DEFAULT NULL
+);
 ```
+
+**Parameters:**
+
+- `provider`: Provider to probe. NULL (the default) uses `pgedge_vectorizer.provider`.
+- `model`: Model to probe. NULL (the default) uses `pgedge_vectorizer.model`.
 
 Returns: `INT` - The number of dimensions in the embedding vector
 
-This function generates a probe embedding using the configured provider and model, and returns the dimension of the resulting vector. It is called automatically by `enable_vectorization()` when `embedding_dimension` is not specified.
+This function generates a probe embedding and returns the dimension of the result, which means a real request to the provider. It is called automatically by `enable_vectorization()` and `set_embedding_model()` when `embedding_dimension` is not specified.
+
+### set_embedding_model()
+
+Change the embedding provider and model for one vectorizer.
+
+```sql
+SELECT pgedge_vectorizer.set_embedding_model(
+    source_table        REGCLASS,
+    source_column       NAME,
+    model               TEXT,
+    provider            TEXT DEFAULT NULL,
+    embedding_dimension INT DEFAULT NULL,
+    force_reembed       BOOLEAN DEFAULT FALSE
+);
+```
+
+**Parameters:**
+
+- `source_table`, `source_column`: The vectorizer to change
+- `model`: Model to use. NULL means inherit `pgedge_vectorizer.model`.
+- `provider`: Provider to use. NULL means inherit `pgedge_vectorizer.provider`.
+- `embedding_dimension`: Dimension of the new model. When NULL (the default), the new provider and model are probed for it, which is a real request. The chunk table's vector column is altered to match whether or not the vectorizer has any chunks yet, since a column left at the old width would fail every embedding written afterwards.
+- `force_reembed`: Whether to clear the existing embeddings and requeue every chunk. Required to change a vectorizer that has any chunks.
+
+Returns: `BIGINT` - The number of chunks requeued, which is zero unless the re-embed ran
+
+Both columns are written to exactly what you pass, NULL included, so this is also how a vectorizer goes back to inheriting the GUCs. Where the effective provider and model do not actually change, nothing is requeued.
+
+Changing a vectorizer that has chunks raises an error unless `force_reembed` is true. With it, every `embedding` is set to NULL, the column's dimension is altered if the new model differs, the vectorizer's queue rows are cleared and every chunk is requeued, all in one transaction. Chunk rows, their token counts, their sparse embeddings and the BM25 statistics are left alone, because none of them depends on the embedding model.
+
+The refusal triggers on the model changing rather than on the dimension changing. See [Best Practices](best_practices.md) for why, and for what a re-embed costs.
+
+**Example:**
+
+```sql
+-- Move one table to a local model, re-embedding what is already there
+SELECT pgedge_vectorizer.set_embedding_model(
+    'articles'::regclass, 'body', 'nomic-embed-text',
+    provider      => 'ollama',
+    force_reembed => true
+);
+```
+
+### embedding_model_status()
+
+Report which provider and model each vectorizer's chunks were actually embedded
+with, and where that disagrees with what it would use now.
+
+```sql
+SELECT * FROM pgedge_vectorizer.embedding_model_status(
+    source_table  REGCLASS DEFAULT NULL,
+    source_column NAME DEFAULT NULL
+);
+```
+
+**Parameters:** both optional, narrowing the result to one source table or one
+column of it. With neither, every registered vectorizer is reported.
+
+Columns:
+
+- `source_table`, `source_column`, `chunk_table`: The vectorizer, as registered
+- `effective_provider`, `effective_model`: What it would use now, inheritance
+  resolved
+- `chunks_embedded`: Chunks with a vector. Every count below is a subset of
+  this one; a chunk with no vector has no model to disagree about and is
+  excluded throughout
+- `chunks_current`: Embedded by the effective provider and model
+- `chunks_other_model`: Embedded by something else. Vectors from two models are
+  not comparable, so these rows are effectively invisible to search
+- `chunks_model_unknown`: Embedded before the extension recorded this, which is
+  every row on an installation that has just upgraded. Reported apart from a
+  mismatch because they may well be current
+- `embedded_models`: The distinct `provider/model` pairs actually present,
+  ordered
+
+Each row scans a chunk table, so this costs considerably more than the queue
+views. A chunk table that has been dropped, or that the caller cannot read,
+gives NULL counts rather than failing the whole result set.
+
+### reembed()
+
+Re-embed a vectorizer's chunks with the provider and model it would use now.
+
+```sql
+SELECT pgedge_vectorizer.reembed(
+    source_table        REGCLASS,
+    source_column       NAME,
+    embedding_dimension INT DEFAULT NULL
+);
+```
+
+**Parameters:**
+
+- `source_table`, `source_column`: The vectorizer to repair
+- `embedding_dimension`: Dimension of the effective model. When NULL (the
+  default) the provider is probed for it, which is a real request
+
+Returns: `BIGINT` - The number of chunks queued
+
+Clears and requeues every chunk not known to have been produced by the
+effective provider and model, which includes chunks with nothing recorded:
+a row that cannot be shown to be current is treated as needing doing again, so
+the first call on a freshly upgraded installation re-embeds the whole table.
+Chunks already current are left alone.
+
+If the effective model is a different width from the chunk table's vector
+column, that distinction cannot hold: the column is altered and every chunk is
+requeued, since a column cannot carry two widths. A notice says so.
+
+Chunk rows, token counts, sparse embeddings and the BM25 statistics are
+untouched either way, because none of them depends on the embedding model.
+
+Unlike `set_embedding_model()`, there is no confirmation flag: this function
+does what its name says. It does spend money against a metered provider, and
+raises a notice with the count for that reason.
+
+This is the supported repair for a vectorizer that drifted because
+`pgedge_vectorizer.model` changed under it. `set_embedding_model()` will not do
+it, because an inheriting vectorizer's effective model already is the new one,
+so from that function's point of view nothing has changed.
 
 ### retry_failed()
 
@@ -327,6 +468,25 @@ SELECT pgedge_vectorizer.bm25_tokenize(query TEXT);
 ```
 
 Returns: `TEXT[]` -- Array of distinct non-stopword terms.
+
+### count_tokens()
+
+Approximate the number of tokens in a piece of text. This is the same estimate
+the chunking engine uses when it decides where a chunk ends, and it is what
+gets stored in the `token_count` column of a chunk table, so it is useful for
+working out why a given piece of text chunked the way it did.
+
+```sql
+SELECT pgedge_vectorizer.count_tokens(content TEXT);
+```
+
+Returns: `INT` -- The estimated token count, or `NULL` for `NULL` input.
+
+The estimate counts UTF-8 characters and divides by four, rounding up, which
+is a reasonable rule of thumb for English prose but no more than that: text
+that tokenises unusually, such as code, dense punctuation or languages other
+than English, will be some way out. Do not use it where an exact count
+matters, such as checking a payload against a provider's hard token limit.
 
 ### show_config()
 
