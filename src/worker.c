@@ -1631,6 +1631,8 @@ process_queue_batch(const char *dbname)
 	/*
 	 * The left join resolves each item's provider and model, with the
 	 * vectorizer's setting overriding the GUC and NULL meaning inherit.
+	 * NULLIF puts an empty string on the same footing as NULL, which is the
+	 * rule resolve_provider() and resolve_model() already apply in embed.c.
 	 * Doing it here keeps the inheritance rule out of the C entirely, and
 	 * an item whose vectorizer has since been disabled falls back to the
 	 * GUCs through the same expression rather than needing a special case.
@@ -1644,10 +1646,10 @@ process_queue_batch(const char *dbname)
 		"       q.max_attempts, "
 		"       COALESCE((q.metadata->>'sparse_only')::boolean, false) "
 		"           AS sparse_only, "
-		"       COALESCE(v.provider, "
+		"       COALESCE(NULLIF(v.provider, ''), "
 		"                current_setting('pgedge_vectorizer.provider')) "
 		"           AS provider, "
-		"       COALESCE(v.model, "
+		"       COALESCE(NULLIF(v.model, ''), "
 		"                current_setting('pgedge_vectorizer.model')) "
 		"           AS model "
 		"FROM pgedge_vectorizer.queue q "
@@ -2104,16 +2106,37 @@ process_queue_batch(const char *dbname)
 					char	   *next_try =
 						rate_limit_backoff_expr(ratelimit->retry_after);
 					int			cooldown;
-					int			deferred = n_items - batch_start;
+					int			deferred = 0;
 
 					/*
-					 * The rest of the pull is deferred too. It would meet the
-					 * same limit, and it was marked 'processing' before the
-					 * loop began: nothing reclaims an item left that way at
-					 * commit.
+					 * The rest of this provider's pull is deferred too. It
+					 * would meet the same limit, and it was marked
+					 * 'processing' before the loop began: nothing reclaims an
+					 * item left that way at commit.
+					 *
+					 * Only this provider's items, though. A batch can now
+					 * span providers, and charging another provider's work
+					 * for this one's 429 would spend deferrals it never used
+					 * and, once they ran out, fail it outright. Those items
+					 * go straight back to pending, uncharged, for the next
+					 * pull to take.
 					 */
 					for (int idx = batch_start; idx < n_items; idx++)
 					{
+						if (strcmp(providers[idx],
+								   providers[batch_start]) != 0)
+						{
+							SPI_execute(psprintf(
+								"UPDATE pgedge_vectorizer.queue "
+								"SET status = 'pending' "
+								"WHERE id = %ld",
+								queue_ids[idx]),
+								false, 0);
+							continue;
+						}
+
+						deferred++;
+
 						SPI_execute(psprintf(
 							"UPDATE pgedge_vectorizer.queue "
 							"SET status = CASE WHEN rate_limit_deferrals + 1 >= %d "

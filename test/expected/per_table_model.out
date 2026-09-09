@@ -149,7 +149,8 @@ SET pgedge_vectorizer.model = 'text-embedding-3-small';
 -- real change. It goes through without complaint because the vectorizer has
 -- no chunks yet: there is nothing embedded for it to invalidate.
 SELECT pgedge_vectorizer.set_embedding_model(
-    'ptm_named'::regclass, 'body', 'text-embedding-3-small') AS requeued;
+    'ptm_named'::regclass, 'body', 'text-embedding-3-small',
+    embedding_dimension => 1536) AS requeued;
  requeued 
 ----------
         0
@@ -160,6 +161,47 @@ SELECT provider, model
  provider |         model          
 ----------+------------------------
           | text-embedding-3-small
+(1 row)
+
+-- An empty vectorizer still has its column rewidened. Skipping that because
+-- there was nothing to re-embed would leave the table at its old width and
+-- fail every embedding the worker later tried to write, which is exactly the
+-- failure this function exists to prevent.
+SELECT format_type(a.atttypid, a.atttypmod) AS before_width
+  FROM pg_attribute a
+ WHERE a.attrelid = 'ptm_named_body_chunks'::regclass
+   AND a.attname = 'embedding';
+ before_width 
+--------------
+ vector(1536)
+(1 row)
+
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_named'::regclass, 'body', 'nomic-embed-text',
+    provider => 'ollama', embedding_dimension => 768) AS requeued;
+NOTICE:  Embedding dimension changed from 1536 to 768
+ requeued 
+----------
+        0
+(1 row)
+
+SELECT format_type(a.atttypid, a.atttypmod) AS after_width
+  FROM pg_attribute a
+ WHERE a.attrelid = 'ptm_named_body_chunks'::regclass
+   AND a.attname = 'embedding';
+ after_width 
+-------------
+ vector(768)
+(1 row)
+
+-- Put it back, so the reset case below still starts from a pinned model.
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_named'::regclass, 'body', 'text-embedding-3-small',
+    embedding_dimension => 1536) AS requeued;
+NOTICE:  Embedding dimension changed from 768 to 1536
+ requeued 
+----------
+        0
 (1 row)
 
 -- Now the genuine no-op. Reverting to the GUC is a NULL model, and whilst the
@@ -227,7 +269,7 @@ SELECT pgedge_vectorizer.set_embedding_model(
     'ptm_inherits'::regclass, 'body', 'nomic-embed-text',
     provider => 'ollama', embedding_dimension => 768,
     force_reembed => true) AS requeued;
-NOTICE:  Embedding dimension changed from 1536 to 768; the chunk table has been rewritten
+NOTICE:  Embedding dimension changed from 1536 to 768
 NOTICE:  Requeued 1 chunks for re-embedding with ollama/nomic-embed-text
  requeued 
 ----------

@@ -12,6 +12,7 @@
  */
 #include "provider_common.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -442,9 +443,46 @@ provider_build_openai_request(const char **texts, int count, const char *model)
 		appendStringInfo(&request_buf, "\"%s\"", escaped);
 		pfree(escaped);
 	}
-	appendStringInfo(&request_buf, "],\"model\":\"%s\"}", model);
+	{
+		/*
+		 * The model is no longer only a GUC: it can come from a vectorizer's
+		 * registry row or straight from a SQL argument, so it is escaped like
+		 * any other value rather than trusted into the body.
+		 */
+		char	   *escaped_model = provider_escape_json_string(model);
+
+		appendStringInfo(&request_buf, "],\"model\":\"%s\"}", escaped_model);
+		pfree(escaped_model);
+	}
 
 	return request_buf.data;
+}
+
+/*
+ * Percent-encode a string for use as one URL path segment.
+ *
+ * The model name reaches the Gemini URL, and it is user-supplied: a '/' would
+ * add a path segment and a '?' would start a query string, either of which
+ * sends the request somewhere other than intended. Everything outside the
+ * unreserved set of RFC 3986 is encoded.
+ */
+char *
+provider_url_encode_segment(const char *str)
+{
+	StringInfoData buf;
+	const unsigned char *p;
+
+	initStringInfo(&buf);
+
+	for (p = (const unsigned char *) str; *p; p++)
+	{
+		if (isalnum(*p) || *p == '-' || *p == '.' || *p == '_' || *p == '~')
+			appendStringInfoChar(&buf, (char) *p);
+		else
+			appendStringInfo(&buf, "%%%02X", *p);
+	}
+
+	return buf.data;
 }
 
 /*

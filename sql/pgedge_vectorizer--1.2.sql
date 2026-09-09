@@ -750,31 +750,37 @@ BEGIN
                      'would quietly degrade search rather than fail.';
     END IF;
 
+    /*
+     * The column has to be rewidened whether or not there are chunks. An
+     * empty vectorizer left at its old width would accept the change happily
+     * and then fail every embedding the worker tried to write, which is the
+     * failure this function exists to prevent.
+     */
+    new_dim := COALESCE(
+        set_embedding_model.embedding_dimension,
+        pgedge_vectorizer.detect_embedding_dimension(
+            set_embedding_model.provider, set_embedding_model.model));
+
+    SELECT a.atttypmod INTO current_dim
+      FROM pg_attribute a
+     WHERE a.attrelid = chunk_oid
+       AND a.attname = 'embedding';
+
     IF chunk_count > 0 THEN
-        new_dim := COALESCE(
-            set_embedding_model.embedding_dimension,
-            pgedge_vectorizer.detect_embedding_dimension(
-                set_embedding_model.provider, set_embedding_model.model));
-
-        SELECT a.atttypmod INTO current_dim
-          FROM pg_attribute a
-         WHERE a.attrelid = chunk_oid
-           AND a.attname = 'embedding';
-
         -- NULL first: a vector column cannot change width with values in it.
         EXECUTE format('UPDATE %s SET embedding = NULL '
                        'WHERE embedding IS NOT NULL', chunk_oid::REGCLASS);
 
-        IF new_dim IS DISTINCT FROM current_dim THEN
-            EXECUTE format('ALTER TABLE %s ALTER COLUMN embedding '
-                           'TYPE vector(%s)', chunk_oid::REGCLASS, new_dim);
-            RAISE NOTICE 'Embedding dimension changed from % to %; the chunk '
-                         'table has been rewritten', current_dim, new_dim;
-        END IF;
-
         -- Anything already queued was queued against the old model.
         DELETE FROM pgedge_vectorizer.queue q
               WHERE q.chunk_table = v_row.chunk_table;
+    END IF;
+
+    IF new_dim IS DISTINCT FROM current_dim THEN
+        EXECUTE format('ALTER TABLE %s ALTER COLUMN embedding '
+                       'TYPE vector(%s)', chunk_oid::REGCLASS, new_dim);
+        RAISE NOTICE 'Embedding dimension changed from % to %',
+            current_dim, new_dim;
     END IF;
 
     UPDATE pgedge_vectorizer.vectorizers r
@@ -785,9 +791,11 @@ BEGIN
     IF chunk_count > 0 THEN
         EXECUTE format(
             'INSERT INTO pgedge_vectorizer.queue '
-            '    (chunk_id, chunk_table, content) '
-            'SELECT id, %L, content FROM %s',
-            v_row.chunk_table, chunk_oid::REGCLASS);
+            '    (chunk_id, chunk_table, content, max_attempts) '
+            'SELECT id, %L, content, %s FROM %s',
+            v_row.chunk_table,
+            current_setting('pgedge_vectorizer.max_retries')::INT,
+            chunk_oid::REGCLASS);
 
         GET DIAGNOSTICS requeued = ROW_COUNT;
 
