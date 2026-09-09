@@ -130,10 +130,16 @@ SELECT format_type(a.atttypid, a.atttypmod) AS after_width
  WHERE a.attrelid = 'ptm_named_body_chunks'::regclass
    AND a.attname = 'embedding';
 
--- Put it back, so the reset case below still starts from a pinned model.
+-- Put it back, pinning both this time, so that the reset below starts from a
+-- vectorizer that has actually overridden something and can be seen to give
+-- both up. The provider named here matches the GUC, so the effective values
+-- do not move and nothing is re-embedded.
 SELECT pgedge_vectorizer.set_embedding_model(
     'ptm_named'::regclass, 'body', 'text-embedding-3-small',
-    embedding_dimension => 1536) AS requeued;
+    provider => 'openai', embedding_dimension => 1536) AS requeued;
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_named';
 
 -- Now the genuine no-op. Reverting to the GUC is a NULL model, and whilst the
 -- GUC names what was pinned the effective model does not move, so nothing is
