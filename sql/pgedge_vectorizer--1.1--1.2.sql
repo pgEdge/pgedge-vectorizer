@@ -7,6 +7,22 @@
 \echo Use "ALTER EXTENSION pgedge_vectorizer UPDATE TO '1.2'" to load this file. \quit
 
 ---------------------------------------------------------------------------
+-- Per-vectorizer provider and model
+--
+-- NULL in either column means "inherit the GUC at the time the work runs",
+-- so an existing installation carries on behaving exactly as it did.
+---------------------------------------------------------------------------
+
+ALTER TABLE pgedge_vectorizer.vectorizers
+    ADD COLUMN IF NOT EXISTS provider TEXT,
+    ADD COLUMN IF NOT EXISTS model TEXT;
+
+COMMENT ON COLUMN pgedge_vectorizer.vectorizers.provider IS
+'Embedding provider for this vectorizer; NULL inherits pgedge_vectorizer.provider';
+COMMENT ON COLUMN pgedge_vectorizer.vectorizers.model IS
+'Embedding model for this vectorizer; NULL inherits pgedge_vectorizer.model';
+
+---------------------------------------------------------------------------
 -- Approximate token counter, shared with the C chunking code
 --
 -- The chunking engine in C has always sized chunks with this estimate, but
@@ -45,7 +61,9 @@ CREATE OR REPLACE FUNCTION pgedge_vectorizer.enable_vectorization(
     chunk_overlap INT DEFAULT NULL,
     embedding_dimension INT DEFAULT NULL,
     chunk_table_name TEXT DEFAULT NULL,
-    source_pk NAME DEFAULT NULL
+    source_pk NAME DEFAULT NULL,
+    provider TEXT DEFAULT NULL,
+    model TEXT DEFAULT NULL
 ) RETURNS VOID AS $$
 DECLARE
     chunk_table TEXT;
@@ -66,7 +84,10 @@ BEGIN
 
     -- Auto-detect embedding dimension from configured model if not specified
     IF embedding_dimension IS NULL THEN
-        embedding_dimension := pgedge_vectorizer.detect_embedding_dimension();
+        -- Probe the model this vectorizer will actually use, which is not
+        -- necessarily the one the GUCs name.
+        embedding_dimension := pgedge_vectorizer.detect_embedding_dimension(
+            enable_vectorization.provider, enable_vectorization.model);
         RAISE NOTICE 'Auto-detected embedding dimension: %', embedding_dimension;
     END IF;
 
@@ -177,13 +198,17 @@ BEGIN
     -- Use EXECUTE...USING to avoid PL/pgSQL variable/column ambiguity.
     EXECUTE
         'INSERT INTO pgedge_vectorizer.vectorizers
-             (source_table, source_column, chunk_table, source_pk, pk_type)
-         VALUES ($1, $2, $3, $4, $5)
+             (source_table, source_column, chunk_table, source_pk, pk_type,
+              provider, model)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (source_table, source_column)
          DO UPDATE SET chunk_table = EXCLUDED.chunk_table,
                        source_pk   = EXCLUDED.source_pk,
-                       pk_type     = EXCLUDED.pk_type'
-    USING source_table::TEXT, source_column, chunk_table, source_pk, pk_col_type;
+                       pk_type     = EXCLUDED.pk_type,
+                       provider    = EXCLUDED.provider,
+                       model       = EXCLUDED.model'
+    USING source_table::TEXT, source_column, chunk_table, source_pk, pk_col_type,
+          enable_vectorization.provider, enable_vectorization.model;
 
     -- Create trigger to chunk and queue on insert/update
     trigger_name := source_table::TEXT || '_' || source_column || '_vectorization_trigger';

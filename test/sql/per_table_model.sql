@@ -47,3 +47,39 @@ SELECT p.proname, p.proisstrict
  WHERE p.pronamespace = 'pgedge_vectorizer'::regnamespace
    AND p.proname IN ('generate_embedding', 'detect_embedding_dimension')
  ORDER BY p.proname;
+
+---------------------------------------------------------------------------
+-- What enable_vectorization() records
+---------------------------------------------------------------------------
+
+CREATE TABLE ptm_inherits (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO ptm_inherits (body) VALUES ('A document that inherits the GUCs.');
+
+-- No override, so both columns stay NULL and the vectorizer inherits.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_inherits'::regclass, 'body', 'token_based', 100, 10, 1536);
+
+CREATE TABLE ptm_pinned (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO ptm_pinned (body) VALUES ('A document with a pinned model.');
+
+-- With an override, both are recorded exactly as passed.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_pinned'::regclass, 'body', 'token_based', 100, 10, 1536,
+    NULL, NULL, 'ollama', 'nomic-embed-text');
+
+SELECT source_table, source_column, provider, model
+  FROM pgedge_vectorizer.vectorizers
+ WHERE source_table LIKE 'ptm_%'
+ ORDER BY source_table;
+
+-- Named notation reads the same on both functions, and skips the
+-- positional parameters nobody wants to spell out.
+CREATE TABLE ptm_named (id BIGSERIAL PRIMARY KEY, body TEXT);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_named'::regclass, 'body',
+    embedding_dimension => 1536,
+    model => 'text-embedding-3-large');
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_named';

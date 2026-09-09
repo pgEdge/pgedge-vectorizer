@@ -58,3 +58,74 @@ SELECT p.proname, p.proisstrict
  generate_embedding         | f
 (2 rows)
 
+---------------------------------------------------------------------------
+-- What enable_vectorization() records
+---------------------------------------------------------------------------
+CREATE TABLE ptm_inherits (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO ptm_inherits (body) VALUES ('A document that inherits the GUCs.');
+-- No override, so both columns stay NULL and the vectorizer inherits.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_inherits'::regclass, 'body', 'token_based', 100, 10, 1536);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_inherits_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_inherits -> ptm_inherits_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+CREATE TABLE ptm_pinned (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO ptm_pinned (body) VALUES ('A document with a pinned model.');
+-- With an override, both are recorded exactly as passed.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_pinned'::regclass, 'body', 'token_based', 100, 10, 1536,
+    NULL, NULL, 'ollama', 'nomic-embed-text');
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_pinned_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_pinned -> ptm_pinned_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT source_table, source_column, provider, model
+  FROM pgedge_vectorizer.vectorizers
+ WHERE source_table LIKE 'ptm_%'
+ ORDER BY source_table;
+ source_table | source_column | provider |      model       
+--------------+---------------+----------+------------------
+ ptm_inherits | body          |          | 
+ ptm_pinned   | body          | ollama   | nomic-embed-text
+(2 rows)
+
+-- Named notation reads the same on both functions, and skips the
+-- positional parameters nobody wants to spell out.
+CREATE TABLE ptm_named (id BIGSERIAL PRIMARY KEY, body TEXT);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_named'::regclass, 'body',
+    embedding_dimension => 1536,
+    model => 'text-embedding-3-large');
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_named_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_named -> ptm_named_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 400, overlap: 50
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_named';
+ provider |         model          
+----------+------------------------
+          | text-embedding-3-large
+(1 row)
+
