@@ -208,6 +208,84 @@ SELECT pgedge_vectorizer.set_embedding_model(
 );
 ```
 
+### embedding_model_status()
+
+Report which provider and model each vectorizer's chunks were actually embedded
+with, and where that disagrees with what it would use now.
+
+```sql
+SELECT * FROM pgedge_vectorizer.embedding_model_status(
+    source_table  REGCLASS DEFAULT NULL,
+    source_column NAME DEFAULT NULL
+);
+```
+
+**Parameters:** both optional, narrowing the result to one source table or one
+column of it. With neither, every registered vectorizer is reported.
+
+Columns:
+
+- `source_table`, `source_column`, `chunk_table`: The vectorizer, as registered
+- `effective_provider`, `effective_model`: What it would use now, inheritance
+  resolved
+- `chunks_embedded`: Chunks with a vector. Every count below is a subset of
+  this one; a chunk with no vector has no model to disagree about and is
+  excluded throughout
+- `chunks_current`: Embedded by the effective provider and model
+- `chunks_other_model`: Embedded by something else. Vectors from two models are
+  not comparable, so these rows are effectively invisible to search
+- `chunks_model_unknown`: Embedded before the extension recorded this, which is
+  every row on an installation that has just upgraded. Reported apart from a
+  mismatch because they may well be current
+- `embedded_models`: The distinct `provider/model` pairs actually present,
+  ordered
+
+Each row scans a chunk table, so this costs considerably more than the queue
+views. A chunk table that has been dropped, or that the caller cannot read,
+gives NULL counts rather than failing the whole result set.
+
+### reembed()
+
+Re-embed a vectorizer's chunks with the provider and model it would use now.
+
+```sql
+SELECT pgedge_vectorizer.reembed(
+    source_table        REGCLASS,
+    source_column       NAME,
+    embedding_dimension INT DEFAULT NULL
+);
+```
+
+**Parameters:**
+
+- `source_table`, `source_column`: The vectorizer to repair
+- `embedding_dimension`: Dimension of the effective model. When NULL (the
+  default) the provider is probed for it, which is a real request
+
+Returns: `BIGINT` - The number of chunks queued
+
+Clears and requeues every chunk not known to have been produced by the
+effective provider and model, which includes chunks with nothing recorded:
+a row that cannot be shown to be current is treated as needing doing again, so
+the first call on a freshly upgraded installation re-embeds the whole table.
+Chunks already current are left alone.
+
+If the effective model is a different width from the chunk table's vector
+column, that distinction cannot hold: the column is altered and every chunk is
+requeued, since a column cannot carry two widths. A notice says so.
+
+Chunk rows, token counts, sparse embeddings and the BM25 statistics are
+untouched either way, because none of them depends on the embedding model.
+
+Unlike `set_embedding_model()`, there is no confirmation flag: this function
+does what its name says. It does spend money against a metered provider, and
+raises a notice with the count for that reason.
+
+This is the supported repair for a vectorizer that drifted because
+`pgedge_vectorizer.model` changed under it. `set_embedding_model()` will not do
+it, because an inheriting vectorizer's effective model already is the new one,
+so from that function's point of view nothing has changed.
+
 ### retry_failed()
 
 Retry failed queue items.
