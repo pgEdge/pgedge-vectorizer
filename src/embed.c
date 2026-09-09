@@ -21,6 +21,49 @@
  * This function takes a text query and returns a vector embedding using
  * the configured provider (OpenAI, Voyage, or Ollama).
  */
+/*
+ * Resolve the provider for one call.
+ *
+ * A NULL or empty name means fall back to the GUC, which is exactly what a
+ * vectorizer with no override records, so the same rule serves both these
+ * SQL-callable functions and the worker.
+ */
+static EmbeddingProvider *
+resolve_provider(const char *name)
+{
+	const char		   *use;
+	EmbeddingProvider  *provider;
+
+	use = (name != NULL && name[0] != '\0') ? name : pgedge_vectorizer_provider;
+
+	if (use == NULL || use[0] == '\0')
+		elog(ERROR, "pgedge_vectorizer.provider is not set");
+
+	provider = get_embedding_provider(use);
+	if (provider == NULL)
+		elog(ERROR, "embedding provider \"%s\" is not available", use);
+
+	return provider;
+}
+
+/* As resolve_provider(), for the model name. */
+static const char *
+resolve_model(const char *model)
+{
+	return (model != NULL && model[0] != '\0')
+		? model : pgedge_vectorizer_model;
+}
+
+/* Read an optional text argument as a cstring, or NULL if it was not given. */
+static char *
+optional_text_arg(FunctionCallInfo fcinfo, int argno)
+{
+	if (PG_NARGS() <= argno || PG_ARGISNULL(argno))
+		return NULL;
+
+	return text_to_cstring(PG_GETARG_TEXT_PP(argno));
+}
+
 PG_FUNCTION_INFO_V1(pgedge_vectorizer_generate_embedding);
 PG_FUNCTION_INFO_V1(pgedge_vectorizer_detect_embedding_dimension);
 
@@ -37,6 +80,7 @@ pgedge_vectorizer_generate_embedding(PG_FUNCTION_ARGS)
 	int ret;
 	bool isnull;
 	Datum result;
+	const char *model;
 
 	/* Check for NULL input */
 	if (PG_ARGISNULL(0))
@@ -56,13 +100,12 @@ pgedge_vectorizer_generate_embedding(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	}
 
-	/* Get the current provider */
-	provider = get_current_provider();
-	if (provider == NULL)
-	{
-		elog(ERROR, "no embedding provider configured");
-		PG_RETURN_NULL();
-	}
+	/*
+	 * Provider and model fall back to the GUCs when not given, so an
+	 * existing one-argument call behaves exactly as it did.
+	 */
+	provider = resolve_provider(optional_text_arg(fcinfo, 1));
+	model = resolve_model(optional_text_arg(fcinfo, 2));
 
 	/* Initialize the provider if needed */
 	if (provider->init != NULL)
@@ -77,7 +120,7 @@ pgedge_vectorizer_generate_embedding(PG_FUNCTION_ARGS)
 	}
 
 	/* Generate embedding */
-	embedding = provider->generate(query, &dim, &error_msg);
+	embedding = provider->generate(query, model, &dim, &error_msg);
 	if (embedding == NULL)
 	{
 		elog(ERROR, "failed to generate embedding: %s",
@@ -157,14 +200,16 @@ pgedge_vectorizer_detect_embedding_dimension(PG_FUNCTION_ARGS)
 	float *embedding;
 	int dim = 0;
 	char *error_msg = NULL;
+	const char *model;
 
-	/* Get the current provider */
-	provider = get_current_provider();
-	if (provider == NULL)
-	{
-		elog(ERROR, "no embedding provider configured");
-		PG_RETURN_NULL();
-	}
+	/*
+	 * The probe has to use the provider and model whose dimension is being
+	 * asked about, which is not necessarily the configured one: a vectorizer
+	 * created with an override needs the dimension of that model, not of
+	 * whatever the GUCs happen to name.
+	 */
+	provider = resolve_provider(optional_text_arg(fcinfo, 0));
+	model = resolve_model(optional_text_arg(fcinfo, 1));
 
 	/* Initialize the provider if needed */
 	if (provider->init != NULL)
@@ -179,7 +224,7 @@ pgedge_vectorizer_detect_embedding_dimension(PG_FUNCTION_ARGS)
 	}
 
 	/* Generate a probe embedding to detect dimension */
-	embedding = provider->generate("dimension probe", &dim, &error_msg);
+	embedding = provider->generate("dimension probe", model, &dim, &error_msg);
 	if (embedding == NULL)
 	{
 		elog(ERROR, "failed to detect embedding dimension: %s",

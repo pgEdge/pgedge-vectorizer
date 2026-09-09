@@ -26,8 +26,10 @@ static bool provider_initialized = false;
  */
 static bool ollama_init(char **error_msg);
 static void ollama_cleanup(void);
-static float *ollama_generate(const char *text, int *dim, char **error_msg);
-static float **ollama_generate_batch(const char **texts, int count, int *dim,
+static float *ollama_generate(const char *text, const char *model,
+				 int *dim, char **error_msg);
+static float **ollama_generate_batch(const char **texts, int count,
+									   const char *model, int *dim,
 									 char **error_msg);
 
 /* Ollama-specific response parser */
@@ -80,12 +82,14 @@ ollama_cleanup(void)
  * Generate a single embedding
  */
 static float *
-ollama_generate(const char *text, int *dim, char **error_msg)
+ollama_generate(const char *text, const char *model,
+				 int *dim, char **error_msg)
 {
 	char *json_request;
 	char *url;
 	const char *base_url;
 	char *escaped;
+	char *escaped_model;
 	StringInfoData request_buf;
 	ResponseBuffer response;
 	float *embedding;
@@ -99,8 +103,10 @@ ollama_generate(const char *text, int *dim, char **error_msg)
 	/* Build JSON request - Ollama API format */
 	initStringInfo(&request_buf);
 	escaped = provider_escape_json_string(text);
+	escaped_model = provider_escape_json_string(model);
 	appendStringInfo(&request_buf, "{\"model\":\"%s\",\"prompt\":\"%s\"}",
-					 pgedge_vectorizer_model, escaped);
+					 escaped_model, escaped);
+	pfree(escaped_model);
 	pfree(escaped);
 	json_request = request_buf.data;
 
@@ -138,7 +144,8 @@ ollama_generate(const char *text, int *dim, char **error_msg)
  * endpoint multiple times.
  */
 static float **
-ollama_generate_batch(const char **texts, int count, int *dim, char **error_msg)
+ollama_generate_batch(const char **texts, int count, const char *model,
+					  int *dim, char **error_msg)
 {
 	float **embeddings;
 	int i;
@@ -153,7 +160,7 @@ ollama_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 
 	for (i = 0; i < count; i++)
 	{
-		embeddings[i] = ollama_generate(texts[i], dim, error_msg);
+		embeddings[i] = ollama_generate(texts[i], model, dim, error_msg);
 		if (embeddings[i] == NULL)
 		{
 			for (int j = 0; j < i; j++)

@@ -28,6 +28,75 @@ These settings configure the connection to your embedding provider, including th
     [Troubleshooting](troubleshooting.md) document describes how to
     recover.
 
+### Per-vectorizer provider and model
+
+The settings above are the defaults for the whole database, which is the right
+thing when every table wants the same embeddings, and the wrong thing when they
+do not: a table of short product titles and a table of long technical documents
+are rarely well served by one model, and you may want one table embedded
+locally through Ollama whilst another goes to a hosted provider. A vectorizer
+can therefore name its own provider and model, and falls back to the settings
+above where it does not.
+
+Pin them when the vectorizer is created:
+
+```sql
+SELECT pgedge_vectorizer.enable_vectorization(
+    'articles'::regclass, 'body',
+    provider => 'ollama',
+    model    => 'nomic-embed-text'
+);
+```
+
+Or change them afterwards with `set_embedding_model()`, which takes the model
+first because that is the argument you usually want:
+
+```sql
+SELECT pgedge_vectorizer.set_embedding_model(
+    'articles'::regclass, 'body', 'nomic-embed-text', provider => 'ollama');
+```
+
+Both settings live in `pgedge_vectorizer.vectorizers` as nullable columns,
+where NULL means inherit. Inheritance is resolved when the work runs rather
+than copied at creation, so a vectorizer that inherits follows the GUC as the
+GUC changes.
+
+`set_embedding_model()` always writes both columns to exactly what you pass,
+and both default to NULL, so the shortest call resets both to inheriting:
+
+```sql
+-- Back to inheriting the provider and the model
+SELECT pgedge_vectorizer.set_embedding_model('articles'::regclass, 'body', NULL);
+```
+
+That cuts both ways: to change only the model whilst keeping a pinned
+provider, name the provider again, or it reverts to inheriting alongside the
+model.
+
+```sql
+-- Keep the pinned provider, change only the model
+SELECT pgedge_vectorizer.set_embedding_model(
+    'articles'::regclass, 'body', 'mxbai-embed-large', provider => 'ollama');
+```
+
+Either call needs `force_reembed => true` if the vectorizer already has
+embeddings and the effective model actually moves, as below.
+
+`set_embedding_model()` refuses to change a vectorizer that already has
+embeddings unless you pass `force_reembed => true`, which clears every
+embedding and requeues every chunk. See
+[Best Practices](best_practices.md) for what that costs and why the refusal
+is not limited to changes of dimension.
+
+!!! warning "Changing the GUC still moves every inheriting vectorizer"
+
+    The refusal above protects a vectorizer that has pinned its model. A
+    vectorizer that inherits has not, so changing
+    `pgedge_vectorizer.model` globally re-points every inheriting table at
+    once, with no guard and no re-embed, exactly as it did before this
+    setting existed. Pin the model on any vectorizer whose embeddings
+    matter.
+
 ## Worker Settings
 
 These settings control the background workers that process the embedding queue, including concurrency, batch sizes, and retry behavior.
