@@ -1738,7 +1738,10 @@ process_queue_batch(const char *dbname)
 					provider_reset_rate_limit();
 
 					/* Generate embeddings for this batch */
-					embeddings = provider->generate_batch(&contents[batch_start], batch_count, &dim, &error_msg);
+					embeddings = provider->generate_batch(&contents[batch_start],
+											  batch_count,
+											  pgedge_vectorizer_model,
+											  &dim, &error_msg);
 				}
 			}
 

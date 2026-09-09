@@ -1,0 +1,60 @@
+-- per_table_model test
+--
+-- A vectorizer may name its own embedding provider and model, with NULL in
+-- either registry column meaning "inherit the GUC". Nothing here reaches a
+-- provider: every call that would otherwise probe for a dimension passes one
+-- explicitly, and the one provider-resolution case below is rejected on the
+-- name before any request is built.
+---------------------------------------------------------------------------
+-- Provider resolution happens by name, before any request
+---------------------------------------------------------------------------
+-- A provider that does not exist is rejected as such, rather than failing
+-- later as a connection error.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.detect_embedding_dimension('nosuchprovider');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+WARNING:  Embedding provider 'nosuchprovider' not found
+NOTICE:  embedding provider "nosuchprovider" is not available
+-- The same for the embedding function, which takes the provider second.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.generate_embedding('some text', 'nosuchprovider');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+WARNING:  Embedding provider 'nosuchprovider' not found
+NOTICE:  embedding provider "nosuchprovider" is not available
+-- Both functions kept their original arity through defaults, so an existing
+-- call still resolves. Only the signatures are asserted here; calling either
+-- one for real needs a provider.
+SELECT p.proname, pg_get_function_arguments(p.oid) AS args
+  FROM pg_proc p
+ WHERE p.pronamespace = 'pgedge_vectorizer'::regnamespace
+   AND p.proname IN ('generate_embedding', 'detect_embedding_dimension')
+ ORDER BY p.proname;
+          proname           |                                       args                                       
+----------------------------+----------------------------------------------------------------------------------
+ detect_embedding_dimension | provider text DEFAULT NULL::text, model text DEFAULT NULL::text
+ generate_embedding         | query_text text, provider text DEFAULT NULL::text, model text DEFAULT NULL::text
+(2 rows)
+
+-- Neither may be STRICT: NULL has to reach the C, where it means "fall back
+-- to the GUC", and a STRICT function would return NULL before getting there.
+SELECT p.proname, p.proisstrict
+  FROM pg_proc p
+ WHERE p.pronamespace = 'pgedge_vectorizer'::regnamespace
+   AND p.proname IN ('generate_embedding', 'detect_embedding_dimension')
+ ORDER BY p.proname;
+          proname           | proisstrict 
+----------------------------+-------------
+ detect_embedding_dimension | f
+ generate_embedding         | f
+(2 rows)
+

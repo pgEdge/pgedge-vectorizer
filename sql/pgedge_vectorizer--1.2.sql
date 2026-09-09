@@ -85,22 +85,28 @@ COMMENT ON FUNCTION pgedge_vectorizer.chunk_text IS
 
 -- Embedding generation function
 CREATE FUNCTION pgedge_vectorizer.generate_embedding(
-    query_text TEXT
+    query_text TEXT,
+    provider   TEXT DEFAULT NULL,
+    model      TEXT DEFAULT NULL
 ) RETURNS vector
 AS 'MODULE_PATHNAME', 'pgedge_vectorizer_generate_embedding'
-LANGUAGE C STABLE STRICT;
+LANGUAGE C STABLE;
 
 COMMENT ON FUNCTION pgedge_vectorizer.generate_embedding IS
-'Generate an embedding vector from query text using the configured provider';
+'Generate an embedding vector from query text. The provider and model '
+'default to pgedge_vectorizer.provider and pgedge_vectorizer.model';
 
 -- Embedding dimension detection function
-CREATE FUNCTION pgedge_vectorizer.detect_embedding_dimension()
-RETURNS INT
+CREATE FUNCTION pgedge_vectorizer.detect_embedding_dimension(
+    provider TEXT DEFAULT NULL,
+    model    TEXT DEFAULT NULL
+) RETURNS INT
 AS 'MODULE_PATHNAME', 'pgedge_vectorizer_detect_embedding_dimension'
-LANGUAGE C STRICT;
+LANGUAGE C;
 
 COMMENT ON FUNCTION pgedge_vectorizer.detect_embedding_dimension IS
-'Detect the embedding dimension of the currently configured provider/model';
+'Detect the embedding dimension of the given provider and model, defaulting '
+'to pgedge_vectorizer.provider and pgedge_vectorizer.model';
 
 -- BM25 query vector function
 -- Tokenizes the query and computes a sparse vector using current IDF stats.

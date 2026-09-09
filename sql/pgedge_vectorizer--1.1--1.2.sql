@@ -620,3 +620,40 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.recreate_chunks IS
 'Delete all chunks and recreate from source table (complete rebuild)';
+
+---------------------------------------------------------------------------
+-- Provider and model may now be named per call
+--
+-- Adding defaulted parameters creates a new function rather than replacing
+-- the old one, and the two would then be ambiguous for a caller passing only
+-- the arguments they share, so the old forms are dropped first. Neither is
+-- STRICT any more: NULL has to reach the C, where it means "fall back to the
+-- GUC", and a STRICT function would return NULL before getting there.
+---------------------------------------------------------------------------
+
+DROP FUNCTION IF EXISTS pgedge_vectorizer.generate_embedding(TEXT);
+DROP FUNCTION IF EXISTS pgedge_vectorizer.detect_embedding_dimension();
+
+CREATE FUNCTION pgedge_vectorizer.generate_embedding(
+    query_text TEXT,
+    provider   TEXT DEFAULT NULL,
+    model      TEXT DEFAULT NULL
+) RETURNS vector
+AS 'MODULE_PATHNAME', 'pgedge_vectorizer_generate_embedding'
+LANGUAGE C STABLE;
+
+COMMENT ON FUNCTION pgedge_vectorizer.generate_embedding IS
+'Generate an embedding vector from query text. The provider and model '
+'default to pgedge_vectorizer.provider and pgedge_vectorizer.model';
+
+-- Embedding dimension detection function
+CREATE FUNCTION pgedge_vectorizer.detect_embedding_dimension(
+    provider TEXT DEFAULT NULL,
+    model    TEXT DEFAULT NULL
+) RETURNS INT
+AS 'MODULE_PATHNAME', 'pgedge_vectorizer_detect_embedding_dimension'
+LANGUAGE C;
+
+COMMENT ON FUNCTION pgedge_vectorizer.detect_embedding_dimension IS
+'Detect the embedding dimension of the given provider and model, defaulting '
+'to pgedge_vectorizer.provider and pgedge_vectorizer.model';
