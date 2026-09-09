@@ -89,6 +89,7 @@ ollama_generate(const char *text, const char *model,
 	char *url;
 	const char *base_url;
 	char *escaped;
+	char *escaped_model;
 	StringInfoData request_buf;
 	ResponseBuffer response;
 	float *embedding;
@@ -102,8 +103,10 @@ ollama_generate(const char *text, const char *model,
 	/* Build JSON request - Ollama API format */
 	initStringInfo(&request_buf);
 	escaped = provider_escape_json_string(text);
+	escaped_model = provider_escape_json_string(model);
 	appendStringInfo(&request_buf, "{\"model\":\"%s\",\"prompt\":\"%s\"}",
-					 model, escaped);
+					 escaped_model, escaped);
+	pfree(escaped_model);
 	pfree(escaped);
 	json_request = request_buf.data;
 

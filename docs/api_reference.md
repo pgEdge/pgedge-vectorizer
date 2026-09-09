@@ -186,7 +186,7 @@ SELECT pgedge_vectorizer.set_embedding_model(
 - `source_table`, `source_column`: The vectorizer to change
 - `model`: Model to use. NULL means inherit `pgedge_vectorizer.model`.
 - `provider`: Provider to use. NULL means inherit `pgedge_vectorizer.provider`.
-- `embedding_dimension`: Dimension of the new model. When NULL (the default) and the vectorizer has chunks, the new model is probed for it.
+- `embedding_dimension`: Dimension of the new model. When NULL (the default), the new provider and model are probed for it, which is a real request. The chunk table's vector column is altered to match whether or not the vectorizer has any chunks yet, since a column left at the old width would fail every embedding written afterwards.
 - `force_reembed`: Whether to clear the existing embeddings and requeue every chunk. Required to change a vectorizer that has any chunks.
 
 Returns: `BIGINT` - The number of chunks requeued, which is zero unless the re-embed ran

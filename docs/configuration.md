@@ -59,11 +59,28 @@ SELECT pgedge_vectorizer.set_embedding_model(
 Both settings live in `pgedge_vectorizer.vectorizers` as nullable columns,
 where NULL means inherit. Inheritance is resolved when the work runs rather
 than copied at creation, so a vectorizer that inherits follows the GUC as the
-GUC changes. Passing NULL is how you go back to inheriting:
+GUC changes.
+
+`set_embedding_model()` always writes both columns to exactly what you pass,
+and both default to NULL, so the shortest call resets both to inheriting:
 
 ```sql
+-- Back to inheriting the provider and the model
 SELECT pgedge_vectorizer.set_embedding_model('articles'::regclass, 'body', NULL);
 ```
+
+That cuts both ways: to change only the model whilst keeping a pinned
+provider, name the provider again, or it reverts to inheriting alongside the
+model.
+
+```sql
+-- Keep the pinned provider, change only the model
+SELECT pgedge_vectorizer.set_embedding_model(
+    'articles'::regclass, 'body', 'mxbai-embed-large', provider => 'ollama');
+```
+
+Either call needs `force_reembed => true` if the vectorizer already has
+embeddings and the effective model actually moves, as below.
 
 `set_embedding_model()` refuses to change a vectorizer that already has
 embeddings unless you pass `force_reembed => true`, which clears every

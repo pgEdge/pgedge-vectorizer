@@ -106,10 +106,34 @@ SET pgedge_vectorizer.model = 'text-embedding-3-small';
 -- real change. It goes through without complaint because the vectorizer has
 -- no chunks yet: there is nothing embedded for it to invalidate.
 SELECT pgedge_vectorizer.set_embedding_model(
-    'ptm_named'::regclass, 'body', 'text-embedding-3-small') AS requeued;
+    'ptm_named'::regclass, 'body', 'text-embedding-3-small',
+    embedding_dimension => 1536) AS requeued;
 
 SELECT provider, model
   FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_named';
+
+-- An empty vectorizer still has its column rewidened. Skipping that because
+-- there was nothing to re-embed would leave the table at its old width and
+-- fail every embedding the worker later tried to write, which is exactly the
+-- failure this function exists to prevent.
+SELECT format_type(a.atttypid, a.atttypmod) AS before_width
+  FROM pg_attribute a
+ WHERE a.attrelid = 'ptm_named_body_chunks'::regclass
+   AND a.attname = 'embedding';
+
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_named'::regclass, 'body', 'nomic-embed-text',
+    provider => 'ollama', embedding_dimension => 768) AS requeued;
+
+SELECT format_type(a.atttypid, a.atttypmod) AS after_width
+  FROM pg_attribute a
+ WHERE a.attrelid = 'ptm_named_body_chunks'::regclass
+   AND a.attname = 'embedding';
+
+-- Put it back, so the reset case below still starts from a pinned model.
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_named'::regclass, 'body', 'text-embedding-3-small',
+    embedding_dimension => 1536) AS requeued;
 
 -- Now the genuine no-op. Reverting to the GUC is a NULL model, and whilst the
 -- GUC names what was pinned the effective model does not move, so nothing is
