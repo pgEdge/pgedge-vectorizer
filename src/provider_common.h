@@ -80,6 +80,9 @@ char *provider_expand_tilde(const char *path);
 /* Escape a string for safe inclusion in JSON */
 char *provider_escape_json_string(const char *str);
 
+/* Percent-encode a string for use as a single URL path segment */
+char *provider_url_encode_segment(const char *str);
+
 /* Build OpenAI-format request body: {"input":[...], "model":"..."} */
 char *provider_build_openai_request(const char **texts, int count,
 									const char *model);

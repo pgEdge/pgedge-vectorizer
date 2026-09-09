@@ -1,0 +1,355 @@
+-- per_table_model test
+--
+-- A vectorizer may name its own embedding provider and model, with NULL in
+-- either registry column meaning "inherit the GUC". Nothing here reaches a
+-- provider: every call that would otherwise probe for a dimension passes one
+-- explicitly, and the one provider-resolution case below is rejected on the
+-- name before any request is built.
+---------------------------------------------------------------------------
+-- Provider resolution happens by name, before any request
+---------------------------------------------------------------------------
+-- A provider that does not exist is rejected as such, rather than failing
+-- later as a connection error.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.detect_embedding_dimension('nosuchprovider');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+WARNING:  Embedding provider 'nosuchprovider' not found
+NOTICE:  embedding provider "nosuchprovider" is not available
+-- The same for the embedding function, which takes the provider second.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.generate_embedding('some text', 'nosuchprovider');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+WARNING:  Embedding provider 'nosuchprovider' not found
+NOTICE:  embedding provider "nosuchprovider" is not available
+-- Both functions kept their original arity through defaults, so an existing
+-- call still resolves. Only the signatures are asserted here; calling either
+-- one for real needs a provider.
+SELECT p.proname, pg_get_function_arguments(p.oid) AS args
+  FROM pg_proc p
+ WHERE p.pronamespace = 'pgedge_vectorizer'::regnamespace
+   AND p.proname IN ('generate_embedding', 'detect_embedding_dimension')
+ ORDER BY p.proname;
+          proname           |                                       args                                       
+----------------------------+----------------------------------------------------------------------------------
+ detect_embedding_dimension | provider text DEFAULT NULL::text, model text DEFAULT NULL::text
+ generate_embedding         | query_text text, provider text DEFAULT NULL::text, model text DEFAULT NULL::text
+(2 rows)
+
+-- Neither may be STRICT: NULL has to reach the C, where it means "fall back
+-- to the GUC", and a STRICT function would return NULL before getting there.
+SELECT p.proname, p.proisstrict
+  FROM pg_proc p
+ WHERE p.pronamespace = 'pgedge_vectorizer'::regnamespace
+   AND p.proname IN ('generate_embedding', 'detect_embedding_dimension')
+ ORDER BY p.proname;
+          proname           | proisstrict 
+----------------------------+-------------
+ detect_embedding_dimension | f
+ generate_embedding         | f
+(2 rows)
+
+---------------------------------------------------------------------------
+-- What enable_vectorization() records
+---------------------------------------------------------------------------
+CREATE TABLE ptm_inherits (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO ptm_inherits (body) VALUES ('A document that inherits the GUCs.');
+-- No override, so both columns stay NULL and the vectorizer inherits.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_inherits'::regclass, 'body', 'token_based', 100, 10, 1536);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_inherits_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_inherits -> ptm_inherits_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+CREATE TABLE ptm_pinned (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO ptm_pinned (body) VALUES ('A document with a pinned model.');
+-- With an override, both are recorded exactly as passed.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_pinned'::regclass, 'body', 'token_based', 100, 10, 1536,
+    NULL, NULL, 'ollama', 'nomic-embed-text');
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_pinned_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_pinned -> ptm_pinned_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 1 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT source_table, source_column, provider, model
+  FROM pgedge_vectorizer.vectorizers
+ WHERE source_table LIKE 'ptm_%'
+ ORDER BY source_table;
+ source_table | source_column | provider |      model       
+--------------+---------------+----------+------------------
+ ptm_inherits | body          |          | 
+ ptm_pinned   | body          | ollama   | nomic-embed-text
+(2 rows)
+
+-- Named notation reads the same on both functions, and skips the
+-- positional parameters nobody wants to spell out.
+CREATE TABLE ptm_named (id BIGSERIAL PRIMARY KEY, body TEXT);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_named'::regclass, 'body',
+    embedding_dimension => 1536,
+    model => 'text-embedding-3-large');
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_named_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_named -> ptm_named_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 400, overlap: 50
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_named';
+ provider |         model          
+----------+------------------------
+          | text-embedding-3-large
+(1 row)
+
+---------------------------------------------------------------------------
+-- set_embedding_model()
+---------------------------------------------------------------------------
+-- A table with no vectorizer is an error, not a silent no-op.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.set_embedding_model(
+        'ptm_named'::regclass, 'nosuchcolumn', 'some-model');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+NOTICE:  no vectorizer registered for ptm_named.nosuchcolumn
+SET pgedge_vectorizer.provider = 'openai';
+SET pgedge_vectorizer.model = 'text-embedding-3-small';
+-- ptm_named was pinned to text-embedding-3-large at creation, so this is a
+-- real change. It goes through without complaint because the vectorizer has
+-- no chunks yet: there is nothing embedded for it to invalidate.
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_named'::regclass, 'body', 'text-embedding-3-small',
+    embedding_dimension => 1536) AS requeued;
+ requeued 
+----------
+        0
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_named';
+ provider |         model          
+----------+------------------------
+          | text-embedding-3-small
+(1 row)
+
+-- An empty vectorizer still has its column rewidened. Skipping that because
+-- there was nothing to re-embed would leave the table at its old width and
+-- fail every embedding the worker later tried to write, which is exactly the
+-- failure this function exists to prevent.
+SELECT format_type(a.atttypid, a.atttypmod) AS before_width
+  FROM pg_attribute a
+ WHERE a.attrelid = 'ptm_named_body_chunks'::regclass
+   AND a.attname = 'embedding';
+ before_width 
+--------------
+ vector(1536)
+(1 row)
+
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_named'::regclass, 'body', 'nomic-embed-text',
+    provider => 'ollama', embedding_dimension => 768) AS requeued;
+NOTICE:  Embedding dimension changed from 1536 to 768
+ requeued 
+----------
+        0
+(1 row)
+
+SELECT format_type(a.atttypid, a.atttypmod) AS after_width
+  FROM pg_attribute a
+ WHERE a.attrelid = 'ptm_named_body_chunks'::regclass
+   AND a.attname = 'embedding';
+ after_width 
+-------------
+ vector(768)
+(1 row)
+
+-- Put it back, pinning both this time, so that the reset below starts from a
+-- vectorizer that has actually overridden something and can be seen to give
+-- both up. The provider named here matches the GUC, so the effective values
+-- do not move and nothing is re-embedded.
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_named'::regclass, 'body', 'text-embedding-3-small',
+    provider => 'openai', embedding_dimension => 1536) AS requeued;
+NOTICE:  Embedding dimension changed from 768 to 1536
+ requeued 
+----------
+        0
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_named';
+ provider |         model          
+----------+------------------------
+ openai   | text-embedding-3-small
+(1 row)
+
+-- Now the genuine no-op. Reverting to the GUC is a NULL model, and whilst the
+-- GUC names what was pinned the effective model does not move, so nothing is
+-- requeued even though the stored value changes.
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_named'::regclass, 'body', NULL) AS requeued;
+NOTICE:  Effective provider and model unchanged (openai/text-embedding-3-small)
+ requeued 
+----------
+        0
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_named';
+ provider | model 
+----------+-------
+          | 
+(1 row)
+
+-- Populate a vectorizer and mark it embedded, as the worker would.
+UPDATE ptm_inherits_body_chunks
+   SET embedding = array_fill(0.1::real, ARRAY[1536])::vector,
+       sparse_embedding = '{1:0.5}/65536'::sparsevec;
+SELECT count(*) AS chunks,
+       count(embedding) AS embedded,
+       count(sparse_embedding) AS sparse,
+       count(token_count) AS counted
+  FROM ptm_inherits_body_chunks;
+ chunks | embedded | sparse | counted 
+--------+----------+--------+---------
+      1 |        1 |      1 |       1
+(1 row)
+
+-- Now the refusal. The message names both settings and the number of chunks.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.set_embedding_model(
+        'ptm_inherits'::regclass, 'body', 'nomic-embed-text',
+        provider => 'ollama', embedding_dimension => 768);
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+NOTICE:  changing the embedding model for ptm_inherits.body would leave 1 chunks embedded with openai/text-embedding-3-small whilst everything after uses ollama/nomic-embed-text
+-- Nothing was touched by the refusal.
+SELECT count(embedding) AS still_embedded FROM ptm_inherits_body_chunks;
+ still_embedded 
+----------------
+              1
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_inherits';
+ provider | model 
+----------+-------
+          | 
+(1 row)
+
+-- With force_reembed the change goes through: every embedding cleared, the
+-- column rewidened, every chunk requeued, and the chunks themselves left
+-- exactly as they were.
+SELECT pgedge_vectorizer.set_embedding_model(
+    'ptm_inherits'::regclass, 'body', 'nomic-embed-text',
+    provider => 'ollama', embedding_dimension => 768,
+    force_reembed => true) AS requeued;
+NOTICE:  Embedding dimension changed from 1536 to 768
+NOTICE:  Requeued 1 chunks for re-embedding with ollama/nomic-embed-text
+ requeued 
+----------
+        1
+(1 row)
+
+SELECT count(*) AS chunks,
+       count(embedding) AS embedded,
+       count(sparse_embedding) AS sparse_kept,
+       count(token_count) AS token_counts_kept
+  FROM ptm_inherits_body_chunks;
+ chunks | embedded | sparse_kept | token_counts_kept 
+--------+----------+-------------+-------------------
+      1 |        0 |           1 |                 1
+(1 row)
+
+SELECT format_type(a.atttypid, a.atttypmod) AS embedding_type
+  FROM pg_attribute a
+ WHERE a.attrelid = 'ptm_inherits_body_chunks'::regclass
+   AND a.attname = 'embedding';
+ embedding_type 
+----------------
+ vector(768)
+(1 row)
+
+SELECT count(*) AS queued
+  FROM pgedge_vectorizer.queue
+ WHERE chunk_table = 'ptm_inherits_body_chunks' AND status = 'pending';
+ queued 
+--------
+      1
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_inherits';
+ provider |      model       
+----------+------------------
+ ollama   | nomic-embed-text
+(1 row)
+
+---------------------------------------------------------------------------
+-- Cleanup
+---------------------------------------------------------------------------
+SELECT pgedge_vectorizer.disable_vectorization('ptm_inherits'::regclass,
+                                               'body', TRUE);
+NOTICE:  Vectorization disabled and chunk table dropped: ptm_inherits_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+SELECT pgedge_vectorizer.disable_vectorization('ptm_pinned'::regclass,
+                                               'body', TRUE);
+NOTICE:  Vectorization disabled and chunk table dropped: ptm_pinned_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+SELECT pgedge_vectorizer.disable_vectorization('ptm_named'::regclass,
+                                               'body', TRUE);
+NOTICE:  Vectorization disabled and chunk table dropped: ptm_named_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE ptm_inherits;
+DROP TABLE ptm_pinned;
+DROP TABLE ptm_named;
+DELETE FROM pgedge_vectorizer.queue;
+RESET pgedge_vectorizer.provider;
+RESET pgedge_vectorizer.model;

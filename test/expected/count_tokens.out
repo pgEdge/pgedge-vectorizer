@@ -1,0 +1,157 @@
+-- count_tokens test
+--
+-- count_tokens() exposes the estimate the C chunking code has always used, so
+-- that the plpgsql paths which write the token_count column can call it rather
+-- than open-coding the same rule and rounding it the other way. The point of
+-- the tests below is therefore as much the agreement between the two as the
+-- values themselves.
+---------------------------------------------------------------------------
+-- The estimate itself: UTF-8 characters divided by four, rounded up
+---------------------------------------------------------------------------
+-- 11 characters, so 3 tokens.
+SELECT pgedge_vectorizer.count_tokens('hello world') AS eleven_chars;
+ eleven_chars 
+--------------
+            3
+(1 row)
+
+-- Exactly 4 characters is exactly 1 token; anything shorter still rounds up
+-- to 1, which is the difference from the truncating arithmetic this replaces.
+SELECT pgedge_vectorizer.count_tokens('test') AS four_chars,
+       pgedge_vectorizer.count_tokens('abc')  AS three_chars,
+       pgedge_vectorizer.count_tokens('a')    AS one_char;
+ four_chars | three_chars | one_char 
+------------+-------------+----------
+          1 |           1 |        1
+(1 row)
+
+-- Empty text is the one case that is genuinely zero.
+SELECT pgedge_vectorizer.count_tokens('') AS empty;
+ empty 
+-------
+     0
+(1 row)
+
+-- STRICT, so NULL in, NULL out.
+SELECT pgedge_vectorizer.count_tokens(NULL) IS NULL AS null_is_null;
+ null_is_null 
+--------------
+ t
+(1 row)
+
+-- Characters, not bytes: four Han characters are twelve bytes but one token.
+SELECT pgedge_vectorizer.count_tokens('你好世界') AS four_han_chars,
+       octet_length('你好世界') AS bytes;
+ four_han_chars | bytes 
+----------------+-------
+              1 |    12
+(1 row)
+
+-- Declared STABLE rather than IMMUTABLE: the estimate is defined in terms of
+-- pgedge_vectorizer.model, which will matter once the counter is model-aware,
+-- and an index or cached plan built on an IMMUTABLE promise would then be
+-- wrong. Pin the volatility so that cannot be relaxed by accident.
+SELECT provolatile
+  FROM pg_proc
+ WHERE proname = 'count_tokens'
+   AND pronamespace = 'pgedge_vectorizer'::regnamespace;
+ provolatile 
+-------------
+ s
+(1 row)
+
+---------------------------------------------------------------------------
+-- Agreement with what the chunking paths store
+---------------------------------------------------------------------------
+CREATE TABLE count_tokens_docs (
+    id      BIGSERIAL PRIMARY KEY,
+    content TEXT
+);
+-- Chunks written by enable_vectorization() back-filling an existing table.
+INSERT INTO count_tokens_docs (content)
+VALUES ('abc'),
+       ('Short document.'),
+       (repeat('The quick brown fox jumps over the lazy dog. ', 20));
+SELECT pgedge_vectorizer.enable_vectorization(
+    'count_tokens_docs'::regclass,
+    'content',
+    'token_based',
+    100,
+    10,
+    1536
+);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "count_tokens_docs_content_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: count_tokens_docs -> count_tokens_docs_content_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 3 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT count(*) AS mismatched_on_backfill
+  FROM count_tokens_docs_content_chunks
+ WHERE token_count IS DISTINCT FROM pgedge_vectorizer.count_tokens(content);
+ mismatched_on_backfill 
+------------------------
+                      0
+(1 row)
+
+-- The three-character row is the regression: length('abc') / 4 stored 0, which
+-- the BM25 scoring path then had to clamp back up to 1.
+SELECT token_count AS short_row_token_count
+  FROM count_tokens_docs_content_chunks c
+  JOIN count_tokens_docs d ON d.id = c.source_id
+ WHERE d.content = 'abc';
+ short_row_token_count 
+-----------------------
+                     1
+(1 row)
+
+-- Chunks written by the insert trigger.
+INSERT INTO count_tokens_docs (content)
+VALUES ('xy'),
+       ('A document added after vectorization was enabled.');
+SELECT count(*) AS mismatched_on_insert
+  FROM count_tokens_docs_content_chunks
+ WHERE token_count IS DISTINCT FROM pgedge_vectorizer.count_tokens(content);
+ mismatched_on_insert 
+----------------------
+                    0
+(1 row)
+
+-- Chunks written by recreate_chunks().
+SELECT pgedge_vectorizer.recreate_chunks('count_tokens_docs'::regclass, 'content');
+NOTICE:  Recreating chunks for count_tokens_docs.content -> count_tokens_docs_content_chunks
+NOTICE:  Deleted 0 existing chunks
+NOTICE:  Cleared queue for count_tokens_docs_content_chunks
+NOTICE:  Re-chunking with strategy=token_based, size=100, overlap=10
+NOTICE:  Processed 5 rows
+ recreate_chunks 
+-----------------
+               5
+(1 row)
+
+SELECT count(*) AS mismatched_on_recreate
+  FROM count_tokens_docs_content_chunks
+ WHERE token_count IS DISTINCT FROM pgedge_vectorizer.count_tokens(content);
+ mismatched_on_recreate 
+------------------------
+                      0
+(1 row)
+
+---------------------------------------------------------------------------
+-- Cleanup
+---------------------------------------------------------------------------
+SELECT pgedge_vectorizer.disable_vectorization('count_tokens_docs'::regclass,
+                                               'content', TRUE);
+NOTICE:  Vectorization disabled and chunk table dropped: count_tokens_docs_content_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP TABLE count_tokens_docs;
+DELETE FROM pgedge_vectorizer.queue;
