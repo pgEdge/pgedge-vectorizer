@@ -16,7 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the BM25 document-length normalisation, hybrid search scored chunks written
   by the trigger slightly differently from chunks written by the C chunker.
   Both now call the new `count_tokens()` function, so there is one definition
-  of the rule.
+  of the rule. Chunks written before the upgrade keep the counts they were
+  stored with, since the values are an approximation either way; where a
+  particular chunk table does need bringing into line, `recreate_chunks()` on
+  it rewrites every row through the new path.
 
 ### Added
 

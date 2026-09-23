@@ -34,7 +34,9 @@ COMMENT ON FUNCTION pgedge_vectorizer.count_tokens IS
 -- Redefine the three functions that wrote token_count themselves, so that
 -- they call count_tokens() instead. Existing rows keep whatever count they
 -- were written with; the values are an approximation either way, and a
--- rewrite of every chunk table is not worth a one-token correction.
+-- rewrite of every chunk table is not worth a one-token correction. Where a
+-- particular chunk table does need bringing into line, recreate_chunks() on
+-- it rewrites every row through the new path.
 ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.enable_vectorization(
