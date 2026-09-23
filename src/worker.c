@@ -1907,11 +1907,17 @@ process_queue_batch(const char *dbname)
 					bool isnull_dim;
 					Datum val_dim;
 
+					/*
+					 * The chunk table's generated name is one identifier
+					 * with a dot in it for a schema-qualified source, so it
+					 * is quoted rather than left for regclass to parse as a
+					 * qualified reference. Same rule as update_embedding().
+					 */
 					ret_dim = SPI_execute(psprintf(
 						"SELECT atttypmod FROM pg_attribute "
-						"WHERE attrelid = '%s'::regclass "
+						"WHERE attrelid = %s::regclass "
 						"AND attname = 'embedding'",
-						chunk_tables[idx0]),
+						quote_literal_cstr(quote_identifier(chunk_tables[idx0]))),
 						true, 1);
 
 					if (ret_dim == SPI_OK_SELECT && SPI_processed == 1)

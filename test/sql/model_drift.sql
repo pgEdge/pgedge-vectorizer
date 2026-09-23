@@ -86,6 +86,41 @@ SELECT count(*) AS rows_for_unknown_column
   FROM pgedge_vectorizer.embedding_model_status('drift_docs'::regclass, 'title');
 
 ---------------------------------------------------------------------------
+-- Narrowing does not depend on the caller being able to resolve every other
+-- vectorizer's source table
+--
+-- The registry stores source_table as text, and resolving each row's name
+-- back to a regclass in order to compare it raises for a schema the caller
+-- has no USAGE on, so narrowing to the one table they can read failed whilst
+-- the unnarrowed call worked. The comparison is made as text, as every other
+-- lookup in the extension makes it.
+---------------------------------------------------------------------------
+
+CREATE SCHEMA drift_private;
+CREATE TABLE drift_private.secret (id BIGSERIAL PRIMARY KEY, body TEXT);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'drift_private.secret'::regclass, 'body', 'token_based', 100, 10, 1536);
+
+CREATE ROLE drift_reader;
+GRANT USAGE ON SCHEMA pgedge_vectorizer TO drift_reader;
+GRANT SELECT ON pgedge_vectorizer.vectorizers TO drift_reader;
+GRANT SELECT ON drift_docs, drift_docs_body_chunks TO drift_reader;
+
+SET ROLE drift_reader;
+SELECT source_table, source_column, chunks_embedded
+  FROM pgedge_vectorizer.embedding_model_status('drift_docs'::regclass);
+RESET ROLE;
+
+SELECT pgedge_vectorizer.disable_vectorization(
+    'drift_private.secret'::regclass, 'body', TRUE);
+REVOKE SELECT ON drift_docs, drift_docs_body_chunks FROM drift_reader;
+REVOKE SELECT ON pgedge_vectorizer.vectorizers FROM drift_reader;
+REVOKE USAGE ON SCHEMA pgedge_vectorizer FROM drift_reader;
+DROP ROLE drift_reader;
+DROP TABLE drift_private.secret;
+DROP SCHEMA drift_private;
+
+---------------------------------------------------------------------------
 -- reembed() at a matching width leaves the current row alone
 ---------------------------------------------------------------------------
 

@@ -1316,7 +1316,7 @@ BEGIN
                    AS eff_model
           FROM pgedge_vectorizer.vectorizers r
          WHERE (p_source_table IS NULL
-                OR to_regclass(r.source_table) = p_source_table)
+                OR r.source_table = p_source_table::TEXT)
            AND (p_source_column IS NULL OR r.source_column = p_source_column)
          ORDER BY r.source_table, r.source_column
     LOOP
