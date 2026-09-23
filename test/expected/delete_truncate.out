@@ -308,3 +308,57 @@ SELECT pgedge_vectorizer.cleanup_trigger_name(
  dt_docs_body_f8876619_vectorization_delete_trigger
 (1 row)
 
+---------------------------------------------------------------------------
+-- TRUNCATE on a schema-qualified source table
+--
+-- The chunk table and its BM25 statistics table are generated names created
+-- with %I, so for a schema-qualified source the dot sits inside a single
+-- identifier. The truncate trigger has to quote them before looking them up,
+-- or the statistics survive a truncate that emptied every chunk they
+-- describe.
+---------------------------------------------------------------------------
+CREATE SCHEMA dt_schema;
+CREATE TABLE dt_schema.qualified (
+    id   SERIAL PRIMARY KEY,
+    body TEXT
+);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'dt_schema.qualified'::regclass, 'body', 'token_based', 100, 10, 1536);
+NOTICE:  Using primary key column: id (integer)
+NOTICE:  column "sparse_embedding" of relation "dt_schema.qualified_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: dt_schema.qualified -> dt_schema.qualified_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+INSERT INTO dt_schema.qualified (body)
+VALUES ('A document in a table that is not on the search path.');
+-- Stand in for the worker, which does not run in a regression database.
+INSERT INTO "dt_schema.qualified_body_chunks_idf_stats" (term, doc_freq)
+VALUES ('document', 1);
+TRUNCATE dt_schema.qualified;
+SELECT (SELECT count(*) FROM "dt_schema.qualified_body_chunks")
+           AS chunks_after_truncate,
+       (SELECT count(*) FROM "dt_schema.qualified_body_chunks_idf_stats")
+           AS idf_stats_after_truncate;
+ chunks_after_truncate | idf_stats_after_truncate 
+-----------------------+--------------------------
+                     0 |                        0
+(1 row)
+
+SELECT pgedge_vectorizer.disable_vectorization(
+           'dt_schema.qualified'::regclass, 'body', true);
+NOTICE:  Vectorization disabled and chunk table dropped: dt_schema.qualified_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP SCHEMA dt_schema CASCADE;
+NOTICE:  drop cascades to table dt_schema.qualified
+DELETE FROM pgedge_vectorizer.queue
+ WHERE chunk_table = 'dt_schema.qualified_body_chunks';
