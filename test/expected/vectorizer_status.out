@@ -243,8 +243,53 @@ SELECT chunk_table, source_rows, chunks_total, queue_pending
 (1 row)
 
 ---------------------------------------------------------------------------
+-- A source table in a schema the caller cannot use
+--
+-- to_regclass() does not return NULL for every name it cannot resolve: for a
+-- qualified name whose schema the caller has no USAGE on it raises
+-- insufficient_privilege instead. The lookup is therefore guarded, so that a
+-- caller with rights on one vectorizer and not on another's schema gets the
+-- rows it can see with NULL counts for the one it cannot, rather than an
+-- error for the whole result set.
+---------------------------------------------------------------------------
+REVOKE ALL ON SCHEMA vstatus_schema FROM PUBLIC;
+CREATE ROLE vstatus_unpriv_role;
+GRANT USAGE ON SCHEMA pgedge_vectorizer TO vstatus_unpriv_role;
+GRANT SELECT ON pgedge_vectorizer.vectorizers,
+                pgedge_vectorizer.queue,
+                pgedge_vectorizer.vectorizer_status TO vstatus_unpriv_role;
+GRANT SELECT ON vstatus_docs TO vstatus_unpriv_role;
+SET SESSION AUTHORIZATION vstatus_unpriv_role;
+SELECT source_table, source_rows IS NULL AS source_count_null
+  FROM pgedge_vectorizer.vectorizer_status
+ ORDER BY source_table;
+       source_table       | source_count_null 
+--------------------------+-------------------
+ vstatus_docs             | f
+ vstatus_other            | t
+ vstatus_schema.qualified | t
+(3 rows)
+
+-- Narrowing to a table the caller can see does not trip over the one it
+-- cannot, so the filter is applied after the guarded lookup rather than in
+-- the query that drives the loop.
+SELECT source_table, source_rows
+  FROM pgedge_vectorizer.vectorizer_status('vstatus_docs'::regclass);
+ source_table | source_rows 
+--------------+-------------
+ vstatus_docs |           2
+(1 row)
+
+RESET SESSION AUTHORIZATION;
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
+REVOKE ALL ON SCHEMA pgedge_vectorizer FROM vstatus_unpriv_role;
+REVOKE ALL ON pgedge_vectorizer.vectorizers,
+              pgedge_vectorizer.queue,
+              pgedge_vectorizer.vectorizer_status FROM vstatus_unpriv_role;
+REVOKE ALL ON vstatus_docs FROM vstatus_unpriv_role;
+DROP ROLE vstatus_unpriv_role;
 SELECT pgedge_vectorizer.disable_vectorization('vstatus_docs'::regclass,
                                                'body', TRUE);
 NOTICE:  table "vstatus_docs_body_chunks" does not exist, skipping

@@ -667,11 +667,32 @@ BEGIN
     FOR v IN
         SELECT r.source_table, r.source_column, r.chunk_table
           FROM pgedge_vectorizer.vectorizers r
-         WHERE (p_source_table IS NULL
-                OR to_regclass(r.source_table) = p_source_table)
-           AND (p_source_column IS NULL OR r.source_column = p_source_column)
+         WHERE (p_source_column IS NULL OR r.source_column = p_source_column)
          ORDER BY r.source_table, r.source_column
     LOOP
+        /*
+         * to_regclass() does not return NULL for every name it cannot
+         * resolve: given a qualified name whose schema the caller has no
+         * USAGE on, it raises insufficient_privilege instead, so resolving
+         * the source table has to be guarded. Without the guard a caller
+         * holding rights on one vectorizer and not on another's schema gets
+         * an error for the whole result set rather than the rows it can
+         * see, and the has_table_privilege() check further down never runs.
+         *
+         * The narrowing by p_source_table is applied here rather than in the
+         * query above for the same reason: resolving every registry row in
+         * the WHERE clause would raise on a vectorizer the caller cannot see
+         * even when it asked about a different table.
+         */
+        BEGIN
+            src_oid := to_regclass(v.source_table);
+        EXCEPTION WHEN insufficient_privilege THEN
+            src_oid := NULL;
+        END;
+
+        CONTINUE WHEN p_source_table IS NOT NULL
+                      AND src_oid IS DISTINCT FROM p_source_table::OID;
+
         source_table  := v.source_table;
         source_column := v.source_column;
         chunk_table   := v.chunk_table;
@@ -736,7 +757,6 @@ BEGIN
             END IF;
         END IF;
 
-        src_oid := to_regclass(v.source_table);
         IF src_oid IS NOT NULL
            AND has_table_privilege(src_oid, 'SELECT') THEN
             EXECUTE format('SELECT count(*) FROM %s', src_oid::REGCLASS)
