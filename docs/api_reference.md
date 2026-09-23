@@ -277,6 +277,10 @@ requeued, since a column cannot carry two widths. A notice says so.
 Chunk rows, token counts, sparse embeddings and the BM25 statistics are
 untouched either way, because none of them depends on the embedding model.
 
+The vectorizer's pending queue rows are replaced, since anything queued was
+queued before this decision was made, except rows queued for sparse work
+alone: those carry no embedding to redo and are left where they are.
+
 Unlike `set_embedding_model()`, there is no confirmation flag: this function
 does what its name says. It does spend money against a metered provider, and
 raises a notice with the count for that reason.
