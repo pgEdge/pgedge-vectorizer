@@ -101,22 +101,22 @@ CREATE TABLE drift_private.secret (id BIGSERIAL PRIMARY KEY, body TEXT);
 SELECT pgedge_vectorizer.enable_vectorization(
     'drift_private.secret'::regclass, 'body', 'token_based', 100, 10, 1536);
 
-CREATE ROLE drift_reader;
-GRANT USAGE ON SCHEMA pgedge_vectorizer TO drift_reader;
-GRANT SELECT ON pgedge_vectorizer.vectorizers TO drift_reader;
-GRANT SELECT ON drift_docs, drift_docs_body_chunks TO drift_reader;
+CREATE ROLE drift_reader_role;
+GRANT USAGE ON SCHEMA pgedge_vectorizer TO drift_reader_role;
+GRANT SELECT ON pgedge_vectorizer.vectorizers TO drift_reader_role;
+GRANT SELECT ON drift_docs, drift_docs_body_chunks TO drift_reader_role;
 
-SET ROLE drift_reader;
+SET ROLE drift_reader_role;
 SELECT source_table, source_column, chunks_embedded
   FROM pgedge_vectorizer.embedding_model_status('drift_docs'::regclass);
 RESET ROLE;
 
 SELECT pgedge_vectorizer.disable_vectorization(
     'drift_private.secret'::regclass, 'body', TRUE);
-REVOKE SELECT ON drift_docs, drift_docs_body_chunks FROM drift_reader;
-REVOKE SELECT ON pgedge_vectorizer.vectorizers FROM drift_reader;
-REVOKE USAGE ON SCHEMA pgedge_vectorizer FROM drift_reader;
-DROP ROLE drift_reader;
+REVOKE SELECT ON drift_docs, drift_docs_body_chunks FROM drift_reader_role;
+REVOKE SELECT ON pgedge_vectorizer.vectorizers FROM drift_reader_role;
+REVOKE USAGE ON SCHEMA pgedge_vectorizer FROM drift_reader_role;
+DROP ROLE drift_reader_role;
 DROP TABLE drift_private.secret;
 DROP SCHEMA drift_private;
 
