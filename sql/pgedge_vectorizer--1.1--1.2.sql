@@ -496,7 +496,14 @@ BEGIN
     END IF;
 
     -- Verify chunk table exists
-    IF to_regclass(chunk_table_name) IS NULL THEN
+    /*
+     * The chunk table's name is generated as source_table || column ||
+     * '_chunks' and created with %I, so for a schema-qualified source the dot
+     * is inside a single identifier rather than separating a schema from a
+     * relation. Without quote_ident() the lookup splits it, finds nothing and
+     * raises as though the table had never been created.
+     */
+    IF to_regclass(quote_ident(chunk_table_name)) IS NULL THEN
         RAISE EXCEPTION 'Chunk table % does not exist. Use enable_vectorization() first.', chunk_table_name;
     END IF;
 
@@ -789,3 +796,43 @@ SELECT * FROM pgedge_vectorizer.vectorizer_status(NULL, NULL);
 COMMENT ON VIEW pgedge_vectorizer.vectorizer_status IS
 'Embedding coverage and queue backlog for every registered vectorizer';
 
+---------------------------------------------------------------------------
+-- Redefine the TRUNCATE trigger function for the same identifier reason
+--
+-- It looked up the BM25 statistics table without quoting, so for a
+-- schema-qualified source the dot in the generated name was read as
+-- qualification, the lookup came back NULL and truncating the source left
+-- the corpus statistics behind for chunks that no longer existed. The
+-- trigger itself is unchanged, so only the function needs replacing.
+---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    chunk_table TEXT;
+BEGIN
+    chunk_table := TG_ARGV[0];
+
+    EXECUTE format(
+        'DELETE FROM pgedge_vectorizer.queue
+          WHERE chunk_table = %L AND status IN (''pending'', ''failed'')',
+        chunk_table);
+
+    EXECUTE format('TRUNCATE TABLE %I', chunk_table);
+
+    /*
+     * Both names are single identifiers, generated from the source table and
+     * column and created with %I, so a schema-qualified source leaves a dot
+     * inside the identifier. quote_ident() stops to_regclass() reading that
+     * dot as qualification and returning NULL for a table that is there.
+     */
+    IF to_regclass(quote_ident(chunk_table || '_idf_stats')) IS NOT NULL THEN
+        EXECUTE format('TRUNCATE TABLE %I', chunk_table || '_idf_stats');
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.vectorization_truncate_trigger IS
+'Statement-level AFTER TRUNCATE trigger emptying the chunk table, its queue entries and its BM25 statistics';

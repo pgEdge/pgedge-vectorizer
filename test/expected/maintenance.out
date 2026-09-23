@@ -98,3 +98,56 @@ NOTICE:  Vectorization disabled and chunk table dropped: maint_test_content_chun
 (1 row)
 
 DROP TABLE maint_test;
+---------------------------------------------------------------------------
+-- recreate_chunks() on a schema-qualified source table
+--
+-- The chunk table's name is generated as source_table || column || '_chunks'
+-- and created with %I, so here it is the single identifier
+-- 'maint_schema.qualified_body_chunks' rather than a relation in a schema.
+-- Looking that up unquoted finds nothing and raises as though the table had
+-- never been created.
+---------------------------------------------------------------------------
+CREATE SCHEMA maint_schema;
+CREATE TABLE maint_schema.qualified (
+    id   SERIAL PRIMARY KEY,
+    body TEXT
+);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'maint_schema.qualified'::regclass, 'body', 'token_based', 100, 10, 1536);
+NOTICE:  Using primary key column: id (integer)
+NOTICE:  column "sparse_embedding" of relation "maint_schema.qualified_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: maint_schema.qualified -> maint_schema.qualified_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+INSERT INTO maint_schema.qualified (body)
+VALUES ('A document in a table that is not on the search path.');
+SELECT pgedge_vectorizer.recreate_chunks(
+           'maint_schema.qualified'::regclass, 'body') > 0 AS qualified_recreated;
+NOTICE:  Recreating chunks for maint_schema.qualified.body -> maint_schema.qualified_body_chunks
+NOTICE:  Deleted 0 existing chunks
+NOTICE:  Cleared queue for maint_schema.qualified_body_chunks
+NOTICE:  Re-chunking with strategy=token_based, size=100, overlap=10
+NOTICE:  Processed 1 rows
+ qualified_recreated 
+---------------------
+ t
+(1 row)
+
+SELECT pgedge_vectorizer.disable_vectorization(
+           'maint_schema.qualified'::regclass, 'body', true);
+NOTICE:  Vectorization disabled and chunk table dropped: maint_schema.qualified_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+DROP SCHEMA maint_schema CASCADE;
+NOTICE:  drop cascades to table maint_schema.qualified
+DELETE FROM pgedge_vectorizer.queue
+ WHERE chunk_table = 'maint_schema.qualified_body_chunks';

@@ -810,7 +810,13 @@ BEGIN
 
     EXECUTE format('TRUNCATE TABLE %I', chunk_table);
 
-    IF to_regclass(chunk_table || '_idf_stats') IS NOT NULL THEN
+    /*
+     * Both names are single identifiers, generated from the source table and
+     * column and created with %I, so a schema-qualified source leaves a dot
+     * inside the identifier. quote_ident() stops to_regclass() reading that
+     * dot as qualification and returning NULL for a table that is there.
+     */
+    IF to_regclass(quote_ident(chunk_table || '_idf_stats')) IS NOT NULL THEN
         EXECUTE format('TRUNCATE TABLE %I', chunk_table || '_idf_stats');
     END IF;
 
@@ -1304,7 +1310,14 @@ BEGIN
     END IF;
 
     -- Verify chunk table exists
-    IF to_regclass(chunk_table_name) IS NULL THEN
+    /*
+     * The chunk table's name is generated as source_table || column ||
+     * '_chunks' and created with %I, so for a schema-qualified source the dot
+     * is inside a single identifier rather than separating a schema from a
+     * relation. Without quote_ident() the lookup splits it, finds nothing and
+     * raises as though the table had never been created.
+     */
+    IF to_regclass(quote_ident(chunk_table_name)) IS NULL THEN
         RAISE EXCEPTION 'Chunk table % does not exist. Use enable_vectorization() first.', chunk_table_name;
     END IF;
 

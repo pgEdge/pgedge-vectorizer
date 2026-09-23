@@ -21,6 +21,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   particular chunk table does need bringing into line, `recreate_chunks()` on
   it rewrites every row through the new path.
 
+- Generated chunk table names are now quoted before they are looked up. The
+  name is built as `source_table || column || '_chunks'` and the table is
+  created with `%I`, so for a source table in a schema the dot ends up inside
+  a single identifier rather than separating a schema from a relation.
+  `to_regclass()` was reading that dot as qualification, which made
+  `recreate_chunks()` raise as though the chunk table had never been created,
+  and left the BM25 statistics behind when the source was truncated.
+
 ### Added
 
 - `pgedge_vectorizer.count_tokens(text)`, which exposes the chunking engine's
