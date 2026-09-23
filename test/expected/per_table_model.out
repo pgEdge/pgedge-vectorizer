@@ -321,6 +321,183 @@ SELECT provider, model
 (1 row)
 
 ---------------------------------------------------------------------------
+-- A repeated enable_vectorization() call and the recorded model
+---------------------------------------------------------------------------
+-- The GUCs set above still say openai/text-embedding-3-small here.
+CREATE TABLE ptm_repeat (id BIGSERIAL PRIMARY KEY, body TEXT);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_repeat'::regclass, 'body', 'token_based', 100, 10, 1536,
+    provider => 'ollama', model => 'nomic-embed-text');
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_repeat_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_repeat -> ptm_repeat_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Calling again to change the chunking, naming neither provider nor model,
+-- leaves the pin exactly as it was. Reverting it to the GUCs here would point
+-- the vectorizer at a different model whilst leaving the vectors already
+-- written by the old one in place, and nothing downstream would notice.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_repeat'::regclass, 'body', 'token_based', 200, 20, 1536);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  relation "ptm_repeat_body_chunks" already exists, skipping
+NOTICE:  column "sparse_embedding" of relation "ptm_repeat_body_chunks" already exists, skipping
+NOTICE:  relation "ptm_repeat_body_chunks_embedding_idx" already exists, skipping
+NOTICE:  relation "ptm_repeat_body_chunks_source_id_idx" already exists, skipping
+NOTICE:  relation "ptm_repeat_body_chunks_sparse_idx" already exists, skipping
+NOTICE:  relation "ptm_repeat_body_chunks_idf_stats" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_repeat -> ptm_repeat_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 200, overlap: 20
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_repeat';
+ provider |      model       
+----------+------------------
+ ollama   | nomic-embed-text
+(1 row)
+
+-- Naming what is already recorded is free.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_repeat'::regclass, 'body', 'token_based', 200, 20, 1536,
+    provider => 'ollama', model => 'nomic-embed-text');
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  relation "ptm_repeat_body_chunks" already exists, skipping
+NOTICE:  column "sparse_embedding" of relation "ptm_repeat_body_chunks" already exists, skipping
+NOTICE:  relation "ptm_repeat_body_chunks_embedding_idx" already exists, skipping
+NOTICE:  relation "ptm_repeat_body_chunks_source_id_idx" already exists, skipping
+NOTICE:  relation "ptm_repeat_body_chunks_sparse_idx" already exists, skipping
+NOTICE:  relation "ptm_repeat_body_chunks_idf_stats" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_repeat -> ptm_repeat_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 200, overlap: 20
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+-- Naming a different model raises, and points at set_embedding_model(),
+-- which is the only thing that clears the embeddings and requeues the chunks.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.enable_vectorization(
+        'ptm_repeat'::regclass, 'body', 'token_based', 100, 10, 1536,
+        model => 'nomic-embed-text-v2');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+NOTICE:  vectorizer for ptm_repeat.body already embeds with ollama/nomic-embed-text and cannot be repointed here
+-- The same for the provider.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.enable_vectorization(
+        'ptm_repeat'::regclass, 'body', 'token_based', 100, 10, 1536,
+        provider => 'openai');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+NOTICE:  vectorizer for ptm_repeat.body already embeds with ollama/nomic-embed-text and cannot be repointed here
+-- Neither refusal changed anything.
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_repeat';
+ provider |      model       
+----------+------------------
+ ollama   | nomic-embed-text
+(1 row)
+
+-- The comparison is against the effective provider and model rather than the
+-- stored ones, so a vectorizer that inherits may be handed the values it is
+-- already inheriting without complaint.
+CREATE TABLE ptm_effective (id BIGSERIAL PRIMARY KEY, body TEXT);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_effective'::regclass, 'body', 'token_based', 100, 10, 1536);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_effective_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_effective -> ptm_effective_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_effective'::regclass, 'body', 'token_based', 100, 10, 1536,
+    provider => 'openai', model => 'text-embedding-3-small');
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  relation "ptm_effective_body_chunks" already exists, skipping
+NOTICE:  column "sparse_embedding" of relation "ptm_effective_body_chunks" already exists, skipping
+NOTICE:  relation "ptm_effective_body_chunks_embedding_idx" already exists, skipping
+NOTICE:  relation "ptm_effective_body_chunks_source_id_idx" already exists, skipping
+NOTICE:  relation "ptm_effective_body_chunks_sparse_idx" already exists, skipping
+NOTICE:  relation "ptm_effective_body_chunks_idf_stats" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_effective -> ptm_effective_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_effective';
+ provider |         model          
+----------+------------------------
+ openai   | text-embedding-3-small
+(1 row)
+
+-- Whilst one that differs from what it inherits is refused just the same.
+CREATE TABLE ptm_effective2 (id BIGSERIAL PRIMARY KEY, body TEXT);
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_effective2'::regclass, 'body', 'token_based', 100, 10, 1536);
+NOTICE:  Using primary key column: id (bigint)
+NOTICE:  column "sparse_embedding" of relation "ptm_effective2_body_chunks" already exists, skipping
+NOTICE:  Vectorization enabled: ptm_effective2 -> ptm_effective2_body_chunks
+NOTICE:  Strategy: token_based, chunk_size: 100, overlap: 10
+NOTICE:  Processing existing rows...
+NOTICE:  Processed 0 existing rows
+ enable_vectorization 
+----------------------
+ 
+(1 row)
+
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.enable_vectorization(
+        'ptm_effective2'::regclass, 'body', 'token_based', 100, 10, 1536,
+        model => 'text-embedding-3-large');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+NOTICE:  vectorizer for ptm_effective2.body already embeds with openai/text-embedding-3-small and cannot be repointed here
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_effective2';
+ provider | model 
+----------+-------
+          | 
+(1 row)
+
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 SELECT pgedge_vectorizer.disable_vectorization('ptm_inherits'::regclass,
@@ -347,9 +524,36 @@ NOTICE:  Vectorization disabled and chunk table dropped: ptm_named_body_chunks
  
 (1 row)
 
+SELECT pgedge_vectorizer.disable_vectorization('ptm_repeat'::regclass,
+                                               'body', TRUE);
+NOTICE:  Vectorization disabled and chunk table dropped: ptm_repeat_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+SELECT pgedge_vectorizer.disable_vectorization('ptm_effective'::regclass,
+                                               'body', TRUE);
+NOTICE:  Vectorization disabled and chunk table dropped: ptm_effective_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
+SELECT pgedge_vectorizer.disable_vectorization('ptm_effective2'::regclass,
+                                               'body', TRUE);
+NOTICE:  Vectorization disabled and chunk table dropped: ptm_effective2_body_chunks
+ disable_vectorization 
+-----------------------
+ 
+(1 row)
+
 DROP TABLE ptm_inherits;
 DROP TABLE ptm_pinned;
 DROP TABLE ptm_named;
+DROP TABLE ptm_repeat;
+DROP TABLE ptm_effective;
+DROP TABLE ptm_effective2;
 DELETE FROM pgedge_vectorizer.queue;
 RESET pgedge_vectorizer.provider;
 RESET pgedge_vectorizer.model;
