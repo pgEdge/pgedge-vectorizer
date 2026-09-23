@@ -91,7 +91,58 @@ static char failed_item_error[FAILED_ITEM_ERROR_LEN] = "";
  */
 #define MAX_RATE_LIMIT_DEFERRALS		100
 
-static TimestampTz provider_cooldown_until = 0;
+/*
+ * Cooldowns are per provider.
+ *
+ * A database can have several since #74, and one provider's rate limit is no
+ * reason to stop asking a different one for work. Keyed on the name rather
+ * than held on EmbeddingProvider, because the claim has to name the cooling
+ * providers in SQL and a field on the struct would not give us that without a
+ * new accessor.
+ *
+ * A name here is either a registered provider that has rate limited us or one
+ * that could not be resolved at all, which is arbitrary text from a setting
+ * rather than a name we know. Either way the table is bounded by the distinct
+ * provider settings in the database, which is a handful, and expired entries
+ * are reused, so it neither grows nor needs sweeping. Should the slots ever
+ * fill, dropping a cooldown is the safe failure: see
+ * provider_begin_cooldown().
+ */
+#define PROVIDER_COOLDOWN_SLOTS		8
+
+/*
+ * How long a provider that could not be resolved or initialised is held off
+ * for. Longer than BATCH_RETRY_MIN deliberately: the caller's first backoff
+ * after such a pull is that floor, so a shorter cooldown would have expired
+ * again by the time the next claim ran and the backlog would refill it. Short
+ * enough that an init() failure which fixes itself, rather than by a setting
+ * being corrected, costs a minute rather than an outage.
+ */
+#define UNAVAILABLE_PROVIDER_COOLDOWN_SECONDS	60
+
+typedef struct ProviderCooldown
+{
+	char			name[NAMEDATALEN];
+	TimestampTz		until;
+} ProviderCooldown;
+
+static ProviderCooldown provider_cooldowns[PROVIDER_COOLDOWN_SLOTS];
+
+#define BATCH_RETRY_MIN	5000		/* First backoff: 5 seconds */
+#define BATCH_RETRY_MAX	300000		/* Cap at 5 minutes */
+
+/*
+ * Grow the wait after a batch that achieved nothing, doubling from the floor
+ * up to the ceiling. Used both by the exception path and by a pull in which
+ * every provider turned out to be unavailable, which raises nothing.
+ */
+static int
+grow_batch_retry(int current)
+{
+	return (current == 0)
+		? BATCH_RETRY_MIN
+		: Min(current * 2, BATCH_RETRY_MAX);
+}
 
 /*
  * When a failed item should next be tried. Evaluated in the UPDATE that
@@ -133,15 +184,139 @@ rate_limit_backoff_expr(int retry_after)
  * to whatever rows the next pull happens to claim.
  */
 static int
-provider_begin_cooldown(int retry_after)
+provider_begin_cooldown(const char *provider, int retry_after)
 {
 	int			seconds = (retry_after != PROVIDER_RETRY_AFTER_UNSET)
 		? Max(retry_after, 1) : RATE_LIMIT_BACKOFF_BASE_SECONDS;
-
-	provider_cooldown_until =
+	TimestampTz	until =
 		TimestampTzPlusMilliseconds(GetCurrentTimestamp(), seconds * 1000);
+	int			free_slot = -1;
+
+	for (int i = 0; i < PROVIDER_COOLDOWN_SLOTS; i++)
+	{
+		if (provider_cooldowns[i].until != 0 &&
+			strcmp(provider_cooldowns[i].name, provider) == 0)
+		{
+			provider_cooldowns[i].until = until;
+			return seconds;
+		}
+
+		if (free_slot < 0 && provider_cooldowns[i].until == 0)
+			free_slot = i;
+	}
+
+	/*
+	 * There are fewer registered providers than slots, so this cannot fill up
+	 * in practice. Should that ever stop being true, dropping the cooldown is
+	 * the safe failure: the worst of it is another refused request.
+	 */
+	if (free_slot < 0)
+	{
+		elog(WARNING, "no cooldown slot free for provider \"%s\"", provider);
+		return seconds;
+	}
+
+	strlcpy(provider_cooldowns[free_slot].name, provider, NAMEDATALEN);
+	provider_cooldowns[free_slot].until = until;
 
 	return seconds;
+}
+
+/*
+ * Milliseconds until the soonest cooldown passes, or 0 when no provider is
+ * being held off.
+ *
+ * The caller waits no longer than this after a pull it could attempt nothing
+ * of, so a backoff that has grown past the hold-off causing it cannot leave
+ * the queue sitting after the provider is due back.
+ */
+static long
+provider_cooldown_remaining(void)
+{
+	TimestampTz	now = GetCurrentTimestamp();
+	long		soonest = 0;
+
+	for (int i = 0; i < PROVIDER_COOLDOWN_SLOTS; i++)
+	{
+		long	ms;
+
+		if (provider_cooldowns[i].until == 0 ||
+			now >= provider_cooldowns[i].until)
+			continue;
+
+		ms = (long) ((provider_cooldowns[i].until - now) / 1000);
+
+		if (soonest == 0 || ms < soonest)
+			soonest = ms;
+	}
+
+	return soonest;
+}
+
+/*
+ * The wait to take after a pull that attempted nothing: the backoff, floored
+ * at the poll interval so that a configuration with a long poll is never made
+ * to poll faster by failing, and capped by the hold-off that caused it.
+ */
+static int
+batch_retry_wait(int interval)
+{
+	int		wait = Max(interval, pgedge_vectorizer_worker_poll_interval);
+	long	remaining = provider_cooldown_remaining();
+
+	if (remaining > 0 && remaining < (long) wait)
+		wait = (int) remaining;
+
+	return wait;
+}
+
+/*
+ * Forget every cooldown.
+ *
+ * Called on a reload, which is how a misconfigured or unauthenticated
+ * provider gets corrected: holding one off afterwards would make the operator
+ * wait out a penalty their fix has already invalidated, exactly as the batch
+ * backoff would. A provider that is still refusing work earns its cooldown
+ * back on the next pull.
+ */
+static void
+provider_clear_cooldowns(void)
+{
+	for (int i = 0; i < PROVIDER_COOLDOWN_SLOTS; i++)
+		provider_cooldowns[i].until = 0;
+}
+
+/*
+ * Name every provider currently inside a cooldown, quoted for SQL and comma
+ * separated, clearing slots whose cooldown has passed along the way. Returns
+ * how many were written.
+ */
+static int
+provider_cooling_names(StringInfo out)
+{
+	TimestampTz	now = GetCurrentTimestamp();
+	int			written = 0;
+
+	for (int i = 0; i < PROVIDER_COOLDOWN_SLOTS; i++)
+	{
+		if (provider_cooldowns[i].until == 0)
+			continue;
+
+		if (now >= provider_cooldowns[i].until)
+		{
+			provider_cooldowns[i].until = 0;
+			continue;
+		}
+
+		if (written > 0)
+			appendStringInfoString(out, ", ");
+
+		appendStringInfoString(out,
+							   quote_literal_cstr(provider_cooldowns[i].name));
+		written++;
+	}
+
+	return written;
 }
 
 /*
@@ -246,7 +421,7 @@ static void queue_item_begin(int64 queue_id, int attempts, int max_attempts);
 static void queue_item_done(void);
 static void queue_item_note_error(void);
 static bool queue_item_record_failure(void);
-static void process_queue_batch(const char *dbname);
+static bool process_queue_batch(const char *dbname);
 static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
 							 const float *embedding, int dim,
@@ -1239,8 +1414,6 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	 * lengthened instead. Zero means no batch failure is outstanding.
 	 */
 	int batch_retry_interval = 0;
-#define BATCH_RETRY_MIN	5000		/* First backoff: 5 seconds */
-#define BATCH_RETRY_MAX	300000		/* Cap at 5 minutes */
 
 	/* Setup signal handlers */
 	pqsignal(SIGTERM, worker_sigterm);
@@ -1295,9 +1468,11 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 			 * Retry the queue at once. A reload is how a misconfigured
 			 * provider gets fixed, so making the operator wait out a backoff
 			 * that their correction has already invalidated would be
-			 * needlessly obtuse.
+			 * needlessly obtuse. The same goes for any provider being held
+			 * off, which is the other half of how that correction lands.
 			 */
 			batch_retry_interval = 0;
+			provider_clear_cooldowns();
 
 			/*
 			 * Re-evaluate our quantum: a reload may have added databases or
@@ -1353,14 +1528,13 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		/*
 		 * Use a longer wait if the extension is not installed, or if the last
 		 * batch failed for a reason no single item can be charged for. The
-		 * backoff is floored at the poll interval so that a configuration
-		 * with a long poll is never made to poll faster by failing.
+		 * backoff is floored at the poll interval, and capped by any hold-off
+		 * in force: see batch_retry_wait().
 		 */
 		if (!extension_exists)
 			wait_time = ext_retry_interval;
 		else if (batch_retry_interval > 0)
-			wait_time = Max(batch_retry_interval,
-							pgedge_vectorizer_worker_poll_interval);
+			wait_time = batch_retry_wait(batch_retry_interval);
 		else
 			wait_time = pgedge_vectorizer_worker_poll_interval;
 
@@ -1423,16 +1597,38 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 
 		PG_TRY();
 		{
-			process_queue_batch(dbname);
+			bool		attempted = process_queue_batch(dbname);
 
 			/* Perform automatic cleanup if enabled */
 			cleanup_completed_items(dbname);
 
-			/*
-			 * A batch that got through clears any backoff: whatever was wrong
-			 * is no longer wrong, and there is no reason to keep waiting.
-			 */
-			batch_retry_interval = 0;
+			if (attempted)
+			{
+				/*
+				 * A batch that got through clears any backoff: whatever was
+				 * wrong is no longer wrong, and there is no reason to keep
+				 * waiting.
+				 */
+				batch_retry_interval = 0;
+			}
+			else
+			{
+				/*
+				 * Work was there and none of it could be attempted, because
+				 * every provider it needed is unavailable. Nothing raised and
+				 * nothing was charged, deliberately, so this is the only
+				 * signal that the pull achieved nothing: without it the
+				 * worker would poll flat out for as long as the
+				 * misconfiguration lasted. Backed off on the same schedule as
+				 * the exception path below.
+				 */
+				batch_retry_interval = grow_batch_retry(batch_retry_interval);
+
+				elog(LOG, "pgedge_vectorizer worker for database \"%s\": no "
+					 "usable provider for the queued work, waiting %ds before "
+					 "trying again", dbname,
+					 batch_retry_wait(batch_retry_interval) / 1000);
+			}
 		}
 		PG_CATCH();
 		{
@@ -1466,20 +1662,17 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 			 */
 			if (!queue_item_record_failure())
 			{
-				batch_retry_interval = (batch_retry_interval == 0)
-					? BATCH_RETRY_MIN
-					: Min(batch_retry_interval * 2, BATCH_RETRY_MAX);
+				batch_retry_interval = grow_batch_retry(batch_retry_interval);
 
 				/*
-				 * Report the wait actually taken, floored at the poll interval
-				 * just as the wait below is; the raw backoff would understate
-				 * a long poll.
+				 * Report the wait actually taken rather than the raw backoff,
+				 * which would understate a long poll and overstate a wait cut
+				 * short by a provider coming back.
 				 */
 				elog(LOG, "pgedge_vectorizer worker for database \"%s\": batch "
 					 "failed with nothing to charge it to, waiting %ds before "
 					 "trying again", dbname,
-					 Max(batch_retry_interval,
-						 pgedge_vectorizer_worker_poll_interval) / 1000);
+					 batch_retry_wait(batch_retry_interval) / 1000);
 			}
 
 			/* Recheck extension status on error */
@@ -1596,37 +1789,63 @@ batch_extent(int start, int n_items, const int *attempts,
 
 /*
  * Process a batch of queue items
+ *
+ * Returns false when the pull found work but no request could be attempted,
+ * which is the caller's cue to back off. Every other outcome, an empty queue
+ * included, returns true. This exists because a provider that cannot be
+ * resolved no longer raises: the backoff used to be reachable only through
+ * the exception path, and a database whose only provider is mistyped would
+ * otherwise poll flat out for ever.
  */
-static void
+static bool
 process_queue_batch(const char *dbname)
 {
 	int ret;
+	bool attempted = false;
+	bool pulled = false;
 	int batch_size = pgedge_vectorizer_batch_size;
 	EmbeddingProvider *provider = NULL;
 	char *error_msg = NULL;
+	StringInfoData cooling;
+	char *cooling_filter = "";
 
 	/*
 	 * Stay off a provider that has just rate limited us. Without this the
 	 * next poll takes another pull straight into the same limit, so the queue
 	 * advances at the rate the provider refuses work.
+	 *
+	 * Done by excluding that provider from the claim rather than by skipping
+	 * the poll, which is what it used to do: a database can have several
+	 * providers, and one of them refusing work is no reason to leave the rest
+	 * of the queue alone. Filtered in the claim rather than after the fetch
+	 * because the pull takes the oldest batch_size rows, so a cooling
+	 * provider with a long backlog at the head of the queue would otherwise
+	 * fill every batch and starve everyone behind it, which is the same fault
+	 * one step further along.
 	 */
-	if (provider_cooldown_until != 0)
-	{
-		if (GetCurrentTimestamp() < provider_cooldown_until)
-		{
-			elog(DEBUG1, "Worker for database \"%s\": provider is rate "
-				 "limited, holding off this batch", dbname);
-			return;
-		}
-
-		provider_cooldown_until = 0;
-	}
-
 	/* Start a transaction */
 	SetCurrentStatementStartTimestamp();
 	StartTransactionCommand();
 	PushActiveSnapshot(GetTransactionSnapshot());
 	SPI_connect();
+
+	/*
+	 * Built here rather than before the transaction so that the string is
+	 * allocated in a context the transaction reclaims. The worker polls for
+	 * the life of the process, so anything left in its long-lived context
+	 * accumulates a little on every poll for ever.
+	 */
+	initStringInfo(&cooling);
+	if (provider_cooling_names(&cooling) > 0)
+	{
+		cooling_filter = psprintf(
+			"AND COALESCE(NULLIF(v.provider, ''), "
+			"             current_setting('pgedge_vectorizer.provider')) "
+			"    <> ALL (ARRAY[%s]) ", cooling.data);
+
+		elog(DEBUG1, "Worker for database \"%s\": holding off provider%s %s",
+			 dbname, strchr(cooling.data, ',') ? "s" : "", cooling.data);
+	}
 
 	/* Fetch pending items using FOR UPDATE SKIP LOCKED */
 	/*
@@ -1680,6 +1899,7 @@ process_queue_batch(const char *dbname)
 		") v ON true "
 		"WHERE q.status = 'pending' "
 		"AND (q.next_retry_at IS NULL OR q.next_retry_at <= NOW()) "
+		"%s"
 		/*
 		 * Oldest first.  Ordering by attempts DESC put the items that had
 		 * failed most at the head of every batch, so a provider outage left
@@ -1690,7 +1910,7 @@ process_queue_batch(const char *dbname)
 		"ORDER BY q.created_at "
 		"LIMIT %d "
 		"FOR UPDATE OF q SKIP LOCKED",
-		batch_size),
+		cooling_filter, batch_size),
 		false, batch_size);
 
 	if (ret == SPI_OK_SELECT && SPI_processed > 0)
@@ -1711,6 +1931,8 @@ process_queue_batch(const char *dbname)
 		int batch_count = 0;
 		bool has_retries = false;
 		bool has_sparse_only = false;
+
+		pulled = true;
 
 		elog(DEBUG1, "Worker for database \"%s\" processing %d queue items",
 			 dbname, n_items);
@@ -1854,6 +2076,15 @@ process_queue_batch(const char *dbname)
 
 				if (batch_sparse_only)
 				{
+					/*
+					 * No provider is needed, but this is still a request the
+					 * pull carried out: the items are scored and completed
+					 * below. Left unset, a pull made entirely of sparse-only
+					 * items would report that it attempted nothing and earn a
+					 * backoff for work that succeeded.
+					 */
+					attempted = true;
+
 					embeddings = palloc0(batch_count * sizeof(float *));
 					dim = 0;
 					error_msg = NULL;
@@ -1868,23 +2099,86 @@ process_queue_batch(const char *dbname)
 					/*
 					 * A provider that cannot be resolved or initialised is a
 					 * fault of the configuration rather than of any item in
-					 * the request, so it is raised rather than charged: see
+					 * the request, so nothing here is charged: see
 					 * 005_batch_failure_backoff.pl, which exists to keep a
-					 * mistyped provider name from retiring the whole queue
-					 * one blameless row at a time. The outer handler backs
-					 * the worker off instead.
+					 * mistyped provider name from retiring the whole queue one
+					 * blameless row at a time.
+					 *
+					 * Nor is it raised. That would abort the transaction and
+					 * take the rest of the pull with it, including work for
+					 * providers that are perfectly fine, so one vectorizer's
+					 * typo would stop every other vectorizer in the database.
+					 * The group goes back on the queue untouched and the loop
+					 * carries on; if no group in the pull could be attempted,
+					 * the caller backs off exactly as the raise used to make
+					 * it.
 					 */
 					provider = get_embedding_provider(providers[batch_start]);
-					if (provider == NULL)
-						elog(ERROR, "embedding provider \"%s\" is not available",
-							 providers[batch_start]);
 
-					if (!provider->init(&error_msg))
-						elog(ERROR, "failed to initialise provider \"%s\": %s",
-							 providers[batch_start],
-							 error_msg ? error_msg : "unknown error");
+					if (provider == NULL || !provider->init(&error_msg))
+					{
+						int			cooldown;
+
+						for (int i = 0; i < batch_count; i++)
+							SPI_execute(psprintf(
+								"UPDATE pgedge_vectorizer.queue "
+								"SET status = 'pending' "
+								"WHERE id = %ld",
+								queue_ids[batch_start + i]),
+								false, 0);
+
+						/*
+						 * Skipping the group is not enough on its own. The
+						 * items go back with created_at and next_retry_at
+						 * untouched, so they are the oldest again on the very
+						 * next pull, and a misconfigured vectorizer with more
+						 * pending rows than batch_size would fill every claim
+						 * with them and starve everything behind it: the
+						 * queue would move for nobody rather than for
+						 * everybody, which is the fault this change exists to
+						 * remove rather than relocate.
+						 *
+						 * So the provider is held off exactly as a rate
+						 * limited one is, which takes it out of the claim
+						 * until the cooldown passes and leaves the pull free
+						 * to reach work that is fine. Correcting the setting
+						 * is still enough on its own to drain the queue,
+						 * because the cooldown is keyed on the name that
+						 * failed and a corrected vectorizer no longer
+						 * resolves to it; a corrected GUC, or a key file that
+						 * has appeared, arrives by reload, which clears the
+						 * cooldowns outright.
+						 *
+						 * The wait is ours to choose rather than the
+						 * provider's, since nothing answered: there is no
+						 * Retry-After to honour, so the constant stands in
+						 * for one.
+						 */
+						cooldown = provider_begin_cooldown(
+							providers[batch_start],
+							UNAVAILABLE_PROVIDER_COOLDOWN_SECONDS);
+
+						elog(WARNING, "pgedge_vectorizer worker for database "
+							 "\"%s\": provider \"%s\" for %s is unavailable, "
+							 "leaving %d item%s queued and holding off that "
+							 "provider for %ds: %s",
+							 dbname, providers[batch_start],
+							 chunk_tables[batch_start], batch_count,
+							 batch_count == 1 ? "" : "s", cooldown,
+							 error_msg ? error_msg : "provider not found");
+
+						error_msg = NULL;
+						continue;
+					}
 
 					provider_reset_rate_limit();
+
+					/*
+					 * Past every way this request could be abandoned before
+					 * reaching the provider, so the pull has attempted
+					 * something and the caller has no cause to back off.
+					 */
+					attempted = true;
 
 					/* Generate embeddings for this request */
 					embeddings = provider->generate_batch(&contents[batch_start],
@@ -2157,23 +2451,18 @@ process_queue_batch(const char *dbname)
 					 * Only this provider's items, though. A batch can now
 					 * span providers, and charging another provider's work
 					 * for this one's 429 would spend deferrals it never used
-					 * and, once they ran out, fail it outright. Those items
-					 * go straight back to pending, uncharged, for the next
-					 * pull to take.
+					 * and, once they ran out, fail it outright. The batch is
+					 * sorted by (provider, model), so the first item
+					 * belonging to anyone else ends this provider's run;
+					 * everything from there on is left exactly as it is for
+					 * the rest of this loop to process, a few lines below, in
+					 * this same transaction.
 					 */
 					for (int idx = batch_start; idx < n_items; idx++)
 					{
 						if (strcmp(providers[idx],
 								   providers[batch_start]) != 0)
-						{
-							SPI_execute(psprintf(
-								"UPDATE pgedge_vectorizer.queue "
-								"SET status = 'pending' "
-								"WHERE id = %ld",
-								queue_ids[idx]),
-								false, 0);
-							continue;
-						}
+							break;
 
 						deferred++;
 
@@ -2192,7 +2481,8 @@ process_queue_batch(const char *dbname)
 							false, 0);
 					}
 
-					cooldown = provider_begin_cooldown(ratelimit->retry_after);
+					cooldown = provider_begin_cooldown(providers[batch_start],
+													   ratelimit->retry_after);
 
 					elog(LOG, "pgedge_vectorizer worker for database \"%s\": "
 						 "provider rate limited (HTTP %ld), deferring %d queue "
@@ -2200,8 +2490,15 @@ process_queue_batch(const char *dbname)
 						 dbname, ratelimit->http_status, deferred,
 						 deferred == 1 ? "" : "s", cooldown);
 
-					/* Nothing more can be sent to the provider in this pull. */
-					break;
+					/*
+					 * Only this provider is held off. Its items are
+					 * contiguous, the batch having been sorted by (provider,
+					 * model), so stepping over exactly the run just deferred
+					 * leaves the loop pointing at the next provider's work,
+					 * which has no reason to wait on a limit it did not hit.
+					 */
+					batch_count = deferred;
+					continue;
 				}
 
 				for (int i = 0; i < batch_count; i++)
@@ -2251,11 +2548,60 @@ process_queue_batch(const char *dbname)
 		pfree(attempts);
 		pfree(max_attempts);
 		pfree(sparse_only);
+		pfree(providers);
+		pfree(models);
+	}
+	else if (cooling_filter[0] != '\0')
+	{
+		/*
+		 * The claim came back empty, but it was filtered: an empty queue and
+		 * a queue whose every eligible item belongs to a provider being held
+		 * off look the same from here, and they want opposite answers. The
+		 * first is no reason to back off, whilst the second is precisely the
+		 * case the backoff exists for, since returning true would clear it
+		 * and leave the worker polling flat out for as long as the hold-off
+		 * lasts.
+		 *
+		 * Asked only when the filter was in force and found nothing, so the
+		 * usual poll does not pay for it.
+		 */
+		ret = SPI_execute(psprintf(
+			"SELECT EXISTS ("
+			"  SELECT 1 "
+			"    FROM pgedge_vectorizer.queue q "
+			"    LEFT JOIN LATERAL ("
+			"        SELECT r.provider "
+			"          FROM pgedge_vectorizer.vectorizers r "
+			"         WHERE r.chunk_table = q.chunk_table "
+			"         ORDER BY r.id "
+			"         LIMIT 1) v ON true "
+			"   WHERE q.status = 'pending' "
+			"     AND (q.next_retry_at IS NULL OR q.next_retry_at <= NOW()) "
+			"     AND COALESCE(NULLIF(v.provider, ''), "
+			"                  current_setting('pgedge_vectorizer.provider')) "
+			"         = ANY (ARRAY[%s]))",
+			cooling.data),
+			true, 1);
+
+		if (ret == SPI_OK_SELECT && SPI_processed == 1)
+		{
+			bool	isnull;
+			Datum	val = SPI_getbinval(SPI_tuptable->vals[0],
+										SPI_tuptable->tupdesc, 1, &isnull);
+
+			pulled = !isnull && DatumGetBool(val);
+		}
 	}
 
 	SPI_finish();
 	PopActiveSnapshot();
 	CommitTransactionCommand();
+
+	/*
+	 * An empty pull is not a failure: there was simply nothing to attempt,
+	 * and the poll interval is the right wait for that.
+	 */
+	return !pulled || attempted;
 }
 
 /*
