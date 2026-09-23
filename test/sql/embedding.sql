@@ -3,7 +3,9 @@
 -- Gracefully skips tests if API keys are not available
 
 -- Test 1: Verify function exists
-SELECT pg_get_functiondef('pgedge_vectorizer.generate_embedding(text)'::regprocedure) IS NOT NULL AS function_exists;
+SELECT pg_get_functiondef(
+           'pgedge_vectorizer.generate_embedding(text, text, text)'::regprocedure
+       ) IS NOT NULL AS function_exists;
 
 -- Helper function to check if API key file exists and is readable
 CREATE OR REPLACE FUNCTION test_api_key_available() RETURNS boolean AS $$
