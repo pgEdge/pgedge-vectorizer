@@ -1637,6 +1637,15 @@ process_queue_batch(const char *dbname)
 	 * an item whose vectorizer has since been disabled falls back to the
 	 * GUCs through the same expression rather than needing a special case.
 	 *
+	 * The lookup is a LATERAL ... LIMIT 1 rather than a plain left join
+	 * because nothing stops two vectorizers naming the same chunk table:
+	 * chunk_table carries no unique constraint, enable_vectorization()
+	 * takes an explicit chunk_table_name, and the generated default can
+	 * collide of its own accord. A plain join would then return one row
+	 * per matching registry entry, so a single queued item would be
+	 * embedded once per model with the last write winning. Lowest id
+	 * wins, which is the vectorizer that claimed the name first.
+	 *
 	 * FOR UPDATE OF q, not a bare FOR UPDATE: the registry rows are not
 	 * being changed, and locking the nullable side of a left join is
 	 * rejected outright.
@@ -1653,8 +1662,13 @@ process_queue_batch(const char *dbname)
 		"                current_setting('pgedge_vectorizer.model')) "
 		"           AS model "
 		"FROM pgedge_vectorizer.queue q "
-		"LEFT JOIN pgedge_vectorizer.vectorizers v "
-		"       ON v.chunk_table = q.chunk_table "
+		"LEFT JOIN LATERAL ( "
+		"    SELECT vv.provider, vv.model "
+		"    FROM pgedge_vectorizer.vectorizers vv "
+		"    WHERE vv.chunk_table = q.chunk_table "
+		"    ORDER BY vv.id "
+		"    LIMIT 1 "
+		") v ON true "
 		"WHERE q.status = 'pending' "
 		"AND (q.next_retry_at IS NULL OR q.next_retry_at <= NOW()) "
 		/*

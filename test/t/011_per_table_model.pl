@@ -104,6 +104,20 @@ my $registry = $node->safe_psql($dbname,
 is($registry, 'inherits=NULL pinned=zzz-pinned-model',
 	'a vectorizer records its own model, and NULL where it inherits');
 
+# chunk_table carries no unique constraint, enable_vectorization() takes an
+# explicit chunk_table_name, and the generated default can collide of its own
+# accord, so two registry rows may name one chunk table. A plain join from the
+# queue to the registry would then return a row per match and embed each of the
+# three inheriting chunks twice, once under each model, with the last write
+# winning; the assertions below see it as a third request. The row is inserted
+# rather than made with enable_vectorization() because the collision is what is
+# being tested, not the path that reaches it.
+$node->safe_psql($dbname,
+	q(INSERT INTO pgedge_vectorizer.vectorizers
+		  (source_table, source_column, chunk_table, source_pk, pk_type, model)
+	  VALUES ('inherits_shadow', 'body', 'inherits_body_chunks', 'id', 'bigint',
+			  'mmm-collision-model')));
+
 # Name the database only once it is ready to be serviced, so that no worker can
 # arrive before the extension exists and take its five second backoff instead.
 $node->append_conf('postgresql.conf',
