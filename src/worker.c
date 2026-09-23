@@ -249,7 +249,8 @@ static bool queue_item_record_failure(void);
 static void process_queue_batch(const char *dbname);
 static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
-							 const float *embedding, int dim);
+							 const float *embedding, int dim,
+							 const char *provider, const char *model);
 static char *trim_whitespace(char *str);
 static int	parse_database_list(char ***names);
 static int	worker_quantum_secs(void);
@@ -1649,6 +1650,14 @@ process_queue_batch(const char *dbname)
 	 * FOR UPDATE OF q, not a bare FOR UPDATE: the registry rows are not
 	 * being changed, and locking the nullable side of a left join is
 	 * rejected outright.
+	 *
+	 * LATERAL ... LIMIT 1 rather than a plain join, because only
+	 * (source_table, source_column) is unique in the registry: two
+	 * vectorizers pointed at one chunk table by an explicit chunk_table_name
+	 * would otherwise match a queue row twice, and the item would be embedded
+	 * twice and counted twice into the BM25 corpus statistics. That
+	 * configuration is already incoherent, but it must not corrupt the
+	 * statistics of a table that is merely nearby.
 	 */
 	ret = SPI_execute(psprintf(
 		"SELECT q.id, q.chunk_id, q.chunk_table, q.content, q.attempts, "
@@ -1856,6 +1865,15 @@ process_queue_batch(const char *dbname)
 					 * provider that fails before reaching the network records
 					 * nothing of its own.
 					 */
+					/*
+					 * A provider that cannot be resolved or initialised is a
+					 * fault of the configuration rather than of any item in
+					 * the request, so it is raised rather than charged: see
+					 * 005_batch_failure_backoff.pl, which exists to keep a
+					 * mistyped provider name from retiring the whole queue
+					 * one blameless row at a time. The outer handler backs
+					 * the worker off instead.
+					 */
 					provider = get_embedding_provider(providers[batch_start]);
 					if (provider == NULL)
 						elog(ERROR, "embedding provider \"%s\" is not available",
@@ -1889,11 +1907,17 @@ process_queue_batch(const char *dbname)
 					bool isnull_dim;
 					Datum val_dim;
 
+					/*
+					 * The chunk table's generated name is one identifier
+					 * with a dot in it for a schema-qualified source, so it
+					 * is quoted rather than left for regclass to parse as a
+					 * qualified reference. Same rule as update_embedding().
+					 */
 					ret_dim = SPI_execute(psprintf(
 						"SELECT atttypmod FROM pg_attribute "
-						"WHERE attrelid = '%s'::regclass "
+						"WHERE attrelid = %s::regclass "
 						"AND attname = 'embedding'",
-						chunk_tables[idx0]),
+						quote_literal_cstr(quote_identifier(chunk_tables[idx0]))),
 						true, 1);
 
 					if (ret_dim == SPI_OK_SELECT && SPI_processed == 1)
@@ -1955,7 +1979,9 @@ process_queue_batch(const char *dbname)
 					queue_item_begin(queue_ids[idx], attempts[idx],
 									 max_attempts[idx]);
 					if (!sparse_only[idx])
-						update_embedding(chunk_ids[idx], chunk_tables[idx], embeddings[i], dim);
+						update_embedding(chunk_ids[idx], chunk_tables[idx],
+										 embeddings[i], dim,
+										 providers[idx], models[idx]);
 					else if (!pgedge_vectorizer_enable_hybrid)
 						elog(ERROR, "cannot process sparse-only queue item while pgedge_vectorizer.enable_hybrid is disabled");
 
@@ -2236,7 +2262,9 @@ process_queue_batch(const char *dbname)
  * Update a chunk table with the generated embedding
  */
 static void
-update_embedding(int64 chunk_id, const char *chunk_table, const float *embedding, int dim)
+update_embedding(int64 chunk_id, const char *chunk_table,
+				 const float *embedding, int dim,
+				 const char *provider, const char *model)
 {
 	StringInfoData vector_str;
 	int ret;
@@ -2252,10 +2280,22 @@ update_embedding(int64 chunk_id, const char *chunk_table, const float *embedding
 	}
 	appendStringInfoChar(&vector_str, ']');
 
-	/* Update the chunk table */
+	/*
+	 * Record what produced the vector in the same statement that writes it,
+	 * so the two cannot disagree. Nothing else writes these columns.
+	 *
+	 * quote_identifier() because the chunk table's generated name is one
+	 * identifier with a dot in it for a schema-qualified source, not a
+	 * schema-qualified reference, which is how every other statement in this
+	 * file spells it.
+	 */
 	ret = SPI_execute(psprintf(
-		"UPDATE %s SET embedding = '%s'::vector WHERE id = %ld",
-		chunk_table, vector_str.data, chunk_id),
+		"UPDATE %s SET embedding = '%s'::vector, "
+		"embedding_provider = %s, embedding_model = %s "
+		"WHERE id = %ld",
+		quote_identifier(chunk_table), vector_str.data,
+		quote_literal_cstr(provider), quote_literal_cstr(model),
+		chunk_id),
 		false, 0);
 
 	if (ret != SPI_OK_UPDATE)
