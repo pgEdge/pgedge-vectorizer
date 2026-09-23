@@ -58,6 +58,24 @@ count_tokens(const char *text, const char *model)
 }
 
 /*
+ * SQL-callable wrapper around count_tokens()
+ *
+ * Exposed so that the plpgsql chunking paths compute token_count with exactly
+ * the same rule as the C chunker, rather than open-coding the approximation
+ * and disagreeing with it by a token.
+ */
+PG_FUNCTION_INFO_V1(pgedge_vectorizer_count_tokens);
+
+Datum
+pgedge_vectorizer_count_tokens(PG_FUNCTION_ARGS)
+{
+	text	   *input = PG_GETARG_TEXT_PP(0);
+	const char *text_str = TextDatumGetCString(PointerGetDatum(input));
+
+	PG_RETURN_INT32(count_tokens(text_str, pgedge_vectorizer_model));
+}
+
+/*
  * Tokenize text into token IDs
  *
  * This is a placeholder for tiktoken integration.
