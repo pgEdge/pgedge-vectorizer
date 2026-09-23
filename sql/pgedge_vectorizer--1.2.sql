@@ -1055,9 +1055,16 @@ BEGIN
             chunk_oid::REGCLASS, eff_provider, eff_model);
     END IF;
 
-    -- Anything already queued was queued before this decision was made.
+    /*
+     * Anything already queued for embedding was queued before this decision
+     * was made. Sparse-only rows are left alone: they carry no dense work to
+     * redo, the probe only marks a chunk sparse-only whilst it still has an
+     * embedding, and deleting them would strand the sparse vector as NULL
+     * until someone thought to run reprocess_chunks().
+     */
     DELETE FROM pgedge_vectorizer.queue q
-          WHERE q.chunk_table = v_row.chunk_table;
+          WHERE q.chunk_table = v_row.chunk_table
+            AND NOT COALESCE((q.metadata->>'sparse_only')::BOOLEAN, FALSE);
 
     /*
      * Whatever now has no embedding needs one, which after the clearing above

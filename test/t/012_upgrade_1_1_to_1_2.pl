@@ -58,6 +58,20 @@ $node->safe_psql('upgraded',
 	q(SELECT pgedge_vectorizer.enable_vectorization('docs', 'body',
 													'token_based', 100, 10, 1536)));
 
+# A second vectorizer whose chunk table ends up in a schema the upgrade will
+# not have on its search_path. The migration adds the provenance columns to
+# the chunk tables the registry knows about, and the registry stores only a
+# bare name, so resolving that name through the search_path would silently
+# miss this one and leave the worker failing every embedding write against it.
+$node->safe_psql('upgraded', q(
+CREATE SCHEMA tucked_away;
+SET search_path = tucked_away, public;
+CREATE TABLE tucked_away.notes (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO tucked_away.notes (body) VALUES ('Out of the way.');
+SELECT pgedge_vectorizer.enable_vectorization('tucked_away.notes', 'body',
+											  'token_based', 100, 10, 1536);
+));
+
 $node->safe_psql('upgraded',
 	"ALTER EXTENSION pgedge_vectorizer UPDATE TO '1.2'");
 
@@ -144,12 +158,20 @@ is($node->safe_psql('upgraded', $chunk_columns),
 is($node->safe_psql('upgraded',
 		q(SELECT source_table || ' ' || COALESCE(provider, 'NULL') || ' ' ||
 				 COALESCE(model, 'NULL')
-			FROM pgedge_vectorizer.vectorizers)),
+			FROM pgedge_vectorizer.vectorizers
+		   WHERE source_table = 'docs')),
 	'docs NULL NULL',
 	'a vectorizer registered before the upgrade survives it, inheriting');
 
 is($node->safe_psql('upgraded', 'SELECT count(*) FROM docs_body_chunks'),
 	'1', 'the chunks written before the upgrade survive it');
+
+is($node->safe_psql('upgraded', q(
+	SELECT count(*) FROM pg_attribute
+	 WHERE attrelid = 'tucked_away.notes_body_chunks'::regclass
+	   AND attname IN ('embedding_provider', 'embedding_model'))),
+	'2',
+	'the upgrade reaches a chunk table outside its own search_path');
 
 $node->stop;
 

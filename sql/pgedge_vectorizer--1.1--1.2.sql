@@ -36,15 +36,38 @@ DO $$
 DECLARE
     v         RECORD;
     chunk_oid OID;
+    n_found   INT;
 BEGIN
     FOR v IN SELECT r.chunk_table FROM pgedge_vectorizer.vectorizers r LOOP
-        -- One identifier with a dot in it for a schema-qualified source, not
-        -- a qualified reference.
-        chunk_oid := to_regclass(quote_ident(v.chunk_table));
+        /*
+         * The registry stores the chunk table's name as one identifier, with
+         * a dot in it for a schema-qualified source, and records nothing
+         * about the schema it was created in. to_regclass() would resolve it
+         * through whatever search_path the upgrade happens to run with, and
+         * return NULL without complaint for a table outside it, leaving the
+         * columns unadded and every later embedding write failing. So look
+         * through the catalogue instead of the search_path.
+         */
+        SELECT count(*), min(c.oid) INTO n_found, chunk_oid
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relname = v.chunk_table
+           AND c.relkind = 'r'
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema');
 
         -- A chunk table dropped from under the registry is not this script's
         -- problem to fix, and must not stop the upgrade.
-        CONTINUE WHEN chunk_oid IS NULL;
+        CONTINUE WHEN n_found = 0;
+
+        /*
+         * Two schemas holding a relation of that name leaves no way to tell
+         * which one the registry means, and altering the wrong table would be
+         * worse than altering neither.
+         */
+        IF n_found > 1 THEN
+            RAISE WARNING 'chunk table % exists in more than one schema; add embedding_provider and embedding_model to it by hand', v.chunk_table;
+            CONTINUE;
+        END IF;
 
         EXECUTE format(
             'ALTER TABLE %s
@@ -1484,9 +1507,16 @@ BEGIN
             chunk_oid::REGCLASS, eff_provider, eff_model);
     END IF;
 
-    -- Anything already queued was queued before this decision was made.
+    /*
+     * Anything already queued for embedding was queued before this decision
+     * was made. Sparse-only rows are left alone: they carry no dense work to
+     * redo, the probe only marks a chunk sparse-only whilst it still has an
+     * embedding, and deleting them would strand the sparse vector as NULL
+     * until someone thought to run reprocess_chunks().
+     */
     DELETE FROM pgedge_vectorizer.queue q
-          WHERE q.chunk_table = v_row.chunk_table;
+          WHERE q.chunk_table = v_row.chunk_table
+            AND NOT COALESCE((q.metadata->>'sparse_only')::BOOLEAN, FALSE);
 
     /*
      * Whatever now has no embedding needs one, which after the clearing above

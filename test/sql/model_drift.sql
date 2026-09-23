@@ -124,8 +124,25 @@ DROP SCHEMA drift_private;
 -- reembed() at a matching width leaves the current row alone
 ---------------------------------------------------------------------------
 
+-- Chunk 1 has sparse work still outstanding, which has nothing to do with
+-- the embedding model: clearing the queue must not take it with it.
+INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, metadata)
+SELECT id, 'drift_docs_body_chunks', content,
+       jsonb_build_object('sparse_only', true)
+  FROM drift_docs_body_chunks WHERE source_id = 1;
+
 SELECT pgedge_vectorizer.reembed(
     'drift_docs'::regclass, 'body', embedding_dimension => 1536) AS queued;
+
+SELECT count(*) AS sparse_only_rows_kept
+  FROM pgedge_vectorizer.queue
+ WHERE chunk_table = 'drift_docs_body_chunks'
+   AND (metadata->>'sparse_only')::BOOLEAN;
+
+-- Out of the way again, so the counts below are about the dense requeue.
+DELETE FROM pgedge_vectorizer.queue
+ WHERE chunk_table = 'drift_docs_body_chunks'
+   AND (metadata->>'sparse_only')::BOOLEAN;
 
 -- Chunk 1 keeps its embedding and its provenance; 2 and 3 lose both; 4 was
 -- never embedded and is queued alongside them.
@@ -188,12 +205,23 @@ SELECT count(*) AS chunks,
 -- A table with no vectorizer is an error
 ---------------------------------------------------------------------------
 
+-- The sentinel is raised outside the handler, so that a reembed() which
+-- wrongly succeeded fails the test rather than being caught by it.
 DO $$
+DECLARE
+    raised TEXT;
 BEGIN
-    PERFORM pgedge_vectorizer.reembed('drift_docs'::regclass, 'nosuchcolumn');
-    RAISE EXCEPTION 'expected an error, got none';
-EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE '%', SQLERRM;
+    BEGIN
+        PERFORM pgedge_vectorizer.reembed('drift_docs'::regclass, 'nosuchcolumn');
+    EXCEPTION WHEN OTHERS THEN
+        raised := SQLERRM;
+    END;
+
+    IF raised IS NULL THEN
+        RAISE EXCEPTION 'expected an error, got none';
+    END IF;
+
+    RAISE NOTICE '%', raised;
 END;
 $$;
 
