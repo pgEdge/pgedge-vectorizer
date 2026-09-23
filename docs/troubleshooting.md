@@ -121,14 +121,23 @@ leaves that vectorizer's work alone:
 
 ```text
 WARNING:  pgedge_vectorizer worker for database "app": provider "openia" for
-          articles_body_chunks is unavailable, leaving 3 items queued:
-          provider not found
+          articles_body_chunks is unavailable, leaving 3 items queued and
+          holding off that provider for 60s: provider not found
 ```
 
 Its items stay `pending` with `attempts` still at zero, because the fault is
 in the configuration rather than in the work, and charging them would retire
 the queue one blameless row at a time. Every other vectorizer in the database
 carries on as normal.
+
+The provider is held off for a minute at a time, exactly as a rate limited
+one is. Skipping the work is not enough on its own: the items go back as the
+oldest in the queue, so a vectorizer with more pending rows than
+`pgedge_vectorizer.batch_size` would fill every claim with work that cannot
+be done and starve everything behind it. Correcting the provider does not
+leave you waiting out that minute, since a corrected vectorizer no longer
+resolves to the name being held off, and a configuration reload clears every
+hold-off outright.
 
 Confirm it with:
 
@@ -161,8 +170,8 @@ SELECT pgedge_vectorizer.set_embedding_model(
 There is no need to retry anything, because nothing was ever charged; the
 worker picks the items up on its next poll. If every vectorizer in the
 database is affected, which is what a mistyped `pgedge_vectorizer.provider`
-does, the worker also backs off between attempts rather than polling flat
-out, and says so:
+does, there is no other work to get on with, so the worker also backs off
+between attempts rather than polling flat out, and says so:
 
 ```text
 LOG:  pgedge_vectorizer worker for database "app": no usable provider for the

@@ -71,9 +71,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   does not exist used to stop the whole queue, both because the worker still
   assumed a batch of work belonged to a single provider. Cooldowns are now kept
   per provider and only that provider's items are held back; a vectorizer whose
-  provider cannot be resolved has its own work skipped, uncharged, whilst
-  everything else carries on. Where nothing at all can be attempted the worker
-  still backs off rather than polling continuously.
+  provider cannot be resolved has its own work skipped, uncharged, and that
+  provider held off for a minute so that a backlog longer than
+  `pgedge_vectorizer.batch_size` cannot fill every claim and starve the work
+  behind it, whilst everything else carries on. Where nothing at all can be
+  attempted the worker still backs off rather than polling continuously, and a
+  configuration reload clears both the backoff and every hold-off, so a
+  correction takes effect at once.
 - `set_embedding_model()` refused to change a vectorizer that had chunks but no
   embeddings, saying it would leave them "embedded with" a model that had never
   run. It counts embedded chunks now, which is what the refusal was ever about.

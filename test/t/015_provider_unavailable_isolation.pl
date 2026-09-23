@@ -19,6 +19,17 @@
 # As in 014, the poll interval is long and everything is queued before the
 # database is named, so that the healthy work has to be done by the same pull
 # that met the bad provider rather than by a later one.
+#
+# Skipping the group is not enough on its own, so there is a second half to
+# this. The items go back with created_at and next_retry_at untouched, which
+# makes them the oldest again on the very next pull: a vectorizer with more
+# pending rows than batch_size then fills every claim with work that cannot be
+# done, and nothing behind it is ever reached. That is the same starvation the
+# cooling filter is in SQL to avoid, one step further along, and it is the
+# shape a real deployment lands in, since enable_vectorization() on a typo'd
+# provider queues the whole table at once. The provider is therefore held off
+# as a rate limited one is, and the second half of this test queues a backlog
+# longer than a claim to prove it.
 
 use strict;
 use warnings;
@@ -182,6 +193,76 @@ while (time() < $deadline)
 }
 
 is($broken, $rows, 'correcting the provider is enough to drain the queue');
+
+# Head-of-line blocking, with a backlog longer than a claim.
+#
+# The pull that meets the backlog cannot also carry the work behind it, since
+# that work is past the claim's limit and was never fetched, so this half is
+# about a later pull reaching it at all rather than about which pull does. The
+# 20 second interval buys nothing here and only makes the test slow, so it is
+# shortened first. The reload that does it also clears any hold-off, which is
+# what an operator correcting a provider relies on, so the run below starts
+# from nothing held.
+$node->append_conf('postgresql.conf',
+	"pgedge_vectorizer.worker_poll_interval = 4000\n");
+$node->reload;
+
+$node->safe_psql($dbname,
+	'CREATE TABLE swamped (id BIGSERIAL PRIMARY KEY, body TEXT)');
+$node->safe_psql($dbname,
+	'CREATE TABLE behind (id BIGSERIAL PRIMARY KEY, body TEXT)');
+
+$node->safe_psql($dbname,
+	q(SELECT pgedge_vectorizer.enable_vectorization('swamped', 'body',
+													embedding_dimension => 3,
+													provider => 'still_no_such_provider',
+													model => 'whatever')));
+$node->safe_psql($dbname,
+	q(SELECT pgedge_vectorizer.enable_vectorization('behind', 'body',
+													embedding_dimension => 3,
+													provider => 'voyage',
+													model => 'healthy-model')));
+
+# More than the batch_size of 25, committed on its own and before the healthy
+# work, so that a claim taking the oldest 25 rows can hold nothing else.
+my $backlog = 30;
+
+$node->safe_psql($dbname, qq(
+INSERT INTO swamped (body)
+	SELECT 'swamped chunk ' || g FROM generate_series(1, $backlog) g;
+));
+
+$node->safe_psql($dbname, qq(
+INSERT INTO behind (body)
+	SELECT 'behind chunk ' || g FROM generate_series(1, $rows) g;
+));
+
+$deadline = time() + 60;
+my $behind = 0;
+
+while (time() < $deadline)
+{
+	$behind = $node->safe_psql($dbname,
+		"SELECT count(*) FROM pgedge_vectorizer.queue
+		  WHERE chunk_table = 'behind_body_chunks' AND status = 'completed'");
+
+	last if $behind == $rows;
+
+	sleep 1;
+}
+
+is($behind, $rows,
+	'a backlog bigger than a claim does not starve the work behind it');
+
+# And the backlog itself is still where it was, none of it charged: being
+# skipped repeatedly must not cost an item anything either.
+is($node->safe_psql($dbname,
+		q(SELECT count(*) || ' ' || COALESCE(max(attempts), 0) || ' ' ||
+				 COALESCE(string_agg(DISTINCT status, ','), '')
+			FROM pgedge_vectorizer.queue
+		   WHERE chunk_table = 'swamped_body_chunks')),
+	"$backlog 0 pending",
+	'the backlog waits, uncharged, however many pulls step over it');
 
 $node->stop;
 
