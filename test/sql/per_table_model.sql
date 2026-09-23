@@ -205,6 +205,97 @@ SELECT provider, model
   FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_inherits';
 
 ---------------------------------------------------------------------------
+-- A repeated enable_vectorization() call and the recorded model
+---------------------------------------------------------------------------
+
+-- The GUCs set above still say openai/text-embedding-3-small here.
+
+CREATE TABLE ptm_repeat (id BIGSERIAL PRIMARY KEY, body TEXT);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_repeat'::regclass, 'body', 'token_based', 100, 10, 1536,
+    provider => 'ollama', model => 'nomic-embed-text');
+
+-- Calling again to change the chunking, naming neither provider nor model,
+-- leaves the pin exactly as it was. Reverting it to the GUCs here would point
+-- the vectorizer at a different model whilst leaving the vectors already
+-- written by the old one in place, and nothing downstream would notice.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_repeat'::regclass, 'body', 'token_based', 200, 20, 1536);
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_repeat';
+
+-- Naming what is already recorded is free.
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_repeat'::regclass, 'body', 'token_based', 200, 20, 1536,
+    provider => 'ollama', model => 'nomic-embed-text');
+
+-- Naming a different model raises, and points at set_embedding_model(),
+-- which is the only thing that clears the embeddings and requeues the chunks.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.enable_vectorization(
+        'ptm_repeat'::regclass, 'body', 'token_based', 100, 10, 1536,
+        model => 'nomic-embed-text-v2');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+
+-- The same for the provider.
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.enable_vectorization(
+        'ptm_repeat'::regclass, 'body', 'token_based', 100, 10, 1536,
+        provider => 'openai');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+
+-- Neither refusal changed anything.
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_repeat';
+
+-- The comparison is against the effective provider and model rather than the
+-- stored ones, so a vectorizer that inherits may be handed the values it is
+-- already inheriting without complaint.
+CREATE TABLE ptm_effective (id BIGSERIAL PRIMARY KEY, body TEXT);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_effective'::regclass, 'body', 'token_based', 100, 10, 1536);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_effective'::regclass, 'body', 'token_based', 100, 10, 1536,
+    provider => 'openai', model => 'text-embedding-3-small');
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_effective';
+
+-- Whilst one that differs from what it inherits is refused just the same.
+CREATE TABLE ptm_effective2 (id BIGSERIAL PRIMARY KEY, body TEXT);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'ptm_effective2'::regclass, 'body', 'token_based', 100, 10, 1536);
+
+DO $$
+BEGIN
+    PERFORM pgedge_vectorizer.enable_vectorization(
+        'ptm_effective2'::regclass, 'body', 'token_based', 100, 10, 1536,
+        model => 'text-embedding-3-large');
+    RAISE EXCEPTION 'expected an error, got none';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '%', SQLERRM;
+END;
+$$;
+
+SELECT provider, model
+  FROM pgedge_vectorizer.vectorizers WHERE source_table = 'ptm_effective2';
+
+---------------------------------------------------------------------------
 -- Cleanup
 ---------------------------------------------------------------------------
 
@@ -214,9 +305,18 @@ SELECT pgedge_vectorizer.disable_vectorization('ptm_pinned'::regclass,
                                                'body', TRUE);
 SELECT pgedge_vectorizer.disable_vectorization('ptm_named'::regclass,
                                                'body', TRUE);
+SELECT pgedge_vectorizer.disable_vectorization('ptm_repeat'::regclass,
+                                               'body', TRUE);
+SELECT pgedge_vectorizer.disable_vectorization('ptm_effective'::regclass,
+                                               'body', TRUE);
+SELECT pgedge_vectorizer.disable_vectorization('ptm_effective2'::regclass,
+                                               'body', TRUE);
 DROP TABLE ptm_inherits;
 DROP TABLE ptm_pinned;
 DROP TABLE ptm_named;
+DROP TABLE ptm_repeat;
+DROP TABLE ptm_effective;
+DROP TABLE ptm_effective2;
 DELETE FROM pgedge_vectorizer.queue;
 RESET pgedge_vectorizer.provider;
 RESET pgedge_vectorizer.model;
