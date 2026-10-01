@@ -27,8 +27,10 @@ static bool provider_initialized = false;
  */
 static bool openai_init(char **error_msg);
 static void openai_cleanup(void);
-static float *openai_generate(const char *text, int *dim, char **error_msg);
-static float **openai_generate_batch(const char **texts, int count, int *dim,
+static float *openai_generate(const char *text, const char *model,
+				 int *dim, char **error_msg);
+static float **openai_generate_batch(const char **texts, int count,
+									   const char *model, int *dim,
 									 char **error_msg);
 
 /*
@@ -111,13 +113,14 @@ openai_cleanup(void)
  * Generate a single embedding
  */
 static float *
-openai_generate(const char *text, int *dim, char **error_msg)
+openai_generate(const char *text, const char *model,
+				 int *dim, char **error_msg)
 {
 	const char *texts[1] = {text};
 	float **embeddings;
 	float *result;
 
-	embeddings = openai_generate_batch(texts, 1, dim, error_msg);
+	embeddings = openai_generate_batch(texts, 1, model, dim, error_msg);
 	if (embeddings == NULL)
 		return NULL;
 
@@ -130,7 +133,8 @@ openai_generate(const char *text, int *dim, char **error_msg)
  * Generate embeddings in batch
  */
 static float **
-openai_generate_batch(const char **texts, int count, int *dim, char **error_msg)
+openai_generate_batch(const char **texts, int count, const char *model,
+					  int *dim, char **error_msg)
 {
 	char *json_request;
 	char *url;
@@ -147,7 +151,7 @@ openai_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 
 	/* Build request body */
 	json_request = provider_build_openai_request(texts, count,
-												 pgedge_vectorizer_model);
+												 model);
 
 	/* Build URL */
 	base_url = (pgedge_vectorizer_api_url != NULL &&

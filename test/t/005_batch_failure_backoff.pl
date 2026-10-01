@@ -14,10 +14,17 @@
 # failed the same way, indefinitely: at the 200ms poll used here that is five
 # failure cycles a second, for as long as the misconfiguration lasted.
 #
-# The fault injected is a provider that does not exist, which makes
-# get_current_provider() raise. That is deliberate on two counts: it needs no
-# network and no API key, and it is the most likely way for a real deployment
-# to land here, since a single mistyped pgedge_vectorizer.provider does it.
+# The fault injected is a provider that does not exist. That is deliberate on
+# two counts: it needs no network and no API key, and it is the most likely way
+# for a real deployment to land here, since a single mistyped
+# pgedge_vectorizer.provider does it.
+#
+# It no longer raises. A database can have several providers, and aborting the
+# transaction took the whole pull with it, so one vectorizer's typo stopped
+# every other vectorizer too (issue #76). The request is abandoned and the
+# group put back instead, and process_queue_batch() reports that it attempted
+# nothing so that the backoff below still happens. What this test measures is
+# unchanged: the wait grows, and no item is ever charged for it.
 #
 # The queue row points at a chunk table that genuinely exists, so that the
 # probe preceding the provider lookup succeeds. Were it missing, the failure
@@ -87,12 +94,12 @@ while (time() < $deadline)
 {
 	$log = slurp_file($node->logfile, $offset);
 
-	last if $log =~ /error in processing, continuing/;
+	last if $log =~ /is unavailable, leaving \d+ item/;
 
 	sleep 1;
 }
 
-like($log, qr/error in processing, continuing/,
+like($log, qr/provider "no_such_provider" for chunks is unavailable/,
 	'the batch does fail, so the rest of this test is measuring something');
 
 # Twenty seconds covers the first three attempts of a 5s, 10s, 20s backoff.
@@ -100,13 +107,23 @@ like($log, qr/error in processing, continuing/,
 sleep 20;
 $log = slurp_file($node->logfile, $offset);
 
-my @cycles = ($log =~ /error in processing, continuing/g);
+my @cycles = ($log =~ /is unavailable, leaving \d+ item/g);
 
 cmp_ok(scalar(@cycles), '<=', 8,
 	'a batch that cannot be charged to an item is retried a handful of times, not continuously');
 
 cmp_ok(scalar(@cycles), '>=', 1,
 	'the worker does keep retrying rather than giving up on the queue');
+
+# The property the backoff exists to make affordable, asserted rather than
+# merely implied: a misconfigured provider is not the item's fault, so the item
+# keeps its attempts and stays queued however many cycles pass.
+is($node->safe_psql($dbname,
+		"SELECT count(*) || ' ' || COALESCE(max(attempts), 0) || ' ' ||
+				COALESCE(string_agg(DISTINCT status, ','), '')
+		   FROM pgedge_vectorizer.queue"),
+	'1 0 pending',
+	'nothing is charged to the item, which stays queued');
 
 # The intervals themselves: the first backoff is the floor, and each failure
 # thereafter doubles it.

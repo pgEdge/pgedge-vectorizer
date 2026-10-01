@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `enable_vectorization()` no longer moves a vectorizer's embedding model
+  ([#81](https://github.com/pgEdge/pgedge-vectorizer/issues/81)). Calling it
+  again on a table that already has a vectorizer, to change the chunking say,
+  overwrote the registered `provider` and `model` with whatever the call
+  passed, so omitting them reverted a pinned vectorizer to the GUCs whilst
+  leaving the vectors the old model had already written in place. Similarity
+  between two models' vectors is noise rather than an error, and where the
+  widths happen to match, as they do between `text-embedding-3-small` and
+  `text-embedding-ada-002`, nothing downstream catches it either, so search
+  quietly degraded. A NULL or empty `provider` or `model` now leaves whatever
+  is registered alone, and naming one that differs from the vectorizer's
+  effective provider or model raises, pointing at `set_embedding_model()`,
+  which is the only thing that also clears the embeddings and requeues the
+  chunks. Naming the values it already resolves to is unaffected.
+
 - The `token_count` recorded for each chunk is now computed the same way
   everywhere. The chunking code in C rounds its four-characters-per-token
   estimate up, whilst the plpgsql paths that actually write the column
@@ -21,10 +36,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   particular chunk table does need bringing into line, `recreate_chunks()` on
   it rewrites every row through the new path.
 
+- Generated chunk table names are now quoted before they are looked up. The
+  name is built as `source_table || column || '_chunks'` and the table is
+  created with `%I`, so for a source table in a schema the dot ends up inside
+  a single identifier rather than separating a schema from a relation.
+  `to_regclass()` was reading that dot as qualification, which made
+  `recreate_chunks()` raise as though the chunk table had never been created,
+  and left the BM25 statistics behind when the source was truncated.
+
 ### Added
 
 - `pgedge_vectorizer.count_tokens(text)`, which exposes the chunking engine's
   token estimate so you can see why a piece of text chunked the way it did.
+- `pgedge_vectorizer.vectorizer_status`, a view reporting embedding coverage
+  and queue backlog for each registered vectorizer, so you can tell how far
+  behind the embeddings are before trusting a search over them, and spot a
+  worker that has stalled ([#25](https://github.com/pgEdge/pgedge-vectorizer/issues/25)).
+  A function of the same name narrows the result to a single source table or
+  column. The counts scan the chunk and source tables, so this is a diagnostic
+  to run deliberately rather than something to poll.
+- A per-vectorizer embedding provider and model
+  ([#27](https://github.com/pgEdge/pgedge-vectorizer/issues/27)). Each
+  vectorizer may now name its own, through new `provider` and `model`
+  parameters on `enable_vectorization()` or through the new
+  `set_embedding_model()`, so one table can be embedded locally whilst another
+  goes to a hosted provider. Both default to `pgedge_vectorizer.provider` and
+  `pgedge_vectorizer.model`, so an existing installation is unaffected.
+  `set_embedding_model()` refuses to change a vectorizer that already has
+  embeddings unless `force_reembed` is passed, because vectors from two models
+  are not comparable and mixing them degrades search without failing.
+- `generate_embedding()` and `detect_embedding_dimension()` accept an optional
+  provider and model, so a query can be embedded with the same model as the
+  chunks it will be compared against.
+- Chunk tables now record the provider and model that produced each embedding,
+  and `pgedge_vectorizer.embedding_model_status()` reports where that disagrees
+  with what the vectorizer would use now
+  ([#75](https://github.com/pgEdge/pgedge-vectorizer/issues/75)). A vectorizer
+  that inherits follows `pgedge_vectorizer.model` as it changes, so a chunk
+  table can end up holding vectors from two models with nothing reporting it;
+  where the widths match the existing dimension check cannot see it either.
+  `pgedge_vectorizer.reembed()` repairs it, redoing the chunks that are not
+  known to be current. Rows embedded before this release have nothing recorded
+  and are counted separately, but `reembed()` treats them as needing redoing,
+  so the first call on an upgraded installation re-embeds the whole table.
+
+- One provider's trouble no longer becomes every provider's
+  ([#76](https://github.com/pgEdge/pgedge-vectorizer/issues/76)). A rate limit
+  used to hold the worker off entirely, and a vectorizer naming a provider that
+  does not exist used to stop the whole queue, both because the worker still
+  assumed a batch of work belonged to a single provider. Cooldowns are now kept
+  per provider and only that provider's items are held back; a vectorizer whose
+  provider cannot be resolved has its own work skipped, uncharged, and that
+  provider held off for a minute so that a backlog longer than
+  `pgedge_vectorizer.batch_size` cannot fill every claim and starve the work
+  behind it, whilst everything else carries on. Where nothing at all can be
+  attempted the worker still backs off rather than polling continuously, and a
+  configuration reload clears both the backoff and every hold-off, so a
+  correction takes effect at once.
+- `set_embedding_model()` refused to change a vectorizer that had chunks but no
+  embeddings, saying it would leave them "embedded with" a model that had never
+  run. It counts embedded chunks now, which is what the refusal was ever about.
+
+### Changed
+
+- `generate_embedding(NULL)` now raises an error rather than returning NULL.
+  The function always meant to reject a NULL query, and said so in its own
+  code, but was declared `STRICT`, which returned NULL before that check could
+  run. It can no longer be `STRICT`, because a NULL provider or model has to
+  reach the function to mean "use the GUC".
+- The chunk tables that `disable_vectorization()` drops are now processed in a
+  defined order, so a disable that covers several columns reports them the same
+  way twice.
 
 ## [1.1] - 2026-08-28
 
