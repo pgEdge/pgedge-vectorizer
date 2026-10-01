@@ -496,7 +496,14 @@ BEGIN
     END IF;
 
     -- Verify chunk table exists
-    IF to_regclass(chunk_table_name) IS NULL THEN
+    /*
+     * The chunk table's name is generated as source_table || column ||
+     * '_chunks' and created with %I, so for a schema-qualified source the dot
+     * is inside a single identifier rather than separating a schema from a
+     * relation. Without quote_ident() the lookup splits it, finds nothing and
+     * raises as though the table had never been created.
+     */
+    IF to_regclass(quote_ident(chunk_table_name)) IS NULL THEN
         RAISE EXCEPTION 'Chunk table % does not exist. Use enable_vectorization() first.', chunk_table_name;
     END IF;
 
@@ -622,3 +629,210 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.recreate_chunks IS
 'Delete all chunks and recreate from source table (complete rebuild)';
+
+---------------------------------------------------------------------------
+-- Vectorizer status: how far behind the embeddings are
+--
+-- Embeddings are derived data generated asynchronously, so there is always
+-- some lag between a source change and the embedding catching up. This
+-- reports, per vectorizer, how much of the source is embedded and how much
+-- work is outstanding, so that a user can tell whether a search result set
+-- reflects recent changes and an operator can spot a stalled worker.
+--
+-- The chunk tables are named in the registry rather than joined statically,
+-- so the counts have to be gathered with dynamic SQL rather than expressed
+-- as a plain view. Each row costs a scan of one chunk table and a count of
+-- one source table, which is considerably more than the queue views cost;
+-- it is a diagnostic to run when you want an answer, not something to put
+-- on a dashboard refreshing every second.
+---------------------------------------------------------------------------
+
+CREATE FUNCTION pgedge_vectorizer.vectorizer_status(
+    p_source_table  REGCLASS DEFAULT NULL,
+    p_source_column NAME DEFAULT NULL
+) RETURNS TABLE (
+    source_table        TEXT,
+    source_column       NAME,
+    chunk_table         TEXT,
+    source_rows         BIGINT,
+    source_rows_covered BIGINT,
+    source_coverage     NUMERIC,
+    chunks_total        BIGINT,
+    chunks_embedded     BIGINT,
+    chunk_coverage      NUMERIC,
+    queue_pending       BIGINT,
+    queue_processing    BIGINT,
+    queue_failed        BIGINT,
+    oldest_pending_age  INTERVAL,
+    last_processed_at   TIMESTAMPTZ
+) AS $$
+DECLARE
+    v            RECORD;
+    src_oid      OID;
+    chunk_oid    OID;
+BEGIN
+    FOR v IN
+        SELECT r.source_table, r.source_column, r.chunk_table
+          FROM pgedge_vectorizer.vectorizers r
+         WHERE (p_source_column IS NULL OR r.source_column = p_source_column)
+         ORDER BY r.source_table, r.source_column
+    LOOP
+        /*
+         * to_regclass() does not return NULL for every name it cannot
+         * resolve: given a qualified name whose schema the caller has no
+         * USAGE on, it raises insufficient_privilege instead, so resolving
+         * the source table has to be guarded. Without the guard a caller
+         * holding rights on one vectorizer and not on another's schema gets
+         * an error for the whole result set rather than the rows it can
+         * see, and the has_table_privilege() check further down never runs.
+         *
+         * The narrowing by p_source_table is applied here rather than in the
+         * query above for the same reason: resolving every registry row in
+         * the WHERE clause would raise on a vectorizer the caller cannot see
+         * even when it asked about a different table.
+         */
+        BEGIN
+            src_oid := to_regclass(v.source_table);
+        EXCEPTION WHEN insufficient_privilege THEN
+            src_oid := NULL;
+        END;
+
+        CONTINUE WHEN p_source_table IS NOT NULL
+                      AND src_oid IS DISTINCT FROM p_source_table::OID;
+
+        source_table  := v.source_table;
+        source_column := v.source_column;
+        chunk_table   := v.chunk_table;
+
+        source_rows         := NULL;
+        source_rows_covered := NULL;
+        source_coverage     := NULL;
+        chunks_total        := NULL;
+        chunks_embedded     := NULL;
+        chunk_coverage      := NULL;
+
+        /*
+         * Queue figures first: they come from a table the caller can always
+         * read, and they are the half that stays meaningful even when the
+         * chunk or source table has been dropped from under the registry.
+         *
+         * last_processed_at only reflects queue rows that still exist, so
+         * clear_completed() will move it backwards. That is a property of
+         * the queue, not of the embeddings, and is documented as such.
+         */
+        SELECT count(*) FILTER (WHERE q.status = 'pending'),
+               count(*) FILTER (WHERE q.status = 'processing'),
+               count(*) FILTER (WHERE q.status = 'failed'),
+               NOW() - min(q.created_at) FILTER (WHERE q.status = 'pending'),
+               max(q.processed_at)
+          INTO queue_pending, queue_processing, queue_failed,
+               oldest_pending_age, last_processed_at
+          FROM pgedge_vectorizer.queue q
+         WHERE q.chunk_table = v.chunk_table;
+
+        /*
+         * The counts below read user tables, and the function runs as the
+         * caller. A table that has been dropped, or that the caller cannot
+         * read, leaves the corresponding columns NULL rather than failing
+         * the whole result set: one inaccessible vectorizer should not make
+         * the view useless for every other one.
+         */
+        /*
+         * The chunk table's name is generated as source_table || column ||
+         * '_chunks' and created with %I, so for a schema-qualified source the
+         * dot ends up inside a single identifier rather than separating a
+         * schema from a relation. quote_ident() keeps to_regclass() from
+         * splitting it, matching how quote_identifier() is used for the same
+         * name in bm25.c. The source table's name, by contrast, comes from
+         * regclass output and is a genuine qualified reference, so it is
+         * looked up as it stands.
+         */
+        chunk_oid := to_regclass(quote_ident(v.chunk_table));
+        IF chunk_oid IS NOT NULL
+           AND has_table_privilege(chunk_oid, 'SELECT') THEN
+            EXECUTE format(
+                'SELECT count(*),
+                        count(*) FILTER (WHERE embedding IS NOT NULL),
+                        count(DISTINCT source_id)
+                            FILTER (WHERE embedding IS NOT NULL)
+                   FROM %s', chunk_oid::REGCLASS)
+              INTO chunks_total, chunks_embedded, source_rows_covered;
+
+            IF chunks_total > 0 THEN
+                chunk_coverage := round(chunks_embedded::NUMERIC
+                                        / chunks_total, 4);
+            END IF;
+        END IF;
+
+        IF src_oid IS NOT NULL
+           AND has_table_privilege(src_oid, 'SELECT') THEN
+            EXECUTE format('SELECT count(*) FROM %s', src_oid::REGCLASS)
+              INTO source_rows;
+
+            /*
+             * A coverage above 1 means the chunk table holds rows for source
+             * rows that are gone, which is worth seeing rather than hiding
+             * behind a clamp to 1.
+             */
+            IF source_rows > 0 AND source_rows_covered IS NOT NULL THEN
+                source_coverage := round(source_rows_covered::NUMERIC
+                                         / source_rows, 4);
+            END IF;
+        END IF;
+
+        RETURN NEXT;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.vectorizer_status IS
+'Embedding coverage and queue backlog for the registered vectorizers, '
+'optionally narrowed to one source table or one source column. Scans the '
+'chunk and source tables, so it costs considerably more than the queue views';
+
+CREATE VIEW pgedge_vectorizer.vectorizer_status AS
+SELECT * FROM pgedge_vectorizer.vectorizer_status(NULL, NULL);
+
+COMMENT ON VIEW pgedge_vectorizer.vectorizer_status IS
+'Embedding coverage and queue backlog for every registered vectorizer';
+
+---------------------------------------------------------------------------
+-- Redefine the TRUNCATE trigger function for the same identifier reason
+--
+-- It looked up the BM25 statistics table without quoting, so for a
+-- schema-qualified source the dot in the generated name was read as
+-- qualification, the lookup came back NULL and truncating the source left
+-- the corpus statistics behind for chunks that no longer existed. The
+-- trigger itself is unchanged, so only the function needs replacing.
+---------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION pgedge_vectorizer.vectorization_truncate_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    chunk_table TEXT;
+BEGIN
+    chunk_table := TG_ARGV[0];
+
+    EXECUTE format(
+        'DELETE FROM pgedge_vectorizer.queue
+          WHERE chunk_table = %L AND status IN (''pending'', ''failed'')',
+        chunk_table);
+
+    EXECUTE format('TRUNCATE TABLE %I', chunk_table);
+
+    /*
+     * Both names are single identifiers, generated from the source table and
+     * column and created with %I, so a schema-qualified source leaves a dot
+     * inside the identifier. quote_ident() stops to_regclass() reading that
+     * dot as qualification and returning NULL for a table that is there.
+     */
+    IF to_regclass(quote_ident(chunk_table || '_idf_stats')) IS NOT NULL THEN
+        EXECUTE format('TRUNCATE TABLE %I', chunk_table || '_idf_stats');
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION pgedge_vectorizer.vectorization_truncate_trigger IS
+'Statement-level AFTER TRUNCATE trigger emptying the chunk table, its queue entries and its BM25 statistics';

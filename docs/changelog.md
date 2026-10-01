@@ -21,10 +21,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   particular chunk table does need bringing into line, `recreate_chunks()` on
   it rewrites every row through the new path.
 
+- Generated chunk table names are now quoted before they are looked up. The
+  name is built as `source_table || column || '_chunks'` and the table is
+  created with `%I`, so for a source table in a schema the dot ends up inside
+  a single identifier rather than separating a schema from a relation.
+  `to_regclass()` was reading that dot as qualification, which made
+  `recreate_chunks()` raise as though the chunk table had never been created,
+  and left the BM25 statistics behind when the source was truncated.
+
 ### Added
 
 - `pgedge_vectorizer.count_tokens(text)`, which exposes the chunking engine's
   token estimate so you can see why a piece of text chunked the way it did.
+- `pgedge_vectorizer.vectorizer_status`, a view reporting embedding coverage
+  and queue backlog for each registered vectorizer, so you can tell how far
+  behind the embeddings are before trusting a search over them, and spot a
+  worker that has stalled ([#25](https://github.com/pgEdge/pgedge-vectorizer/issues/25)).
+  A function of the same name narrows the result to a single source table or
+  column. The counts scan the chunk and source tables, so this is a diagnostic
+  to run deliberately rather than something to poll.
 
 ## [1.1] - 2026-08-28
 

@@ -159,3 +159,43 @@ SELECT octet_length(pgedge_vectorizer.cleanup_trigger_name(
 SELECT pgedge_vectorizer.cleanup_trigger_name(
            'dt_docs', 'body', '_vectorization_delete_trigger')
            AS ascii_name_unchanged;
+
+---------------------------------------------------------------------------
+-- TRUNCATE on a schema-qualified source table
+--
+-- The chunk table and its BM25 statistics table are generated names created
+-- with %I, so for a schema-qualified source the dot sits inside a single
+-- identifier. The truncate trigger has to quote them before looking them up,
+-- or the statistics survive a truncate that emptied every chunk they
+-- describe.
+---------------------------------------------------------------------------
+
+CREATE SCHEMA dt_schema;
+
+CREATE TABLE dt_schema.qualified (
+    id   SERIAL PRIMARY KEY,
+    body TEXT
+);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'dt_schema.qualified'::regclass, 'body', 'token_based', 100, 10, 1536);
+
+INSERT INTO dt_schema.qualified (body)
+VALUES ('A document in a table that is not on the search path.');
+
+-- Stand in for the worker, which does not run in a regression database.
+INSERT INTO "dt_schema.qualified_body_chunks_idf_stats" (term, doc_freq)
+VALUES ('document', 1);
+
+TRUNCATE dt_schema.qualified;
+
+SELECT (SELECT count(*) FROM "dt_schema.qualified_body_chunks")
+           AS chunks_after_truncate,
+       (SELECT count(*) FROM "dt_schema.qualified_body_chunks_idf_stats")
+           AS idf_stats_after_truncate;
+
+SELECT pgedge_vectorizer.disable_vectorization(
+           'dt_schema.qualified'::regclass, 'body', true);
+DROP SCHEMA dt_schema CASCADE;
+DELETE FROM pgedge_vectorizer.queue
+ WHERE chunk_table = 'dt_schema.qualified_body_chunks';
