@@ -34,6 +34,13 @@ counts survive untouched.
   smaller size from providers that support shortening.
 - Pin the model rather than inheriting it wherever the embeddings matter, since
   an inheriting vectorizer follows `pgedge_vectorizer.model` with no guard.
+- Treat a change to `pgedge_vectorizer.model` as a data migration rather than a
+  configuration change, because for every inheriting vectorizer that is what it
+  is. The sequence is: change the setting, run `embedding_model_status()` to see
+  which tables are now a mixture, and `reembed()` each of them, having budgeted
+  for embedding all of it again. Until that is done those tables hold vectors
+  from two models, and similarity between them is noise, so the affected rows
+  are effectively invisible to search rather than merely out of date.
 
 **Performance**
 

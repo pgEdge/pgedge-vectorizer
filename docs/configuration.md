@@ -97,6 +97,57 @@ is not limited to changes of dimension.
     setting existed. Pin the model on any vectorizer whose embeddings
     matter.
 
+    Where it has already happened, it is at least visible and repairable:
+    `embedding_model_status()` reports what each chunk table is a mixture
+    of, and `reembed()` redoes the chunks that are not current. See
+    [Seeing what a table was embedded with](#seeing-what-a-table-was-embedded-with).
+
+### Seeing what a table was embedded with
+
+Every chunk records the provider and model that produced its vector, so a
+disagreement between that and what the vectorizer would use now is visible
+rather than something you discover through poor search results:
+
+```sql
+SELECT * FROM pgedge_vectorizer.embedding_model_status('articles'::regclass);
+```
+
+```
+source_table         | articles
+source_column        | body
+effective_provider   | openai
+effective_model      | text-embedding-3-large
+chunks_embedded      | 12043
+chunks_current       | 9945
+chunks_other_model   | 2098
+chunks_model_unknown | 0
+embedded_models      | {openai/text-embedding-3-large,openai/text-embedding-3-small}
+```
+
+`chunks_other_model` is the count that matters: those rows hold vectors from a
+different model, and similarity between two models' vectors is meaningless, so
+they are effectively invisible to search rather than merely stale.
+`chunks_model_unknown` counts rows embedded before this was recorded, which is
+every row on an installation that has just upgraded; they may well be current,
+so they are reported separately rather than assumed wrong.
+
+To repair it:
+
+```sql
+SELECT pgedge_vectorizer.reembed('articles'::regclass, 'body');
+```
+
+That clears and requeues everything not known to have come from the provider
+and model the vectorizer would use now, which includes the unknown rows, since
+a row that cannot be shown to be current is one that needs doing again. Rows
+that are already current are left alone, unless the new model is a different
+width, in which case the column has to be altered and every chunk goes with it.
+Chunks, token counts, sparse embeddings and the BM25 statistics are untouched
+throughout, because none of them depends on the embedding model.
+
+Both functions scan the chunk table, so give them a source table rather than
+running them across every vectorizer out of habit.
+
 ## Worker Settings
 
 These settings control the background workers that process the embedding queue, including concurrency, batch sizes, and retry behavior.

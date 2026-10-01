@@ -58,6 +58,20 @@ $node->safe_psql('upgraded',
 	q(SELECT pgedge_vectorizer.enable_vectorization('docs', 'body',
 													'token_based', 100, 10, 1536)));
 
+# A second vectorizer whose chunk table ends up in a schema the upgrade will
+# not have on its search_path. The migration adds the provenance columns to
+# the chunk tables the registry knows about, and the registry stores only a
+# bare name, so resolving that name through the search_path would silently
+# miss this one and leave the worker failing every embedding write against it.
+$node->safe_psql('upgraded', q(
+CREATE SCHEMA tucked_away;
+SET search_path = tucked_away, public;
+CREATE TABLE tucked_away.notes (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO tucked_away.notes (body) VALUES ('Out of the way.');
+SELECT pgedge_vectorizer.enable_vectorization('tucked_away.notes', 'body',
+											  'token_based', 100, 10, 1536);
+));
+
 $node->safe_psql('upgraded',
 	"ALTER EXTENSION pgedge_vectorizer UPDATE TO '1.2'");
 
@@ -113,17 +127,51 @@ is($node->safe_psql('upgraded', $views),
 	$node->safe_psql('fresh', $views),
 	'an upgraded install has the same views as a fresh one');
 
+# Chunk tables too, which is a separate trap: enable_vectorization() adds
+# columns to a chunk table it finds without them, but nothing re-runs it on
+# upgrade, so anything the worker writes has to be added by the upgrade script
+# itself. Compare a chunk table created at 1.1 and upgraded against one created
+# fresh at 1.2.
+$node->safe_psql('fresh', q(
+CREATE TABLE docs (id BIGSERIAL PRIMARY KEY, body TEXT);
+INSERT INTO docs (body) VALUES ('Written on a fresh 1.2 install.');
+));
+$node->safe_psql('fresh',
+	q(SELECT pgedge_vectorizer.enable_vectorization('docs', 'body',
+													'token_based', 100, 10, 1536)));
+
+my $chunk_columns = q(
+	SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod),
+					  E'\n' ORDER BY a.attname)
+	  FROM pg_attribute a
+	 WHERE a.attrelid = 'docs_body_chunks'::regclass
+	   AND a.attnum > 0
+	   AND NOT a.attisdropped
+);
+
+is($node->safe_psql('upgraded', $chunk_columns),
+	$node->safe_psql('fresh', $chunk_columns),
+	'an upgraded chunk table has the same columns as a freshly created one');
+
 # The data that was there before the upgrade is still there, and the new
 # columns default to inheriting.
 is($node->safe_psql('upgraded',
 		q(SELECT source_table || ' ' || COALESCE(provider, 'NULL') || ' ' ||
 				 COALESCE(model, 'NULL')
-			FROM pgedge_vectorizer.vectorizers)),
+			FROM pgedge_vectorizer.vectorizers
+		   WHERE source_table = 'docs')),
 	'docs NULL NULL',
 	'a vectorizer registered before the upgrade survives it, inheriting');
 
 is($node->safe_psql('upgraded', 'SELECT count(*) FROM docs_body_chunks'),
 	'1', 'the chunks written before the upgrade survive it');
+
+is($node->safe_psql('upgraded', q(
+	SELECT count(*) FROM pg_attribute
+	 WHERE attrelid = 'tucked_away.notes_body_chunks'::regclass
+	   AND attname IN ('embedding_provider', 'embedding_model'))),
+	'2',
+	'the upgrade reaches a chunk table outside its own search_path');
 
 $node->stop;
 
