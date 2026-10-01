@@ -28,8 +28,9 @@
 # cooling filter is in SQL to avoid, one step further along, and it is the
 # shape a real deployment lands in, since enable_vectorization() on a typo'd
 # provider queues the whole table at once. The provider is therefore held off
-# as a rate limited one is, and the second half of this test queues a backlog
-# longer than a claim to prove it.
+# as a rate limited one is, and the claim after that is taken at once, whilst
+# the hold-off is still in force. The second half of this test queues a backlog
+# longer than a claim to prove both.
 
 use strict;
 use warnings;
@@ -197,27 +198,40 @@ is($broken, $rows, 'correcting the provider is enough to drain the queue');
 # Head-of-line blocking, with a backlog longer than a claim.
 #
 # The pull that meets the backlog cannot also carry the work behind it, since
-# that work is past the claim's limit and was never fetched, so this half is
-# about a later pull reaching it at all rather than about which pull does. The
-# 20 second interval buys nothing here and only makes the test slow, so it is
-# shortened first. The reload that does it also clears any hold-off, which is
-# what an operator correcting a provider relies on, so the run below starts
-# from nothing held.
+# that work is past the claim's limit and was never fetched, so it falls to the
+# next claim, and that claim has to run whilst the provider is still held off.
+# The wait after a pull that attempted nothing is capped by the hold-off, so
+# any claim that waited for it would land just as the hold-off lapsed, take the
+# same oldest rows, hold the provider off again and wait again: the queue moved
+# for nobody, for as long as the backlog lasted. The claim after a hold-off is
+# therefore taken at once.
+#
+# A poll interval at its maximum, which is the length of the hold-off, makes
+# every wait here run to the cap, so this fails on the first cycle rather than
+# only once a backoff has grown past it. It is a database of its own, queued
+# in full before a worker is given it, so that the first pull is the one that
+# meets the backlog and the clock below starts from it.
+my $dbname2 = 'unavailable_backlog';
+
 $node->append_conf('postgresql.conf',
-	"pgedge_vectorizer.worker_poll_interval = 4000\n");
+	"pgedge_vectorizer.worker_poll_interval = 60000\n");
 $node->reload;
 
-$node->safe_psql($dbname,
+$node->safe_psql('postgres', "CREATE DATABASE $dbname2");
+$node->safe_psql($dbname2, 'CREATE EXTENSION vector');
+$node->safe_psql($dbname2, 'CREATE EXTENSION pgedge_vectorizer');
+
+$node->safe_psql($dbname2,
 	'CREATE TABLE swamped (id BIGSERIAL PRIMARY KEY, body TEXT)');
-$node->safe_psql($dbname,
+$node->safe_psql($dbname2,
 	'CREATE TABLE behind (id BIGSERIAL PRIMARY KEY, body TEXT)');
 
-$node->safe_psql($dbname,
+$node->safe_psql($dbname2,
 	q(SELECT pgedge_vectorizer.enable_vectorization('swamped', 'body',
 													embedding_dimension => 3,
 													provider => 'still_no_such_provider',
 													model => 'whatever')));
-$node->safe_psql($dbname,
+$node->safe_psql($dbname2,
 	q(SELECT pgedge_vectorizer.enable_vectorization('behind', 'body',
 													embedding_dimension => 3,
 													provider => 'voyage',
@@ -227,22 +241,28 @@ $node->safe_psql($dbname,
 # work, so that a claim taking the oldest 25 rows can hold nothing else.
 my $backlog = 30;
 
-$node->safe_psql($dbname, qq(
+$node->safe_psql($dbname2, qq(
 INSERT INTO swamped (body)
 	SELECT 'swamped chunk ' || g FROM generate_series(1, $backlog) g;
 ));
 
-$node->safe_psql($dbname, qq(
+$node->safe_psql($dbname2, qq(
 INSERT INTO behind (body)
 	SELECT 'behind chunk ' || g FROM generate_series(1, $rows) g;
 ));
 
-$deadline = time() + 60;
+$node->append_conf('postgresql.conf',
+	"pgedge_vectorizer.databases = '$dbname,$dbname2'\n");
+$node->reload;
+
+# A quarter of the hold-off: a pass means the claim after it ran whilst the
+# provider was still filtered out, rather than at or after its expiry.
+$deadline = time() + 15;
 my $behind = 0;
 
 while (time() < $deadline)
 {
-	$behind = $node->safe_psql($dbname,
+	$behind = $node->safe_psql($dbname2,
 		"SELECT count(*) FROM pgedge_vectorizer.queue
 		  WHERE chunk_table = 'behind_body_chunks' AND status = 'completed'");
 
@@ -256,7 +276,7 @@ is($behind, $rows,
 
 # And the backlog itself is still where it was, none of it charged: being
 # skipped repeatedly must not cost an item anything either.
-is($node->safe_psql($dbname,
+is($node->safe_psql($dbname2,
 		q(SELECT count(*) || ' ' || COALESCE(max(attempts), 0) || ' ' ||
 				 COALESCE(string_agg(DISTINCT status, ','), '')
 			FROM pgedge_vectorizer.queue

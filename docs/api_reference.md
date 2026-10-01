@@ -187,13 +187,13 @@ SELECT pgedge_vectorizer.set_embedding_model(
 - `model`: Model to use. NULL means inherit `pgedge_vectorizer.model`.
 - `provider`: Provider to use. NULL means inherit `pgedge_vectorizer.provider`.
 - `embedding_dimension`: Dimension of the new model. When NULL (the default), the new provider and model are probed for it, which is a real request. The chunk table's vector column is altered to match whether or not the vectorizer has any chunks yet, since a column left at the old width would fail every embedding written afterwards.
-- `force_reembed`: Whether to clear the existing embeddings and requeue every chunk. Required to change a vectorizer that has any chunks.
+- `force_reembed`: Whether to clear the existing embeddings and requeue every chunk. Required to change the effective model of a vectorizer that has any embedded chunks.
 
 Returns: `BIGINT` - The number of chunks requeued, which is zero unless the re-embed ran
 
 Both columns are written to exactly what you pass, NULL included, so this is also how a vectorizer goes back to inheriting the GUCs. Where the effective provider and model do not actually change, nothing is requeued.
 
-Changing a vectorizer that has chunks raises an error unless `force_reembed` is true. With it, every `embedding` is set to NULL, the column's dimension is altered if the new model differs, the vectorizer's queue rows are cleared and every chunk is requeued, all in one transaction. Chunk rows, their token counts, their sparse embeddings and the BM25 statistics are left alone, because none of them depends on the embedding model.
+Changing the effective model of a vectorizer that has embedded chunks raises an error unless `force_reembed` is true. Chunks that have no embedding yet do not count, since they have no vector for the new model's to be compared with. With it, every `embedding` is set to NULL, the column's dimension is altered if the new model differs, the vectorizer's queue rows are cleared and every chunk is requeued, all in one transaction. Chunk rows, their token counts, their sparse embeddings and the BM25 statistics are left alone, because none of them depends on the embedding model.
 
 The refusal triggers on the model changing rather than on the dimension changing. See [Best Practices](best_practices.md) for why, and for what a re-embed costs.
 
@@ -575,12 +575,15 @@ considerably more than the queue views above. If the chunk or source table has
 been dropped, or the caller cannot read it, the corresponding columns are
 `NULL` rather than the query failing.
 
-The function form of the same name narrows the result to one source table, and
-optionally to one column of it:
+The function form of the same name optionally narrows the result to one source
+table, to one column name, or to both:
 
 ```sql
 SELECT * FROM pgedge_vectorizer.vectorizer_status(
-    source_table  REGCLASS DEFAULT NULL,
-    source_column NAME DEFAULT NULL
+    p_source_table  REGCLASS DEFAULT NULL,
+    p_source_column NAME DEFAULT NULL
 );
 ```
+
+The parameters carry the `p_` prefix because the function returns columns of
+the same names, which would otherwise be ambiguous.

@@ -257,6 +257,13 @@ provider_cooldown_remaining(void)
  * The wait to take after a pull that attempted nothing: the backoff, floored
  * at the poll interval so that a configuration with a long poll is never made
  * to poll faster by failing, and capped by the hold-off that caused it.
+ *
+ * The cap brings the next claim in just as a hold-off lapses, which is the
+ * one moment the provider is eligible again, so that claim can take the same
+ * unusable backlog. That is safe only because a pull which holds a provider
+ * off is followed by another claim at once, while the filter is still in
+ * force: see the main loop. Without that, every claim would land at an
+ * expiry and nothing behind the backlog would ever be reached.
  */
 static int
 batch_retry_wait(int interval)
@@ -421,7 +428,7 @@ static void queue_item_begin(int64 queue_id, int attempts, int max_attempts);
 static void queue_item_done(void);
 static void queue_item_note_error(void);
 static bool queue_item_record_failure(void);
-static bool process_queue_batch(const char *dbname);
+static bool process_queue_batch(const char *dbname, bool *held_off);
 static void cleanup_completed_items(const char *dbname);
 static void update_embedding(int64 chunk_id, const char *chunk_table,
 							 const float *embedding, int dim,
@@ -1415,6 +1422,18 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 	 */
 	int batch_retry_interval = 0;
 
+	/*
+	 * Set when the last pull held a provider off, so that the next claim runs
+	 * at once with that provider filtered out rather than after a wait that
+	 * may outlast the hold-off. Waiting would let the claim land after the
+	 * hold-off had lapsed and take the same unusable rows again, so a backlog
+	 * longer than batch_size would starve everything behind it. It cannot
+	 * spin: a provider being held off is excluded from the claim, so each
+	 * immediate claim needs a provider that was not already held off, and
+	 * there are only so many of those.
+	 */
+	volatile bool reclaim_now = false;
+
 	/* Setup signal handlers */
 	pqsignal(SIGTERM, worker_sigterm);
 	pqsignal(SIGHUP, worker_sighup);
@@ -1529,10 +1548,14 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		 * Use a longer wait if the extension is not installed, or if the last
 		 * batch failed for a reason no single item can be charged for. The
 		 * backoff is floored at the poll interval, and capped by any hold-off
-		 * in force: see batch_retry_wait().
+		 * in force: see batch_retry_wait(). A pull that has just held a
+		 * provider off is followed by another claim at once, since the claim
+		 * has changed and the work behind that provider is now reachable.
 		 */
 		if (!extension_exists)
 			wait_time = ext_retry_interval;
+		else if (reclaim_now)
+			wait_time = 0;
 		else if (batch_retry_interval > 0)
 			wait_time = batch_retry_wait(batch_retry_interval);
 		else
@@ -1595,14 +1618,27 @@ pgedge_vectorizer_worker_main(Datum main_arg)
 		/* Process pending queue items */
 		pgstat_report_activity(STATE_RUNNING, "processing embedding queue");
 
+		reclaim_now = false;
+
 		PG_TRY();
 		{
-			bool		attempted = process_queue_batch(dbname);
+			bool		held_off = false;
+			bool		attempted = process_queue_batch(dbname, &held_off);
 
 			/* Perform automatic cleanup if enabled */
 			cleanup_completed_items(dbname);
 
-			if (attempted)
+			if (held_off)
+			{
+				/*
+				 * Whatever this pull managed, the claim has changed, so look
+				 * again now. The backoff is left as it is for that claim to
+				 * settle: it clears if the work behind the held off provider
+				 * can be attempted, and grows if it cannot.
+				 */
+				reclaim_now = true;
+			}
+			else if (attempted)
 			{
 				/*
 				 * A batch that got through clears any backoff: whatever was
@@ -1791,14 +1827,15 @@ batch_extent(int start, int n_items, const int *attempts,
  * Process a batch of queue items
  *
  * Returns false when the pull found work but no request could be attempted,
- * which is the caller's cue to back off. Every other outcome, an empty queue
+ * which is the caller's cue to back off. *held_off is set when the pull put a
+ * provider on hold, which is the caller's cue to claim again at once instead. Every other outcome, an empty queue
  * included, returns true. This exists because a provider that cannot be
  * resolved no longer raises: the backoff used to be reachable only through
  * the exception path, and a database whose only provider is mistyped would
  * otherwise poll flat out for ever.
  */
 static bool
-process_queue_batch(const char *dbname)
+process_queue_batch(const char *dbname, bool *held_off)
 {
 	int ret;
 	bool attempted = false;
@@ -2157,6 +2194,7 @@ process_queue_batch(const char *dbname)
 						cooldown = provider_begin_cooldown(
 							providers[batch_start],
 							UNAVAILABLE_PROVIDER_COOLDOWN_SECONDS);
+						*held_off = true;
 
 						elog(WARNING, "pgedge_vectorizer worker for database "
 							 "\"%s\": provider \"%s\" for %s is unavailable, "
@@ -2483,6 +2521,7 @@ process_queue_batch(const char *dbname)
 
 					cooldown = provider_begin_cooldown(providers[batch_start],
 													   ratelimit->retry_after);
+					*held_off = true;
 
 					elog(LOG, "pgedge_vectorizer worker for database \"%s\": "
 						 "provider rate limited (HTTP %ld), deferring %d queue "
