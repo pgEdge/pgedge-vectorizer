@@ -1490,7 +1490,13 @@ DECLARE
     src_pk_type TEXT;
     pk_count    INT;
     refreshed   INT;
+    hybrid_on   BOOLEAN;
 BEGIN
+    hybrid_on := COALESCE(
+        current_setting('pgedge_vectorizer.enable_hybrid', true),
+        'false'
+    )::BOOLEAN;
+
     -- Populate vectorizers from existing vectorization triggers
     FOR rec IN
         SELECT c.oid::regclass::text AS source_table,
@@ -1564,12 +1570,17 @@ BEGIN
 
         -- Enqueue existing chunks that have a dense embedding but no sparse
         -- embedding yet so the worker can backfill BM25 scores for them.
-        EXECUTE format(
-            'INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, metadata, max_attempts)'
-            ' SELECT id, %L, content, jsonb_build_object(''sparse_only'', true),'
-            '        current_setting(''pgedge_vectorizer.max_retries'')::int FROM %I'
-            ' WHERE embedding IS NOT NULL AND sparse_embedding IS NULL',
-            chk_tbl, chk_tbl);
+        -- Only when hybrid search is on, as reprocess_chunks() does: with it
+        -- off the worker has nothing to compute for these items, and
+        -- reprocess_chunks() backfills them if hybrid is enabled later.
+        IF hybrid_on THEN
+            EXECUTE format(
+                'INSERT INTO pgedge_vectorizer.queue (chunk_id, chunk_table, content, metadata, max_attempts)'
+                ' SELECT id, %L, content, jsonb_build_object(''sparse_only'', true),'
+                '        current_setting(''pgedge_vectorizer.max_retries'')::int FROM %I'
+                ' WHERE embedding IS NOT NULL AND sparse_embedding IS NULL',
+                chk_tbl, chk_tbl);
+        END IF;
     END LOOP;
 
     -- Any vectorizer whose primary key is still unknown, for example a registry

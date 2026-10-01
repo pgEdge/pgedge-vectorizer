@@ -1823,7 +1823,20 @@ process_queue_batch(const char *dbname)
 					if (!sparse_only[idx])
 						update_embedding(chunk_ids[idx], chunk_tables[idx], embeddings[i], dim);
 					else if (!pgedge_vectorizer_enable_hybrid)
-						elog(ERROR, "cannot process sparse-only queue item while pgedge_vectorizer.enable_hybrid is disabled");
+					{
+						/*
+						 * The dense embedding is already in place and there
+						 * is no sparse one to compute, so the item has
+						 * nothing left to do and is completed as it stands.
+						 * Raising instead would fail it on every attempt,
+						 * filling the log until max_attempts is reached.
+						 * reprocess_chunks() queues the sparse work again if
+						 * hybrid search is enabled later.
+						 */
+						elog(DEBUG1, "Worker for database \"%s\": skipping sparse-only "
+							 "queue item %ld because pgedge_vectorizer.enable_hybrid "
+							 "is disabled", dbname, queue_ids[idx]);
+					}
 
 					/*
 					 * BM25 sparse vector update (opt-in via
