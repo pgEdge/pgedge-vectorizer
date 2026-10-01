@@ -144,6 +144,9 @@ DECLARE
     actual_chunk_overlap INT;
     pk_col_type TEXT;
     pk_count INT;
+    prev_provider TEXT;
+    prev_model TEXT;
+    prev_found BOOLEAN;
 BEGIN
     -- Use defaults from GUC if not provided
     actual_strategy := COALESCE(chunk_strategy,
@@ -152,6 +155,55 @@ BEGIN
         current_setting('pgedge_vectorizer.default_chunk_size')::INT);
     actual_chunk_overlap := COALESCE(chunk_overlap,
         current_setting('pgedge_vectorizer.default_chunk_overlap')::INT);
+
+    /*
+     * A repeated call must not move the model out from under embeddings that
+     * already exist. set_embedding_model() is the only thing that changes a
+     * vectorizer's provider or model, because it is the only thing that also
+     * clears the embeddings, rewidens the column and requeues the chunks.
+     * Changing them here would leave the old vectors in place beside new ones
+     * from a different model, and similarity between two models' vectors is
+     * noise, so search would degrade quietly rather than fail; where the two
+     * widths match, as they do between text-embedding-3-small and
+     * text-embedding-ada-002, nothing downstream catches it either.
+     *
+     * Effective values are compared rather than stored ones, so naming the
+     * provider the vectorizer already resolves to is free, exactly as
+     * set_embedding_model() treats it. A NULL or empty argument names nothing
+     * and is left to the upsert below, which keeps whatever is stored.
+     */
+    SELECT r.provider, r.model INTO prev_provider, prev_model
+      FROM pgedge_vectorizer.vectorizers r
+     WHERE r.source_table = enable_vectorization.source_table::TEXT
+       AND r.source_column = enable_vectorization.source_column;
+
+    prev_found := FOUND;
+
+    IF prev_found AND (
+           (NULLIF(enable_vectorization.provider, '') IS NOT NULL
+            AND COALESCE(NULLIF(prev_provider, ''),
+                         current_setting('pgedge_vectorizer.provider'))
+                IS DISTINCT FROM enable_vectorization.provider)
+        OR (NULLIF(enable_vectorization.model, '') IS NOT NULL
+            AND COALESCE(NULLIF(prev_model, ''),
+                         current_setting('pgedge_vectorizer.model'))
+                IS DISTINCT FROM enable_vectorization.model))
+    THEN
+        RAISE EXCEPTION
+            'vectorizer for %.% already embeds with %/% and cannot be '
+            'repointed here',
+            enable_vectorization.source_table::TEXT,
+            enable_vectorization.source_column,
+            COALESCE(NULLIF(prev_provider, ''),
+                     current_setting('pgedge_vectorizer.provider')),
+            COALESCE(NULLIF(prev_model, ''),
+                     current_setting('pgedge_vectorizer.model'))
+        USING HINT = 'Use pgedge_vectorizer.set_embedding_model() to change '
+                     'the provider or model. It clears the embeddings and '
+                     'requeues the chunks, which this function does not, so '
+                     'changing them here would leave vectors from two models '
+                     'side by side.';
+    END IF;
 
     -- Auto-detect embedding dimension from configured model if not specified
     IF embedding_dimension IS NULL THEN
@@ -296,8 +348,10 @@ BEGIN
          DO UPDATE SET chunk_table = EXCLUDED.chunk_table,
                        source_pk   = EXCLUDED.source_pk,
                        pk_type     = EXCLUDED.pk_type,
-                       provider    = EXCLUDED.provider,
-                       model       = EXCLUDED.model'
+                       provider    = COALESCE(NULLIF(EXCLUDED.provider, ''''),
+                                              vectorizers.provider),
+                       model       = COALESCE(NULLIF(EXCLUDED.model, ''''),
+                                              vectorizers.model)'
     USING source_table::TEXT, source_column, chunk_table, source_pk, pk_col_type,
           enable_vectorization.provider, enable_vectorization.model;
 
@@ -451,7 +505,11 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION pgedge_vectorizer.enable_vectorization IS
-'Enable automatic chunking and vectorization for a table column';
+'Enable automatic chunking and vectorization for a table column. On a repeated '
+'call a NULL or empty provider or model leaves whatever is already registered '
+'alone, and naming one that differs from the vectorizer''s effective provider '
+'or model raises: use set_embedding_model() to change those, since it also '
+'clears the embeddings and requeues the chunks';
 
 CREATE OR REPLACE FUNCTION pgedge_vectorizer.vectorization_trigger()
 RETURNS TRIGGER AS $$

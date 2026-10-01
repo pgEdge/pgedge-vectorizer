@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `enable_vectorization()` no longer moves a vectorizer's embedding model
+  ([#81](https://github.com/pgEdge/pgedge-vectorizer/issues/81)). Calling it
+  again on a table that already has a vectorizer, to change the chunking say,
+  overwrote the registered `provider` and `model` with whatever the call
+  passed, so omitting them reverted a pinned vectorizer to the GUCs whilst
+  leaving the vectors the old model had already written in place. Similarity
+  between two models' vectors is noise rather than an error, and where the
+  widths happen to match, as they do between `text-embedding-3-small` and
+  `text-embedding-ada-002`, nothing downstream catches it either, so search
+  quietly degraded. A NULL or empty `provider` or `model` now leaves whatever
+  is registered alone, and naming one that differs from the vectorizer's
+  effective provider or model raises, pointing at `set_embedding_model()`,
+  which is the only thing that also clears the embeddings and requeues the
+  chunks. Naming the values it already resolves to is unaffected.
+
 - The `token_count` recorded for each chunk is now computed the same way
   everywhere. The chunking code in C rounds its four-characters-per-token
   estimate up, whilst the plpgsql paths that actually write the column
