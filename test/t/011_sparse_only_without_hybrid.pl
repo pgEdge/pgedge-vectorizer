@@ -10,8 +10,9 @@
 # install, once with hybrid off and once with it on, and the worker is then
 # handed a sparse_only item with hybrid off and must complete it quietly.
 #
-# The provider is set to ollama, the one provider whose init needs no API key,
-# because the worker resolves and initialises it before reaching the item.
+# The provider is set to openai with no API key file, so it cannot be
+# initialised. A sparse-only item needs no provider, so that must not stop the
+# worker completing one.
 
 use strict;
 use warnings;
@@ -28,7 +29,7 @@ $node->append_conf(
 shared_preload_libraries = 'pgedge_vectorizer'
 pgedge_vectorizer.worker_poll_interval = 200
 pgedge_vectorizer.batch_size = 1
-pgedge_vectorizer.provider = 'ollama'
+pgedge_vectorizer.provider = 'openai'
 pgedge_vectorizer.enable_hybrid = false
 max_worker_processes = 16
 ));
