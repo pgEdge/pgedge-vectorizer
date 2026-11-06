@@ -20,6 +20,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   stored with, since the values are an approximation either way; where a
   particular chunk table does need bringing into line, `recreate_chunks()` on
   it rewrites every row through the new path.
+- Upgrading from 1.0 with `pgedge_vectorizer.enable_hybrid` off no longer
+  queues a sparse backfill item for every existing chunk, and the worker no
+  longer raises an error for a sparse-only queue item while hybrid search is
+  off; it completes the item instead, since the chunk already has its dense
+  embedding and there is no sparse one to compute. Previously each such item
+  failed on every attempt until it reached `max_retries`, which on a large
+  database filled the log for days. Items an earlier upgrade has already
+  queued are completed once the new worker reaches them, whilst any that had
+  already run out of attempts stay `failed` and can be removed with
+  `DELETE FROM pgedge_vectorizer.queue WHERE status = 'failed' AND
+  metadata->>'sparse_only' = 'true';`. If hybrid search is enabled later,
+  `reprocess_chunks()` queues the sparse backfill.
 
 ### Added
 

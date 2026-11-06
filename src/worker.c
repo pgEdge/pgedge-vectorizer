@@ -1590,6 +1590,7 @@ process_queue_batch(const char *dbname)
 		int batch_count = 0;
 		bool has_retries = false;
 		bool has_sparse_only = false;
+		bool needs_provider = false;
 
 		elog(DEBUG1, "Worker for database \"%s\" processing %d queue items",
 			 dbname, n_items);
@@ -1656,6 +1657,8 @@ process_queue_batch(const char *dbname)
 
 			if (sparse_only[i])
 				has_sparse_only = true;
+			else
+				needs_provider = true;
 		}
 
 		/*
@@ -1688,18 +1691,25 @@ process_queue_batch(const char *dbname)
 				false, 0);
 		}
 
-		/* Get the provider */
-		provider = get_current_provider();
-		if (provider == NULL)
+		/*
+		 * Resolve the provider only when some item needs a dense embedding.
+		 * A pull of sparse-only items never calls it, so a missing or broken
+		 * provider must not fail work that can complete without one.
+		 */
+		if (needs_provider)
 		{
-			elog(ERROR, "No provider configured");
-		}
+			provider = get_current_provider();
+			if (provider == NULL)
+			{
+				elog(ERROR, "No provider configured");
+			}
 
-		/* Initialize provider if needed */
-		if (!provider->init(&error_msg))
-		{
-			elog(ERROR, "Failed to initialize provider: %s",
-				 error_msg ? error_msg : "unknown error");
+			/* Initialize provider if needed */
+			if (!provider->init(&error_msg))
+			{
+				elog(ERROR, "Failed to initialize provider: %s",
+					 error_msg ? error_msg : "unknown error");
+			}
 		}
 
 		/* Process items in requests as large as batch_extent() allows */
@@ -1823,7 +1833,20 @@ process_queue_batch(const char *dbname)
 					if (!sparse_only[idx])
 						update_embedding(chunk_ids[idx], chunk_tables[idx], embeddings[i], dim);
 					else if (!pgedge_vectorizer_enable_hybrid)
-						elog(ERROR, "cannot process sparse-only queue item while pgedge_vectorizer.enable_hybrid is disabled");
+					{
+						/*
+						 * The dense embedding is already in place and there
+						 * is no sparse one to compute, so the item has
+						 * nothing left to do and is completed as it stands.
+						 * Raising instead would fail it on every attempt,
+						 * filling the log until max_attempts is reached.
+						 * reprocess_chunks() queues the sparse work again if
+						 * hybrid search is enabled later.
+						 */
+						elog(DEBUG1, "Worker for database \"%s\": skipping sparse-only "
+							 "queue item %ld because pgedge_vectorizer.enable_hybrid "
+							 "is disabled", dbname, queue_ids[idx]);
+					}
 
 					/*
 					 * BM25 sparse vector update (opt-in via
