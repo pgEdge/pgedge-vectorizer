@@ -58,3 +58,35 @@ WHERE chunk_table = 'maint_test_content_chunks';
 DELETE FROM pgedge_vectorizer.queue WHERE chunk_table = 'maint_test_content_chunks';
 SELECT pgedge_vectorizer.disable_vectorization('maint_test'::regclass, 'content', true);
 DROP TABLE maint_test;
+
+---------------------------------------------------------------------------
+-- recreate_chunks() on a schema-qualified source table
+--
+-- The chunk table's name is generated as source_table || column || '_chunks'
+-- and created with %I, so here it is the single identifier
+-- 'maint_schema.qualified_body_chunks' rather than a relation in a schema.
+-- Looking that up unquoted finds nothing and raises as though the table had
+-- never been created.
+---------------------------------------------------------------------------
+
+CREATE SCHEMA maint_schema;
+
+CREATE TABLE maint_schema.qualified (
+    id   SERIAL PRIMARY KEY,
+    body TEXT
+);
+
+SELECT pgedge_vectorizer.enable_vectorization(
+    'maint_schema.qualified'::regclass, 'body', 'token_based', 100, 10, 1536);
+
+INSERT INTO maint_schema.qualified (body)
+VALUES ('A document in a table that is not on the search path.');
+
+SELECT pgedge_vectorizer.recreate_chunks(
+           'maint_schema.qualified'::regclass, 'body') > 0 AS qualified_recreated;
+
+SELECT pgedge_vectorizer.disable_vectorization(
+           'maint_schema.qualified'::regclass, 'body', true);
+DROP SCHEMA maint_schema CASCADE;
+DELETE FROM pgedge_vectorizer.queue
+ WHERE chunk_table = 'maint_schema.qualified_body_chunks';

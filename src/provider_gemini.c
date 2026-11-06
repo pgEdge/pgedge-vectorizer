@@ -28,8 +28,10 @@ static bool provider_initialized = false;
  */
 static bool gemini_init(char **error_msg);
 static void gemini_cleanup(void);
-static float *gemini_generate(const char *text, int *dim, char **error_msg);
-static float **gemini_generate_batch(const char **texts, int count, int *dim,
+static float *gemini_generate(const char *text, const char *model,
+				 int *dim, char **error_msg);
+static float **gemini_generate_batch(const char **texts, int count,
+									   const char *model, int *dim,
 									 char **error_msg);
 
 /* Gemini-specific response parser */
@@ -98,13 +100,14 @@ gemini_cleanup(void)
  * Generate a single embedding
  */
 static float *
-gemini_generate(const char *text, int *dim, char **error_msg)
+gemini_generate(const char *text, const char *model,
+				 int *dim, char **error_msg)
 {
 	const char *texts[1] = {text};
 	float **embeddings;
 	float *result;
 
-	embeddings = gemini_generate_batch(texts, 1, dim, error_msg);
+	embeddings = gemini_generate_batch(texts, 1, model, dim, error_msg);
 	if (embeddings == NULL)
 		return NULL;
 
@@ -122,12 +125,15 @@ gemini_generate(const char *text, int *dim, char **error_msg)
  * Response: {"embeddings":[{"values":[0.1,0.2,...]}, ...]}
  */
 static float **
-gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
+gemini_generate_batch(const char **texts, int count, const char *model,
+					  int *dim, char **error_msg)
 {
 	char *json_request;
 	char *url;
+	char *url_model;
 	const char *base_url;
 	char *auth_header;
+	char *escaped_model;
 	StringInfoData request_buf;
 	ResponseBuffer response;
 	float **embeddings;
@@ -141,6 +147,7 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 	/* Build JSON request - Gemini batch format */
 	initStringInfo(&request_buf);
 	appendStringInfo(&request_buf, "{\"requests\":[");
+	escaped_model = provider_escape_json_string(model);
 	for (int i = 0; i < count; i++)
 	{
 		char *escaped = provider_escape_json_string(texts[i]);
@@ -149,9 +156,10 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 		appendStringInfo(&request_buf,
 						 "{\"model\":\"models/%s\","
 						 "\"content\":{\"parts\":[{\"text\":\"%s\"}]}}",
-						 pgedge_vectorizer_model, escaped);
+						 escaped_model, escaped);
 		pfree(escaped);
 	}
+	pfree(escaped_model);
 	appendStringInfo(&request_buf, "]}");
 	json_request = request_buf.data;
 
@@ -160,8 +168,14 @@ gemini_generate_batch(const char **texts, int count, int *dim, char **error_msg)
 				pgedge_vectorizer_api_url[0] != '\0')
 		? pgedge_vectorizer_api_url
 		: GEMINI_DEFAULT_BASE_URL;
-	url = psprintf("%s/models/%s:batchEmbedContents", base_url,
-				   pgedge_vectorizer_model);
+	/*
+	 * The model lands in the URL's path, so it is percent-encoded rather than
+	 * pasted in: a '/' or '?' in a model name would otherwise change which
+	 * endpoint the request reaches.
+	 */
+	url_model = provider_url_encode_segment(model);
+	url = psprintf("%s/models/%s:batchEmbedContents", base_url, url_model);
+	pfree(url_model);
 
 	/* Build auth header */
 	auth_header = psprintf("x-goog-api-key: %s", api_key);
